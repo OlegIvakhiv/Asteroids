@@ -1,0 +1,16 @@
+{
+  "name": "asteroids",
+  "version-string": "1.0.0",
+  "dependencies": [
+    "sol2",
+    "lua",
+    "box2d"
+  ],
+  "overrides": [
+    {
+      "name": "lua",
+      "version": "5.4.6"
+    }
+  ],
+  "builtin-baseline": "de51e6bfa96e1245f2a969a8cde249baac89f7be"
+}

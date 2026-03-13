@@ -1,0 +1,49 @@
+Package: vcpkg-cmake-config
+Version: 2024-05-23
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 4dcb4491da63b6d3be9403b654c86ce389f2fb873e6980b913d2cee1bf5d3de9
+Status: install ok installed
+
+Package: vcpkg-cmake
+Version: 2024-04-23
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 648e21a88d231b8f7020ec0245ac735c81bcb2df6d141b48dfe1b3d4dd8bef72
+Status: install ok installed
+
+Package: lua
+Version: 5.4.6
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: ae7fdc66a52b4ef2edb85b412c8e2f5195a4a5cd53ea84cd63d0ae79da9da863
+Description: A powerful, fast, lightweight, embeddable scripting language
+Status: install ok installed
+
+Package: egl-registry
+Version: 2025-05-27
+Architecture: x64-windows
+Multi-Arch: same
+Abi: d2e743827b456b2935034097c7ba28346fa2ffe0d8f92c4fa7e83e52e9f7147c
+Description: EGL API and Extension Registry
+Status: purge ok not-installed
+
+Package: sol2
+Version: 3.5.0
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 4cc172f5e21d17bcc6ee7a9aac77e59dc662a6808cbfb279176b76270bdb3c62
+Description: Sol3 (sol2 v3.0) - a C++ <-> Lua API wrapper with advanced features and top notch performance
+Status: install ok installed
+
+Package: box2d
+Version: 3.1.1
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 4cdb7faf8b35f1595dbc0dffce930ccc041653b0678690ce125ea4af6d861c35
+Description: An open source C++ engine for simulating rigid bodies in 2D
+Status: install ok installed
+

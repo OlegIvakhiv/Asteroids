@@ -1,0 +1,31 @@
+cmake_minimum_required(VERSION 3.10)
+project(SpaceWarsEngine)
+
+# Встановлюємо стандарт C++20 (потрібно для SFML 3.0 та sol2)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# 1. Шукаємо SFML 3.0
+find_package(SFML 3.0 COMPONENTS graphics window system audio REQUIRED)
+
+# 2. Шукаємо Lua
+find_package(Lua REQUIRED)
+
+# 3. Шукаємо sol2 (якщо вона встановлена через vcpkg або лежить в папці)
+find_package(sol2 REQUIRED)
+
+# Додаємо твої папки з заголовками (.hpp)
+include_directories(include)
+
+# Створюємо виконуваний файл з усіх твоїх .cpp файлів
+file(GLOB_RECURSE SOURCES "src/*.cpp")
+add_executable(${PROJECT_NAME} main.cpp ${SOURCES})
+
+# "Склеюємо" все докупи
+target_link_libraries(${PROJECT_NAME} 
+    sfml-graphics 
+    sfml-window 
+    sfml-system
+    ${LUA_LIBRARIES}
+    sol2::sol2
+)

@@ -1,0 +1,53 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Text Include="CmakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md" />
+    <None Include="scripts\player.lua">
+      <Filter>scripts</Filter>
+    </None>
+    <None Include="vcpkg.json" />
+    <None Include="scripts\asteroids.lua">
+      <Filter>scripts</Filter>
+    </None>
+    <None Include="scripts\Enemy.lua">
+      <Filter>scripts</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="src %28.cpp%29">
+      <UniqueIdentifier>{09b4db79-8642-4a04-b63e-e1868d23029d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="scripts">
+      <UniqueIdentifier>{671375a3-2520-4bf6-8af9-587b60c592c4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include %28.hpp%29">
+      <UniqueIdentifier>{055e7532-50c1-4ce6-92d8-b95b27856e3c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="external">
+      <UniqueIdentifier>{129f8fa6-36e2-4612-96d6-9ed8d039882d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="data">
+      <UniqueIdentifier>{26fe5a47-3b9a-4fe4-970e-32dd3e9d9676}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\game.cpp">
+      <Filter>src %28.cpp%29</Filter>
+    </ClCompile>
+    <ClCompile Include="dump.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="include\components.hpp">
+      <Filter>include %28.hpp%29</Filter>
+    </ClInclude>
+    <ClInclude Include="include\EntityManager.hpp">
+      <Filter>include %28.hpp%29</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Systems.hpp">
+      <Filter>include %28.hpp%29</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>
