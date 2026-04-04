@@ -1,97 +1,236 @@
-//components.hpp
+п»ї/**
+ * @file components.hpp
+ * @brief ECS Component definitions for the Modular Space Engine
+ *
+ * This file contains all Plain Old Data (POD) structures that represent
+ * the data attached to game entities. Components are stored in parallel
+ * vectors inside EntityManager for cache-friendly iteration.
+ *
+ * @author Oleg Ivakhiv
+ * @version 1.1
+ */
 
 #pragma once
+
 #include <SFML/Graphics.hpp>
 #include <box2d/box2d.h>
 
-// Дані про розташування
+ /**
+  * @struct TransformComponent
+  * @brief Position, rotation, and movement data for an entity
+  *
+  * Also contains player-specific mechanics: dash cooldown and energy drive system.
+  * For non-player entities, dash/energy fields remain unused (default values).
+  */
+
+
 struct TransformComponent {
-	sf::Vector2f position;
-	sf::Vector2f velocity; // інерції
-	sf::Vector2f acceleration; // для плавності ходу
-	float rotation = 0.f;      // кут повороту
+    uint32_t entityId = 0;              ///< Unique persistent identifier
+    sf::Vector2f position;              ///< World position in pixels
+    sf::Vector2f velocity;              ///< Current movement speed (pixels/sec)
+    sf::Vector2f acceleration;          ///< Current acceleration (pixels/secВІ)
+    float rotation = 0.f;               ///< Rotation angle in degrees
 
-	// Механіка ривка
-	float dashCooldown;
-	float dashMaxCooldown;
+    // ===== Dash Mechanics =====
+    float dashCooldown;                 ///< Time remaining until dash can be used again
+    float dashMaxCooldown;              ///< Total cooldown duration after a dash
 
-	// --- СИСТЕМА ЕНЕРГІЇ (ENERGY DRIVE) ---
-	float energyDrive = 100.f;       // Поточна енергія
-	float maxEnergyDrive = 100.f;    // Максимум
-	float overheatTimer = 0.f;       // Таймер штрафу (коли енергія впала в 0)
-	// Стани
-	bool isTurbo = false;            // Чи летимо ми на спринті прямо зараз
+    // ===== Energy Drive System (Turbo/Overheat) =====
+    float energyDrive = 100.f;          ///< Current energy level (0-100)
+    float maxEnergyDrive = 100.f;       ///< Maximum energy capacity
+    float overheatTimer = 0.f;          ///< >0 = engine overheated, prevents energy regen
+    bool isTurbo = false;               ///< Whether turbo boost is currently active
+
+    // ===== PARRY MECHANIC =====
+    bool isParrying = false;           // Currently in parry animation
+    float parryTimer = 0.f;            // Active parry window (collision deflection)
+    float parryAnimTimer = 0.f;        // Visual spin duration (can be longer)
+    float parryCooldown = 0.f;         // Time until parry can be used again
+    float parryMaxCooldown = 2.0f;     // Cooldown between parries
+    float parrySpinAngle = 0.f;        // Current spin angle (for animation)
+    float parryStartRotation = 0.f;    // Starting angle when parry began
+    float parryTargetRotation = 0.f;   // Mouse angle at parry start
+    float parryTotalDelta = 0.f;       // Total rotation to apply (720В° + angle to target)
+
 };
 
+
+struct PlayerComponent {
+    uint32_t entityId = 0;
+
+    // Dash
+    float dashCooldown = 0.f;
+    float dashMaxCooldown = 0.f;
+
+    // Energy Drive
+    float energyDrive = 100.f;
+    float maxEnergyDrive = 100.f;
+    float overheatTimer = 0.f;
+    bool isTurbo = false;
+
+    // Parry
+    bool isParrying = false;
+    float parryTimer = 0.f;
+    float parryAnimTimer = 0.f;
+    float parryCooldown = 0.f;
+    float parryMaxCooldown = 2.0f;
+    float parryStartRotation = 0.f;
+    float parrySpinAngle = 0.f;
+
+    // Shooting
+    float shootTimer = 0.f;   // moved from WeaponSystem static
+};
+
+
+
+/**
+ * @struct BulletComponent
+ * @brief Projectile-specific data
+ *
+ * Bullets are short-lived entities that fade out and auto-destroy.
+ */
 struct BulletComponent {
-	float lifetime = 2.0f;
-	bool markedForDestroy = false;
-	bool isActive = false;
+    uint32_t entityId = 0;              ///< Unique persistent identifier
+    float lifetime = 2.0f;              ///< Seconds until auto-destruction
+    bool markedForDestroy = false;      ///< Flag for immediate destruction (hit something)
+    bool isActive = false;              ///< Whether bullet is currently in flight
 };
 
-
+/**
+ * @struct RenderComponent
+ * @brief Visual representation of an entity
+ *
+ * Uses SFML ConvexShape for flexible polygon rendering.
+ * Supports custom shapes defined in Lua scripts.
+ */
 struct RenderComponent {
-	sf::ConvexShape shape;
+    uint32_t entityId = 0;              ///< Unique persistent identifier
+    sf::ConvexShape shape;              ///< Drawable shape (color, outline, vertices)
 };
 
+/**
+ * @struct PhysicsComponent
+ * @brief Box2D physics body reference
+ *
+ * Links an entity to its Box2D physics body for position/velocity simulation.
+ */
 struct PhysicsComponent {
-	b2BodyId bodyId; // ID тіла  Box2D
+    uint32_t entityId = 0;              ///< Unique persistent identifier
+    b2BodyId bodyId;                    ///< Box2D body identifier (opaque handle)
 };
 
+/**
+ * @struct Particle
+ * @brief Visual effect particle (explosions, impacts, debris)
+ *
+ * Particles are short-lived, non-collidable visual elements.
+ * They fade out over time and auto-remove when lifetime reaches zero.
+ */
 struct Particle {
-	sf::Vector2f position;
-	sf::Vector2f velocity;
-	sf::Color color;
-	float lifetime;
-	float maxLifetime;
-	float size;
+    uint32_t entityId = 0;              ///< Unique persistent identifier
+    sf::Vector2f position;              ///< Current particle position
+    sf::Vector2f velocity;              ///< Movement speed (pixels/sec)
+    sf::Color color;                    ///< Current color (alpha fades over time)
+    float lifetime;                     ///< Remaining time before removal
+    float maxLifetime;                  ///< Initial lifetime (used for fade calculation)
+    float size;                         ///< Particle dimensions (square, width = size)
 };
 
+/**
+ * @struct HealthComponent
+ * @brief Hit points and invulnerability state
+ *
+ * Entities with HP <= 0 are marked for destruction.
+ * Invul timers provide brief immunity after taking damage.
+ */
 struct HealthComponent {
-	float maxHp = 100.f;
-	float currentHp = 100.f;
+    uint32_t entityId = 0;              ///< Unique persistent identifier
+    float maxHp = 100.f;                ///< Maximum health capacity
+    float currentHp = 100.f;            ///< Current health (0 = dead)
 
-	// Таймери невразливості (i-frames)
-	float invulTimer = 0.f;
-	float cheapInvulTimer = 0.f;
+    // ===== Invulnerability Frames (i-frames) =====
+    float invulTimer = 0.f;             ///> Full invincibility timer (>0 = cannot take damage)
+    float cheapInvulTimer = 0.f;        ///> Partial invincibility for minor collisions
+
+    // ===== EXPLOSIVE PROPERTIES (for magma asteroids) =====
+    bool isExplosive = false;           // Does this entity explode on death?
+    float explosionRadius = 150.0f;     // Area of effect (pixels)
+    float explosionDamage = 30.0f;      // Damage to entities in radius
+
+    // ===== PARRY HOMING PROPERTIES =====
+    bool isHoming = false;          // Is this asteroid a homing missile?
+    uint32_t homingTargetEntityId = 0;   // Store entity ID
+
+    // ===== STUN PROPERTIES =====
+    float stunTimer = 0.f;          // >0 = enemy is stunned (can't move)
 };
 
+/**
+ * @struct Star
+ * @brief Background star for parallax scrolling effect
+ *
+ * Stars move slower than the player (parallax factor < 1.0)
+ * to create depth illusion. They wrap around screen edges.
+ */
 struct Star {
-	sf::Vector2f position;
-	float parallaxFactor;
-	float size;
-	sf::Color color;
+    uint32_t entityId = 0;              ///< Unique persistent identifier
+    sf::Vector2f position;              ///< Screen position (pixels)
+    float parallaxFactor;               ///< Movement multiplier (smaller = slower/farther)
+    float size;                         ///< Star diameter in pixels
+    sf::Color color;                    ///< Star color with alpha for twinkling
 };
 
+/**
+ * @enum EnemyState
+ * @brief AI behavior states for enemy ships
+ */
 enum class EnemyState {
-	PATROL, // Блукає, розслаблений
-	ALERT,  // Летить на останню позицію, де бачив гравця
-	COMBAT  // Бачить гравця, атакує
+    PATROL,     ///< Wandering randomly, not aware of player
+    ALERT,      ///< Searching for player after losing line of sight
+    COMBAT      ///< Actively chasing and attacking player
 };
 
+/**
+ * @struct EnemyComponent
+ * @brief Enemy-specific combat data (currently partially implemented)
+ *
+ * Reserved for future enemy weapon systems and behavior tuning.
+ */
 struct EnemyComponent {
-	enum State { IDLE, CHASE, AVOID } state = IDLE;
-	float detectionRadius = 600.f;
-	// Стрільба
-	float fireTimer = 0.f;
-	float fireRate = 1.5f;
-	float attackRange = 500.f;
+    uint32_t entityId = 0;              ///< Unique persistent identifier
 
+    enum State { IDLE, CHASE, AVOID } state = IDLE;  ///< Legacy state (use EnemyState instead)
+    float detectionRadius = 600.f;      ///< Distance to start tracking player
+
+    // ===== Weapon System (reserved) =====
+    float fireTimer = 0.f;              ///< Cooldown remaining until next shot
+    float fireRate = 1.5f;              ///< Shots per second
+    float attackRange = 500.f;          ///< Distance at which enemy can fire
 };
 
+/**
+ * @struct AIState
+ * @brief Persistent AI memory and decision-making data
+ *
+ * Stored in a separate unordered_map keyed by entityId because:
+ * 1. Not all entities have AI (only enemies)
+ * 2. AI needs to persist across entity swaps/deletions
+ * 3. Avoids bloating component vectors with unused AI data
+ */
 struct AIState {
-	EnemyState currentState = EnemyState::PATROL;
+    uint32_t entityId = 0;              ///< Unique persistent identifier
+    EnemyState currentState = EnemyState::PATROL;  ///< Current behavioral state
 
-	// Пам'ять
-	sf::Vector2f lastKnownPlayerPos;
-	float searchTimer = 0.f;      // Скільки часу шукає гравця в зоні Alert
+    // ===== Tracking Memory =====
+    sf::Vector2f lastKnownPlayerPos;    ///< Last seen player position (used in ALERT state)
+    float searchTimer = 0.f;            ///< Time remaining to search before returning to PATROL
 
-	// Патрулювання
-	sf::Vector2f patrolTarget;
-	float patrolWaitTimer = 0.f;  // Час "тупняка" перед зміною точки патруля
+    // ===== Patrol Behavior =====
+    sf::Vector2f patrolTarget;          ///< Current destination point while patrolling
+    float patrolWaitTimer = 0.f;        ///< Time to wait at patrol target before moving
 
-	// "Людський фактор" (Помилки та реакція)
-	float reactionTimer = 0.f;    // Затримка перед оновленням курсу
-	float reactionDelay = 0.2f;   // Оновлюємо "мізки" лише 5 разів на секунду
-	sf::Vector2f smoothedDesiredVel; // Щоб рух був плавним
+    // ===== Reaction System =====
+    float reactionTimer = 0.f;          ///< Cooldown between AI decision updates
+    float reactionDelay = 0.2f;         ///< Artificial reaction time (makes AI feel more human)
+    sf::Vector2f smoothedDesiredVel;    ///< Filtered velocity target (prevents jitter)
 };

@@ -1,68 +1,119 @@
+п»ї-- ============================================================================
 -- player.lua
+-- Player ship configuration for the Modular Space Engine
+-- 
+-- Defines all player-specific stats including physics properties,
+-- movement mechanics (normal, sprint/turbo, dash), ship shape,
+-- colors, weapons, and key bindings.
+-- 
+-- @author Oleg Ivakhiv
+-- @version 1.1
+-- ============================================================================
 
--- =====================================
---        КОНФІГУРАЦІЯ ГРАВЦЯ 
--- =====================================
+-- ============================================================================
+-- PHYSICS PROPERTIES (Box2D)
+-- ============================================================================
 
--- Фізика (Box2D)
-	angulardgrag_factor = 1.0
-    lineardrag_factor = 1.0
-	density = 3.0
-    
--- Керування
-    engine_power = 150.0
-    rotation_speed = 4.0
-    sprint_power_multiplier = 2.5  -- У скільки разів швидше летимо
-    sprint_drain_speed = 40.0      -- Як швидко витрачається енергія (одиниць на сек)
-    sprint_regen_speed = 20.0      -- Як швидко відновлюється
-    penalty_energy = 3.0
+angulardrag_factor = 1.0     -- Angular damping (slows rotation over time)
+lineardrag_factor = 1.0      -- Linear damping (air resistance in space)
+density = 3.0                -- Mass per area (affects collision response)
 
--- Механіка ривка
-    dash_velocity = 40.0
-    dash_energy_cost = 30.0
-    dash_max_cooldown = 1
-                                                                       
+-- ============================================================================
+-- MOVEMENT MECHANICS
+-- ============================================================================
+
+-- Normal movement
+engine_power = 150.0         -- Base thrust force (pixels/secВІ)
+rotation_speed = 4.0         -- Turn rate (degrees per second)
+
+-- Turbo / Sprint (energy-based speed boost)
+sprint_power_multiplier = 2.5    -- Speed multiplier when sprinting (150 в†’ 375 thrust)
+sprint_drain_speed = 40.0        -- Energy drain rate (units per second)
+sprint_regen_speed = 20.0        -- Energy regen rate when not sprinting
+penalty_energy = 3.0             -- Overheat penalty duration (seconds when energy hits 0)
+
+-- Dash mechanic (instant velocity burst)
+dash_velocity = 40.0         -- Instant velocity boost (pixels/sec)
+dash_energy_cost = 30.0      -- Energy consumed per dash
+dash_max_cooldown = 1.0      -- Cooldown time between dashes (seconds)
+
+-- ============================================================================
+-- SHAPE DEFINITION (12-point polygon)
+-- ============================================================================
+-- Creates a sleek, aggressive fighter ship shape with:
+-- - Sharp pointed nose
+-- - Swept-back wings with sharp tips
+-- - Engine stabilizers at the rear
+-- - Central exhaust cutout
+-- ============================================================================
+
 ship_shape = {
-    { x = 0,   y = -30 }, -- 1. Гострий ніс
-    { x = 7,   y = -10 }, -- 2. Праве плече носа
-    { x = 12,  y = -5 },  -- 3. Основа переднього крила
-    { x = 28,  y = 15 },  -- 4. Кінчик основного крила (дуже гострий)
-    { x = 15,  y = 15 },  -- 5. Внутрішній згин крила
-    { x = 18,  y = 28 },  -- 6. Правий стабілізатор двигуна
-    { x = 0,   y = 20 },  -- 7. Центральна виїмка корми
-    { x = -18, y = 28 },  -- 8. Лівий стабілізатор двигуна
-    { x = -15, y = 15 },  -- 9. Внутрішній згин лівого крила
-    { x = -28, y = 15 },  -- 10. Кінчик лівого крила
-    { x = -12, y = -5 },  -- 11. Основа лівого крила
-    { x = -7,  y = -10 }  -- 12. Ліве плече носа
+    { x = 0,   y = -30 },   -- 1.  Sharp nose tip
+    { x = 7,   y = -10 },   -- 2.  Right nose shoulder
+    { x = 12,  y = -5 },    -- 3.  Front wing base
+    { x = 28,  y = 15 },    -- 4.  Main wing tip (very sharp)
+    { x = 15,  y = 15 },    -- 5.  Inner wing crease
+    { x = 18,  y = 28 },    -- 6.  Right engine stabilizer
+    { x = 0,   y = 20 },    -- 7.  Center exhaust notch
+    { x = -18, y = 28 },    -- 8.  Left engine stabilizer
+    { x = -15, y = 15 },    -- 9.  Inner left wing crease
+    { x = -28, y = 15 },    -- 10. Left wing tip
+    { x = -12, y = -5 },    -- 11. Left wing base
+    { x = -7,  y = -10 }    -- 12. Left nose shoulder
 }
 
--- Кольори 
-    color = { r = 80, g = 5, b = 0, a = 255 } -- Темно-сизий
-    outline_color = { r = 0, g = 200, b = 255, a = 255 } -- Неоновий блакитний
-    dash_flash_color = { r = 100, g = 255, b = 255, a = 200 }
+-- ============================================================================
+-- PARRY MECHANIC
+-- ============================================================================
 
+parry_window = 0.3             -- Active parry frames (invincibility, deflection)
+parry_anim_duration = 0.6      -- Visual spin duration (longer for smooth feel)
+parry_stun_duration = 1.5   -- How long enemies stay stunned
+parry_cooldown = 2.0           -- Cooldown before next parry
+parry_reflect_damage = 50   -- Damage reflected back to enemies
+homing_missile_speed = 800  -- Speed of parried asteroid (pixels/sec)
+homing_turn_rate = 3.0      -- How aggressively homing missiles turn
 
-    -- Налаштування озброєння
-    bullet_speed = 800.0   
-    bullet_lifetime = 1.5  -- Час польоту в секундах
-    bullet_color = { r = 0, g = 255, b = 200, a = 255 } -- Бірюзовий неон
+-- ============================================================================
+-- COLORS
+-- ============================================================================
 
--- Здоровя гравця
-    max_hp = 100
+color = { r = 50, g = 150, b = 255, a = 255 }           -- Dark rusty red / maroon
+outline_color = { r = 0, g = 200, b = 255, a = 255 } -- Neon cyan (glowing outline)
+dash_flash_color = { r = 100, g = 255, b = 255, a = 200 } -- Bright cyan flash during dash
 
--- Таймери невразливості (i-frames)
-    invul_time = 0.4
-    cheap_invul_time = 0.1
+-- ============================================================================
+-- WEAPON SYSTEM
+-- ============================================================================
 
+bullet_speed = 800.0         -- Projectile velocity (pixels/sec)
+bullet_lifetime = 1.5        -- Seconds before bullet auto-destructs
+bullet_color = { r = 0, g = 255, b = 200, a = 255 } -- Turquoise neon
 
-    -- Налаштування клавіш
+-- ============================================================================
+-- HEALTH & INVULNERABILITY
+-- ============================================================================
+
+max_hp = 100                 -- Maximum health points
+
+-- Invulnerability frames (i-frames) after taking damage
+invul_time = 0.4             -- Full invincibility duration (seconds)
+cheap_invul_time = 0.1       -- Partial invincibility for minor collisions
+
+-- ============================================================================
+-- KEY BINDINGS
+-- ============================================================================
+-- Maps input names to actual keyboard/mouse buttons.
+-- These strings are looked up by InputRegistry and converted to SFML keys.
+-- ============================================================================
+
 key_bindings = {
-    up    = "W",
-    down  = "S",
-    left  = "A",
-    right = "D",
-    dash  = "Space",  -- Тепер це бічна кнопка миші!
-    fire  = "MouseLeft", -- Стрільба на ліву кнопку
-    sprint = "LShift" -- Спринт на лівий Shift
+    up     = "W",           -- Forward thrust
+    down   = "S",           -- Reverse thrust
+    left   = "A",           -- Strafe left
+    right  = "D",           -- Strafe right
+    dash   = "Space",       -- Dash / dodge roll (instant velocity burst)
+    fire   = "MouseLeft",   -- Primary weapon (shoot bullets)
+    sprint = "LShift",       -- Turbo / energy boost (consumes energy)
+    parry = "R"             -- Parry button!
 }

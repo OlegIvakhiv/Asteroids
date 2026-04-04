@@ -32,6 +32,12 @@
     <Filter Include="data">
       <UniqueIdentifier>{26fe5a47-3b9a-4fe4-970e-32dd3e9d9676}</UniqueIdentifier>
     </Filter>
+    <Filter Include="include %28.hpp%29\AISystem">
+      <UniqueIdentifier>{8745e92d-a4b2-414b-ab1c-69497ae9e74c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include %28.hpp%29\ParticleSystem">
+      <UniqueIdentifier>{cd8042e1-8a1b-454b-beb0-9c9b509a15d2}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\game.cpp">
@@ -47,6 +53,9 @@
       <Filter>include %28.hpp%29</Filter>
     </ClInclude>
     <ClInclude Include="include\Systems.hpp">
+      <Filter>include %28.hpp%29</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\GameConfig.hpp">
       <Filter>include %28.hpp%29</Filter>
     </ClInclude>
   </ItemGroup>
