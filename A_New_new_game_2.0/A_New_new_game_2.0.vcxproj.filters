@@ -58,5 +58,8 @@
     <ClInclude Include="Include\GameConfig.hpp">
       <Filter>include %28.hpp%29</Filter>
     </ClInclude>
+    <ClInclude Include="Include\EntityFactory.hpp">
+      <Filter>include %28.hpp%29</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

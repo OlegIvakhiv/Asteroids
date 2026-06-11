@@ -26,20 +26,27 @@ enemy_config = {
     -- MOVEMENT CAPABILITIES
     -- ========================================================================
     
-    engine_power = 200.0,       -- Thrust force (higher = faster acceleration)
-    rotation_speed = 4.0,       -- Turn rate in degrees per second
-    
+    engine_power = 200.0,          -- Thrust force (higher = faster acceleration)
+    rotation_speed = 4.0,          -- Turn rate in degrees per second
+    homing_notice_range = 450.0,   -- Distance to notice a homing missile
+    bullet_dodge_chance = 0.60,    -- Base probability of picking a good dodge direction
+ 
     -- ========================================================================
     -- COMBAT STATS
     -- ========================================================================
     
     hp = 250.0,                 -- Hit points (requires multiple hits to destroy)
     score_reward = 500,         -- Points awarded when destroyed
-    
+    bullet_speed    = 550.0,    -- slower than player (800), readable in flight
+    bullet_lifetime = 2.0,      -- seconds
+    fire_rate       = 1.8,      -- seconds between shots (moderate)
+    attack_range    = 480.0,    -- pixels, must be in range to fire
+    aim_spread      = 18.0,     -- degrees of random inaccuracy (human factor)
+
     -- ========================================================================
     -- VISUAL APPEARANCE
     -- ========================================================================
-    
+
     color = { r = 255, g = 50, b = 50 },    -- Bright red (threatening/pirate theme)
     
     -- ========================================================================

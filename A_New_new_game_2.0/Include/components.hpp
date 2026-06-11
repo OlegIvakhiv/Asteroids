@@ -30,6 +30,11 @@ struct TransformComponent {
     sf::Vector2f velocity;              ///< Current movement speed (pixels/sec)
     sf::Vector2f acceleration;          ///< Current acceleration (pixels/sec²)
     float rotation = 0.f;               ///< Rotation angle in degrees
+};
+
+
+struct PlayerComponent {
+    uint32_t entityId = 0;
 
     // ===== Dash Mechanics =====
     float dashCooldown;                 ///< Time remaining until dash can be used again
@@ -52,33 +57,20 @@ struct TransformComponent {
     float parryTargetRotation = 0.f;   // Mouse angle at parry start
     float parryTotalDelta = 0.f;       // Total rotation to apply (720° + angle to target)
 
-};
-
-
-struct PlayerComponent {
-    uint32_t entityId = 0;
-
-    // Dash
-    float dashCooldown = 0.f;
-    float dashMaxCooldown = 0.f;
-
-    // Energy Drive
-    float energyDrive = 100.f;
-    float maxEnergyDrive = 100.f;
-    float overheatTimer = 0.f;
-    bool isTurbo = false;
-
-    // Parry
-    bool isParrying = false;
-    float parryTimer = 0.f;
-    float parryAnimTimer = 0.f;
-    float parryCooldown = 0.f;
-    float parryMaxCooldown = 2.0f;
-    float parryStartRotation = 0.f;
-    float parrySpinAngle = 0.f;
-
     // Shooting
     float shootTimer = 0.f;   // moved from WeaponSystem static
+
+
+    // ===== RIFT SHOT =====
+    bool riftCharging = false;          // Currently holding charge
+    float riftChargeTimer = 0.f;        // Counts up while charging
+    uint32_t riftBoltEntityId = 0;      // EntityId of live bolt (0 = none)
+    bool riftBoltInFlight = false;      // True while bolt exists
+
+    // ===== PARRY WHIFF =====
+    bool parryHitSomething = false;     // Set true in DamageSystem on any parry contact
+    bool parryWhiffRecovery = false;    // True during recovery window
+    float parryWhiffTimer = 0.f;        // Counts down recovery
 };
 
 
@@ -94,6 +86,10 @@ struct BulletComponent {
     float lifetime = 2.0f;              ///< Seconds until auto-destruction
     bool markedForDestroy = false;      ///< Flag for immediate destruction (hit something)
     bool isActive = false;              ///< Whether bullet is currently in flight
+    bool isEnemyBullet = false;         ///< fired by an enemy ship
+    uint32_t ownerEntityId = 0;         ///< entityId of the ship that fired this (avoids self-hit)
+
+    bool isRiftBolt = false;            // This is a Rift Shot projectile
 };
 
 /**
@@ -233,4 +229,19 @@ struct AIState {
     float reactionTimer = 0.f;          ///< Cooldown between AI decision updates
     float reactionDelay = 0.2f;         ///< Artificial reaction time (makes AI feel more human)
     sf::Vector2f smoothedDesiredVel;    ///< Filtered velocity target (prevents jitter)
+
+    // ===== PIRATE HUMAN FACTOR =====
+
+    // Threat awareness: the pirate "notices" threats with a delay
+    // and commits to a dodge direction even if it becomes wrong
+    sf::Vector2f pendingDodgeDir;           ///< Dodge direction decided when threat was noticed
+    float dodgeCommitTimer = 0.f;           ///< How long to keep dodging in committed direction
+    float threatReactionDelay = 0.f;        ///< Countdown before pirate starts reacting to a threat
+    bool threatNoticed = false;             ///< Has the pirate noticed the current threat yet?
+    uint32_t trackedThreatId = 0;           ///< entityId of the threat being tracked (0 = none)
+
+    // Bullet dodge: separate lightweight system
+    sf::Vector2f bulletDodgeDir;            ///< Current bullet dodge direction
+    float bulletDodgeTimer = 0.f;           ///< How long to keep dodging bullets
+    float bulletReactionDelay = 0.f;        ///< Countdown before reacting to incoming bullet
 };

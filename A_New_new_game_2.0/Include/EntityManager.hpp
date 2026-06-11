@@ -43,7 +43,8 @@ enum CollisionCategory {
     CATEGORY_PLAYER = 0x0001,   ///< Player ship
     CATEGORY_ASTEROID = 0x0002,   ///< Asteroid obstacles
     CATEGORY_BULLET = 0x0004,   ///< Player projectiles
-    CATEGORY_ENEMY = 0x0008    ///< Enemy ships
+    CATEGORY_ENEMY = 0x0008,    ///< Enemy ships
+    CATEGORY_ENEMY_BULLET = 0x0010    // enemy bullets — separate so they don't hit each other
 };
 
 /**
@@ -57,6 +58,11 @@ enum class BodyType {
     Asteroid,   ///< Destructible rock
     Bullet,     ///< Projectile
     Enemy       ///< AI-controlled enemy
+};
+
+struct BodyUserData {
+    BodyType type;
+    uint32_t entityId;
 };
 
 /**
@@ -88,6 +94,7 @@ public:
     std::vector<HealthComponent> healths;         ///< Hit points and invincibility
     std::vector<BulletComponent> bullets;         ///< Projectile lifetime data
     std::vector<EnemyComponent> enemies;          ///< Enemy-specific AI data (reserved)
+    std::vector<PlayerComponent> players;         ///< Player-specific stats (only index 0 is valid)
 
     // ===== Visual Effects =====
     std::vector<Particle> particles;              ///< Explosion/debris particles
@@ -133,6 +140,9 @@ public:
         // 1. Get the persistent ID of entity being destroyed
         uint32_t entityId = transforms[index].entityId;
 
+        // 1.2 Delete BodyUserData
+        delete (BodyUserData*)b2Body_GetUserData(physics[index].bodyId);
+
         // 2. Clean up Box2D physics body
         b2DestroyBody(physics[index].bodyId);
 
@@ -146,17 +156,10 @@ public:
             std::swap(renders[index], renders[lastIdx]);
             std::swap(physics[index], physics[lastIdx]);
             std::swap(scoreRewards[index], scoreRewards[lastIdx]);
-
-            // Swap optional components (only if they exist for both indices)
-            if (index < healths.size() && lastIdx < healths.size()) {
-                std::swap(healths[index], healths[lastIdx]);
-            }
-            if (index < bullets.size() && lastIdx < bullets.size()) {
-                std::swap(bullets[index], bullets[lastIdx]);
-            }
-            if (index < enemies.size() && lastIdx < enemies.size()) {
-                std::swap(enemies[index], enemies[lastIdx]);
-            }
+            std::swap(healths[index], healths[lastIdx]);
+            std::swap(bullets[index], bullets[lastIdx]);
+            std::swap(enemies[index], enemies[lastIdx]);
+            std::swap(players[index], players[lastIdx]);
 
             // Update ID map for the entity that just moved into the deleted slot
             uint32_t swappedId = transforms[index].entityId;
@@ -168,10 +171,10 @@ public:
         renders.pop_back();
         physics.pop_back();
         scoreRewards.pop_back();
-
-        if (!healths.empty()) healths.pop_back();
-        if (!bullets.empty()) bullets.pop_back();
-        if (!enemies.empty()) enemies.pop_back();
+        healths.pop_back();
+        bullets.pop_back();
+        enemies.pop_back();
+        players.pop_back();
 
         // 6. Remove the destroyed entity from ID map
         entityIdMap.erase(entityId);
@@ -309,7 +312,6 @@ public:
     }
 
 
-
     void spawnShockwave(sf::Vector2f pos, float radius, sf::Color color) {
         int numParticles = 360 / 15;  // 24 particles
 
@@ -334,339 +336,5 @@ public:
         }
     }
 
-    // ===== Entity Creation Methods =====
 
-    /**
-     * @brief Create the player ship entity
-     * @param pos Initial world position in pixels
-     * @param lua Lua state containing player configuration
-     * @param worldId Box2D world identifier
-     * @return Persistent entity ID (not index!)
-     *
-     * Player is dynamic body with circle collision shape.
-     * Shape vertices are loaded from Lua (or defaults to triangle).
-     */
-    uint32_t createPlayer(sf::Vector2f pos, sol::state& lua, b2WorldId worldId) {
-        uint32_t entityId = nextEntityId++;
-
-        // Transform component
-        transforms.push_back({ entityId, pos, {0.f, 0.f}, {0.f, 0.f}, 0.f, 0.f, 0.f });
-        bullets.push_back({ entityId });
-        scoreRewards.push_back({});
-        enemies.push_back({});
-        healths.push_back({ entityId, 100.f, 100.f, 0.f, 0.f });
-
-        // Box2D physics body
-        b2BodyDef bodyDef = b2DefaultBodyDef();
-        bodyDef.type = b2_dynamicBody;
-        bodyDef.userData = (void*)(uintptr_t)BodyType::Player;
-        bodyDef.position = { pos.x / SCALE, pos.y / SCALE };
-        bodyDef.linearDamping = lua["lineardrag_factor"].get_or(0.5f);
-        bodyDef.angularDamping = lua["angulardgrag_factor"].get_or(0.5f);
-
-        b2BodyId bid = b2CreateBody(worldId, &bodyDef);
-
-        // Collision shape (circle)
-        b2ShapeDef shapeDef = b2DefaultShapeDef();
-        shapeDef.filter.categoryBits = CATEGORY_PLAYER;
-        shapeDef.filter.maskBits = CATEGORY_ASTEROID | CATEGORY_ENEMY;
-        shapeDef.enableContactEvents = true;
-        shapeDef.density = lua["density"].get_or(0.5f);
-
-        b2Circle circle = { {0.0f, 0.0f}, 0.8f };
-        b2CreateCircleShape(bid, &shapeDef, &circle);
-
-        physics.push_back({ entityId, bid });
-
-        // Render shape (from Lua or default triangle)
-        RenderComponent rc;
-        sol::table shapeTable = lua["ship_shape"];
-        if (shapeTable.valid()) {
-            rc.shape.setPointCount(shapeTable.size());
-            for (size_t i = 1; i <= shapeTable.size(); ++i) {
-                sol::table point = shapeTable[i];
-                rc.shape.setPoint(i - 1, sf::Vector2f(point["x"].get<float>(), point["y"].get<float>()));
-            }
-        }
-        else {
-            // Default triangular ship
-            rc.shape.setPointCount(3);
-            rc.shape.setPoint(0, { 0, -15 });
-            rc.shape.setPoint(1, { 10, 10 });
-            rc.shape.setPoint(2, { -10, 10 });
-        }
-
-        // Colors from Lua
-        sol::table luaColor = lua["color"];
-        rc.shape.setFillColor(sf::Color(
-            luaColor["r"].get_or(40),
-            luaColor["g"].get_or(100),
-            luaColor["b"].get_or(255),
-            luaColor["a"].get_or(255)
-        ));
-
-        sol::table luaOutline = lua["outline_color"];
-        rc.shape.setOutlineColor(sf::Color(
-            luaOutline["r"].get_or(255),
-            luaOutline["g"].get_or(255),
-            luaOutline["b"].get_or(255)
-        ));
-        rc.shape.setOutlineThickness(2.5f);
-
-        renders.push_back(rc);
-        entityIdMap[entityId] = transforms.size() - 1;
-
-        return entityId;
-    }
-
-    /**
-     * @brief Create an asteroid entity
-     * @param pos Initial position in pixels
-     * @param vel Initial velocity in pixels/sec
-     * @param baseSize Radius in pixels (pre-scale)
-     * @param config Lua table with asteroid properties (hp, density, score, etc.)
-     * @param worldId Box2D world identifier
-     * @return Persistent entity ID
-     *
-     * Asteroids use procedural 8-point irregular polygons for organic look.
-     * Random spin velocity adds variety to movement.
-     */
-    uint32_t createAsteroid(sf::Vector2f pos, sf::Vector2f vel, float baseSize, sol::table config, b2WorldId worldId) {
-        uint32_t entityId = nextEntityId++;
-        transforms.push_back({ entityId, pos, {0.f, 0.f}, {0.f, 0.f}, 0.f, 0.f, 0.f });
-        enemies.push_back({});
-
-        // Box2D physics body
-        b2BodyDef bodyDef = b2DefaultBodyDef();
-        bodyDef.type = b2_dynamicBody;
-        bodyDef.userData = (void*)(uintptr_t)BodyType::Asteroid;
-        bodyDef.position = { pos.x / SCALE, pos.y / SCALE };
-        bodyDef.linearVelocity = { vel.x, vel.y };
-        bodyDef.linearDamping = 0.0f;
-        bodyDef.angularDamping = 0.05f;
-
-        b2BodyId bid = b2CreateBody(worldId, &bodyDef);
-
-        // Generate irregular polygon (8 points with random radius variation)
-        RenderComponent rc;
-        std::vector<b2Vec2> physicsPoints;
-        int numPoints = 8;
-        rc.shape.setPointCount(numPoints);
-        float pixelRadius = baseSize * SCALE;
-
-        for (int i = 0; i < numPoints; ++i) {
-            float angle = (i / (float)numPoints) * 2.f * 3.14159f;
-            float noise = (rand() % 100) / 100.f;
-            float dist = pixelRadius * (0.85f + noise * 0.4f);
-
-            float px = std::cos(angle) * dist;
-            float py = std::sin(angle) * dist;
-            rc.shape.setPoint(i, { px, py });
-            physicsPoints.push_back({ px / SCALE, py / SCALE });
-        }
-
-        // Box2D collision shape (convex hull from generated points)
-        b2ShapeDef shapeDef = b2DefaultShapeDef();
-        shapeDef.filter.categoryBits = CATEGORY_ASTEROID;
-        shapeDef.enableContactEvents = true;
-        shapeDef.density = config["density"].get_or(1.0f);
-        shapeDef.material.friction = 0.1f;
-        shapeDef.material.restitution = 0.8f;
-
-        b2Hull hull = b2ComputeHull(physicsPoints.data(), (int)physicsPoints.size());
-        b2Polygon poly = b2MakePolygon(&hull, 0.0f);
-        b2CreatePolygonShape(bid, &shapeDef, &poly);
-
-        physics.push_back({ entityId, bid });
-
-        // Stats from Lua config
-        float hpValue = config["hp"].get_or(20.0f);
-        bool isExplosive = config["explosive"].get_or(false);
-        float explosionRadius = config["explosion_radius"].get_or(150.0f);
-        float explosionDamage = config["explosion_damage"].get_or(30.0f);
-
-        healths.push_back({
-            entityId,
-            hpValue,
-            hpValue,
-            0.f,
-            0.f,
-            isExplosive,
-            explosionRadius,
-            explosionDamage
-            });
-
-        bullets.push_back({ entityId });
-        scoreRewards.push_back(config["score_reward"].get_or(10));
-
-        // Asteroid color (grayscale with slight variation)
-        int gray = 40 + (rand() % 30);
-        rc.shape.setFillColor(sf::Color(gray, gray, gray + (rand() % 5)));
-        rc.shape.setOutlineColor(sf::Color(gray + 40, gray + 40, gray + 45));
-        rc.shape.setOutlineThickness(2.0f);
-
-        // Random rotation speed
-        float randomSpin = ((rand() % 200) - 100.f) / 50.f;
-        b2Body_SetAngularVelocity(bid, randomSpin);
-
-        renders.push_back(rc);
-        entityIdMap[entityId] = transforms.size() - 1;
-
-        return entityId;
-    }
-
-    /**
-     * @brief Create a bullet projectile
-     * @param pos Spawn position in pixels (tip of player ship)
-     * @param velocity Direction and speed in pixels/sec
-     * @param angle Rotation angle of bullet (degrees)
-     * @param lua Lua state with bullet configuration
-     * @param worldId Box2D world identifier
-     * @return Persistent entity ID
-     *
-     * Bullets are fast, short-lived, and use "isBullet" flag in Box2D
-     * for continuous collision detection (prevents tunneling through asteroids).
-     */
-    uint32_t createBullet(sf::Vector2f pos, sf::Vector2f velocity, float angle, sol::state& lua, b2WorldId worldId) {
-        uint32_t entityId = nextEntityId++;
-
-        // Configuration from Lua
-        float speed = lua["bullet_speed"].get_or(800.0f);
-        float lifetime = lua["bullet_lifetime"].get_or(1.5f);
-        sol::table col = lua["bullet_color"];
-
-        // Recalculate velocity (ensures consistent direction)
-        float rad = (angle - 90.f) * 3.14159f / 180.f;
-        sf::Vector2f newVelocity = { std::cos(rad) * speed, std::sin(rad) * speed };
-
-        transforms.push_back({ entityId, pos, newVelocity, {0.f, 0.f}, angle, 0.f, 0.f });
-
-        // Box2D physics (fast moving bullet)
-        b2BodyDef bodyDef = b2DefaultBodyDef();
-        bodyDef.type = b2_dynamicBody;
-        bodyDef.userData = (void*)(uintptr_t)BodyType::Bullet;
-        bodyDef.position = { pos.x / SCALE, pos.y / SCALE };
-        bodyDef.linearVelocity = { newVelocity.x / SCALE, newVelocity.y / SCALE };
-        bodyDef.rotation = b2MakeRot(angle * 3.14159f / 180.f);
-        bodyDef.isBullet = true;  // Enable CCD to prevent tunneling
-
-        b2BodyId bid = b2CreateBody(worldId, &bodyDef);
-
-        b2ShapeDef shapeDef = b2DefaultShapeDef();
-        shapeDef.filter.categoryBits = CATEGORY_BULLET;
-        shapeDef.filter.maskBits = CATEGORY_ASTEROID | CATEGORY_ENEMY;
-        shapeDef.enableContactEvents = true;
-
-        b2Circle circle = { {0.0f, 0.0f}, 0.1f };
-        b2CreateCircleShape(bid, &shapeDef, &circle);
-
-        physics.push_back({ entityId, bid });
-        bullets.push_back({ entityId, lifetime, false, true });
-        healths.push_back({ entityId });
-        scoreRewards.push_back({});
-        enemies.push_back({});
-
-        // Diamond-shaped bullet visual
-        RenderComponent rc;
-        rc.shape.setPointCount(4);
-        rc.shape.setPoint(0, { 0, -10 });
-        rc.shape.setPoint(1, { 1.5f, 0 });
-        rc.shape.setPoint(2, { 0, 10 });
-        rc.shape.setPoint(3, { -1.5f, 0 });
-
-        rc.shape.setFillColor(sf::Color::White);
-        rc.shape.setOutlineThickness(1.5f);
-        rc.shape.setOutlineColor(sf::Color(
-            col["r"].get_or(0),
-            col["g"].get_or(255),
-            col["b"].get_or(255),
-            180
-        ));
-
-        renders.push_back(rc);
-        entityIdMap[entityId] = transforms.size() - 1;
-
-        return entityId;
-    }
-
-    /**
-     * @brief Create an enemy ship entity
-     * @param pos Initial position in pixels
-     * @param lua Lua state with enemy configuration
-     * @param worldId Box2D world identifier
-     * @return Persistent entity ID
-     *
-     * Enemies have complex polygon shape (12 points) resembling a pirate ship.
-     * AI behavior is handled separately in AISystem.
-     */
-    uint32_t createEnemy(sf::Vector2f pos, sol::state& lua, b2WorldId worldId) {
-        sol::table config = lua["enemy_config"];
-        uint32_t entityId = nextEntityId++;
-
-        TransformComponent tf;
-        tf.entityId = entityId;
-        tf.position = pos;
-        transforms.push_back(tf);
-
-        // Pirate ship shape (12 points)
-        RenderComponent rc;
-        rc.shape.setPointCount(12);
-        rc.shape.setPoint(0, { 0, -10 });
-        rc.shape.setPoint(1, { 8, -25 });
-        rc.shape.setPoint(2, { 12, -10 });
-        rc.shape.setPoint(3, { 25, 5 });
-        rc.shape.setPoint(4, { 25, 15 });
-        rc.shape.setPoint(5, { 15, 10 });
-        rc.shape.setPoint(6, { 0, 20 });
-        rc.shape.setPoint(7, { -15, 10 });
-        rc.shape.setPoint(8, { -25, 15 });
-        rc.shape.setPoint(9, { -25, 5 });
-        rc.shape.setPoint(10, { -12, -10 });
-        rc.shape.setPoint(11, { -8, -25 });
-
-        rc.shape.setFillColor(sf::Color(config["color"]["r"], config["color"]["g"], config["color"]["b"]));
-        rc.shape.setOutlineThickness(1.5f);
-        rc.shape.setOutlineColor(sf::Color(255, 255, 255, 150));
-
-        // Box2D physics body
-        b2BodyDef bodyDef = b2DefaultBodyDef();
-        bodyDef.type = b2_dynamicBody;
-        bodyDef.position = { pos.x / SCALE, pos.y / SCALE };
-        bodyDef.userData = (void*)(uintptr_t)BodyType::Enemy;
-        bodyDef.linearDamping = config["lineardrag_factor"].get_or(0.5f);
-        bodyDef.angularDamping = config["angulardgrag_factor"].get_or(0.5f);
-
-        b2BodyId bid = b2CreateBody(worldId, &bodyDef);
-
-        // Simplified collision hull (6 points, not full visual shape)
-        b2ShapeDef shapeDef = b2DefaultShapeDef();
-        shapeDef.filter.categoryBits = CATEGORY_ENEMY;
-        shapeDef.filter.maskBits = CATEGORY_ASTEROID | CATEGORY_PLAYER | CATEGORY_BULLET | CATEGORY_ENEMY;
-        shapeDef.enableContactEvents = true;
-        shapeDef.density = config["density"].get_or(3.0f);
-        shapeDef.material.restitution = 0.4f;
-
-        b2Vec2 physicsPoints[6] = {
-            {0.0f, -25.0f / SCALE},
-            {25.0f / SCALE, 5.0f / SCALE},
-            {25.0f / SCALE, 15.0f / SCALE},
-            {0.0f, 20.0f / SCALE},
-            {-25.0f / SCALE, 15.0f / SCALE},
-            {-25.0f / SCALE, 5.0f / SCALE}
-        };
-        b2Hull hull = b2ComputeHull(physicsPoints, 6);
-        b2Polygon poly = b2MakePolygon(&hull, 0.0f);
-        b2CreatePolygonShape(bid, &shapeDef, &poly);
-
-        physics.push_back({ entityId, bid });
-        healths.push_back({ entityId, config["hp"].get_or(50.f), config["hp"].get_or(50.f) });
-        bullets.push_back({ entityId });
-        enemies.push_back({});
-        scoreRewards.push_back(config["score_reward"].get_or(100));
-
-        renders.push_back(rc);
-        entityIdMap[entityId] = transforms.size() - 1;
-
-        return entityId;
-    }
 };

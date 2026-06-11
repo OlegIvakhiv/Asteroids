@@ -26,6 +26,7 @@
 #define LUA_ERRGCMM 9
 
 #include "EntityManager.hpp"
+#include "EntityFactory.hpp"
 #include <sol/sol.hpp>
 #include <iostream>
 #include <map>
@@ -66,7 +67,8 @@ public:
         // Sync Box2D bodies to TransformComponents
         for (size_t i = 0; i < em.physics.size(); ++i) {
             b2BodyId bodyId = em.physics[i].bodyId;
-            BodyType type = (BodyType)(uintptr_t)b2Body_GetUserData(bodyId);
+            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(bodyId);
+            BodyType type = ud ? ud->type : BodyType::Asteroid; // fallback
 
             // Position: always sync
             b2Vec2 pos = b2Body_GetPosition(bodyId);
@@ -118,7 +120,8 @@ public:
             if (i == playerIdx) continue;
 
             b2BodyId bodyId = em.physics[i].bodyId;
-            BodyType type = (BodyType)(uintptr_t)b2Body_GetUserData(bodyId);
+            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(bodyId);
+            BodyType type = ud ? ud->type : BodyType::Asteroid; // fallback
             if (type == BodyType::Bullet) continue;
 
             b2Vec2 pos = b2Body_GetPosition(bodyId);
@@ -167,6 +170,7 @@ public:
         if (playerIdx == (size_t)-1) return;
 
         auto& playerTf = em.transforms[playerIdx];
+        auto& player_statTf = em.players[playerIdx];
 
         // Center camera on player
         sf::View view = window.getView();
@@ -177,10 +181,10 @@ public:
         for (size_t i = 0; i < em.renders.size(); ++i) {
             auto& tf = em.transforms[i];
             auto& rd = em.renders[i];
-            BodyType type = (BodyType)(uintptr_t)b2Body_GetUserData(em.physics[i].bodyId);
+            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(em.physics[i].bodyId);
+            BodyType type = ud ? ud->type : BodyType::Asteroid;
 
-            rd.shape.setPosition(tf.position);
-            rd.shape.setRotation(sf::degrees(tf.rotation));
+
 
             if (type == BodyType::Asteroid && em.healths[i].isExplosive) {
                 // Pulsing glow effect using sine wave
@@ -200,9 +204,9 @@ public:
 
             // Special color handling for player (dash flash effect)
             if (type == BodyType::Player) {
-                if (tf.isParrying) {
+                if (player_statTf.isParrying) {
                     // Pulsing glow during parry
-                    float pulse = (std::sin(tf.parryTimer * 30.f) + 1.f) / 2.f;
+                    float pulse = (std::sin(player_statTf.parryTimer * 30.f) + 1.f) / 2.f;
                     rd.shape.setOutlineThickness(2.0f + pulse * 5.0f);
                     rd.shape.setOutlineColor(sf::Color(0, 255, 255, 200 + (uint8_t)(55 * pulse)));
                 }
@@ -217,7 +221,7 @@ public:
                     ));
                 }
 
-                if (tf.dashCooldown > (tf.dashMaxCooldown - 0.15f)) {
+                if (player_statTf.dashCooldown > (player_statTf.dashMaxCooldown - 0.15f)) {
                     // Dash cooldown almost ready - flash effect
                     sol::table flash = lua["dash_flash_color"];
                     rd.shape.setFillColor(sf::Color(
@@ -231,6 +235,46 @@ public:
                     sol::table clr = lua["color"];
                     rd.shape.setFillColor(sf::Color(clr["r"], clr["g"], clr["b"]));
                 }
+
+                // ===== PARRY ARC EFFECT =====
+                if (player_statTf.parryAnimTimer > 0) {
+                    float parryAnimDuration = 0.6f;  // match player.lua
+                    float t = player_statTf.parryAnimTimer / parryAnimDuration;  // 1→0 as it expires
+                    uint8_t alpha = static_cast<uint8_t>(t * 200);
+                    float radius = 55.f;
+                    float arcHalfAngle = 70.f;  // degrees each arc spans
+
+                    // Two arcs: one on each side, gaps at front and back
+                    // Arc angles are in world space, rotating with the ship
+                    float shipAngle = tf.rotation;  // degrees
+
+                    sf::Color arcCol(0, 255, 220, alpha);
+                    float thickness = 2.5f + (1.f - t) * 3.f;  // starts thin, thickens as it fades
+
+                    // Draw each arc as a series of small line segments
+                    auto drawArc = [&](float centerAngleDeg) {
+                        float startDeg = centerAngleDeg - arcHalfAngle;
+                        float endDeg = centerAngleDeg + arcHalfAngle;
+                        int   segments = 18;
+
+                        sf::VertexArray arc(sf::PrimitiveType::LineStrip, segments + 1);
+                        for (int s = 0; s <= segments; ++s) {
+                            float deg = startDeg + (endDeg - startDeg) * s / segments;
+                            float rad = deg * 3.14159f / 180.f;
+                            arc[s].position = {
+                                tf.position.x + std::cos(rad) * radius,
+                                tf.position.y + std::sin(rad) * radius
+                            };
+                            arc[s].color = arcCol;
+                        }
+                        window.draw(arc);
+                    };
+
+                    // Left arc (90° left of ship nose) and right arc (90° right)
+                    drawArc(shipAngle - 90.f);   // left side
+                    drawArc(shipAngle + 90.f);   // right side
+                }
+
             }
             else if (type == BodyType::Enemy) {
                 sol::table clr = lua["enemy_config"]["color"];
@@ -268,13 +312,13 @@ public:
      * @param dt Delta time
      * @param lua Lua state
      */
-    static void update(EntityManager& em, b2WorldId worldId, uint32_t playerEntityId, float dt, sol::state& lua) {
+    static void update(EntityFactory& ef, EntityManager& em, b2WorldId worldId, uint32_t playerEntityId, float dt, sol::state& lua) {
         size_t playerIdx = em.getEntityIndex(playerEntityId);
         if (playerIdx == (size_t)-1) return;
 
-
         auto& playerHp = em.healths[playerIdx];
         auto& playerTf = em.transforms[playerIdx];
+        auto& statsTf = em.players[playerIdx];
 
         // Update invulnerability timers
         if (playerHp.invulTimer > 0) playerHp.invulTimer -= dt;
@@ -289,8 +333,11 @@ public:
             b2BodyId bodyA = b2Shape_GetBody(event->shapeIdA);
             b2BodyId bodyB = b2Shape_GetBody(event->shapeIdB);
 
-            BodyType typeA = (BodyType)(uintptr_t)b2Body_GetUserData(bodyA);
-            BodyType typeB = (BodyType)(uintptr_t)b2Body_GetUserData(bodyB);
+            BodyUserData* udA = (BodyUserData*)b2Body_GetUserData(bodyA);
+            BodyUserData* udB = (BodyUserData*)b2Body_GetUserData(bodyB);
+
+            BodyType typeA = udA ? udA->type : BodyType::Asteroid;
+            BodyType typeB = udB ? udB->type : BodyType::Asteroid;
 
             // Check for bullet/asteroid hits
             b2BodyId bulletBody = b2_nullBodyId;
@@ -305,18 +352,18 @@ public:
             }
 
             if (b2Body_IsValid(bulletBody) && b2Body_IsValid(targetBody)) {
-                size_t bulletIdx = (size_t)-1;
-                size_t targetIdx = (size_t)-1;
+                // Get userData from bodies
+                BodyUserData* bulletUD = (BodyUserData*)b2Body_GetUserData(bulletBody);
+                BodyUserData* targetUD = (BodyUserData*)b2Body_GetUserData(targetBody);
+                if (!bulletUD || !targetUD) continue;
 
-                for (size_t idx = 0; idx < em.physics.size(); ++idx) {
-                    if (B2_ID_EQUALS(em.physics[idx].bodyId, bulletBody)) bulletIdx = idx;
-                    if (B2_ID_EQUALS(em.physics[idx].bodyId, targetBody)) targetIdx = idx;
-                    if (bulletIdx != (size_t)-1 && targetIdx != (size_t)-1) break;
-                }
+                size_t bulletIdx = em.getEntityIndex(bulletUD->entityId);
+                size_t targetIdx = em.getEntityIndex(targetUD->entityId);
+                if (bulletIdx == (size_t)-1 || targetIdx == (size_t)-1) continue;
 
                 if (bulletIdx != (size_t)-1 && targetIdx != (size_t)-1) {
                     if (!em.bullets[bulletIdx].markedForDestroy) {
-                        bool isPlayerParrying = playerTf.isParrying;
+                        bool isPlayerParrying = statsTf.isParrying;
                         sf::Vector2f hitPos = em.transforms[bulletIdx].position;
                         sf::Vector2f hitVel = em.transforms[bulletIdx].velocity;
 
@@ -388,7 +435,7 @@ public:
                                     float bulletSpeed = lua["bullet_speed"].get_or(800.f);
                                     sf::Vector2f reflectedVel(reflectDir.x * bulletSpeed, reflectDir.y * bulletSpeed);
                                     float angle = std::atan2(reflectDir.y, reflectDir.x) * 180.f / 3.14159f + 90.f;
-                                    em.createBullet(hitPos, reflectedVel, angle, lua, worldId);
+                                    ef.createBullet(em, hitPos, reflectedVel, angle, lua, worldId);
 
                                     // Reflection sparks
                                     for (int spark = 0; spark < 12; ++spark) {
@@ -416,7 +463,6 @@ public:
                             }
                         }
                     }
-                    continue;
                 }
             }
 
@@ -425,10 +471,11 @@ public:
             bool isPlayerB = B2_ID_EQUALS(bodyB, playerBody);
             if (isPlayerA || isPlayerB) {
                 b2BodyId otherBody = isPlayerA ? bodyB : bodyA;
-                BodyType otherType = (BodyType)(uintptr_t)b2Body_GetUserData(otherBody);
+                BodyUserData* otherUD = (BodyUserData*)b2Body_GetUserData(otherBody);
+                BodyType otherType = otherUD ? otherUD->type : BodyType::Asteroid;
 
                 // PARRY HANDLING
-                if (playerTf.isParrying && (otherType == BodyType::Asteroid || otherType == BodyType::Enemy)) {
+                if (statsTf.isParrying && (otherType == BodyType::Asteroid || otherType == BodyType::Enemy)) {
                     size_t otherIdx = (size_t)-1;
                     for (size_t idx = 0; idx < em.physics.size(); ++idx) {
                         if (B2_ID_EQUALS(em.physics[idx].bodyId, otherBody)) {
@@ -470,6 +517,128 @@ public:
                     playerHp.cheapInvulTimer = 0.2f;
                 }
             }
+
+
+            // ===== ENEMY BULLET HIT PLAYER/ASTEROID =====
+            if (b2Body_IsValid(bulletBody) && b2Body_IsValid(targetBody)) {
+                BodyUserData* bulletUD = (BodyUserData*)b2Body_GetUserData(bulletBody);
+                BodyUserData* targetUD = (BodyUserData*)b2Body_GetUserData(targetBody);
+                if (bulletUD && targetUD) {
+                    size_t bulletIdx = em.getEntityIndex(bulletUD->entityId);
+                    size_t targetIdx = em.getEntityIndex(targetUD->entityId);
+
+                    if (bulletIdx != (size_t)-1 && targetIdx != (size_t)-1 &&
+                        !em.bullets[bulletIdx].markedForDestroy &&
+                        em.bullets[bulletIdx].isEnemyBullet)
+                    {
+                        BodyType hitType = targetUD->type;  // define it locally here
+                        sf::Vector2f hitPos = em.transforms[bulletIdx].position;
+                        sf::Vector2f hitVel = em.transforms[bulletIdx].velocity;
+
+                        if (hitType == BodyType::Player && playerHp.invulTimer <= 0) {
+                            playerHp.currentHp -= 20.f;
+                            playerHp.invulTimer = 0.8f;
+                            em.spawnExplosion(hitPos, sf::Color(255, 100, 0), 8, 2.f);
+                            em.spawnImpact(hitPos, sf::Color(255, 140, 0), hitVel);
+                        }
+                        else if (hitType == BodyType::Asteroid) {
+                            em.healths[targetIdx].currentHp -= 12.f;
+                            em.spawnImpact(hitPos, sf::Color(255, 120, 0), hitVel);
+                        }
+
+                        em.bullets[bulletIdx].markedForDestroy = true;
+                    }
+                }
+            }
+
+            // ===== ASTEROID-ASTEROID COLLISION DAMAGE (speed-based) =====
+            if (typeA == BodyType::Asteroid && typeB == BodyType::Asteroid) {
+                BodyUserData* udA2 = udA; BodyUserData* udB2 = udB;
+                if (!udA2 || !udB2) continue;
+                size_t idxA = em.getEntityIndex(udA2->entityId);
+                size_t idxB = em.getEntityIndex(udB2->entityId);
+                if (idxA == (size_t)-1 || idxB == (size_t)-1) continue;
+
+                b2Vec2 vA2 = b2Body_GetLinearVelocity(bodyA);
+                b2Vec2 vB2 = b2Body_GetLinearVelocity(bodyB);
+                float relSpd = std::sqrt(std::pow(vA2.x - vB2.x, 2) + std::pow(vA2.y - vB2.y, 2));
+
+                // Only deal damage at meaningful speeds (>6 Box2D units ≈ 180 px/s)
+                if (relSpd > 6.f) {
+                    float dmg = (relSpd - 6.f) * 3.f;
+
+                    // Homing asteroids deal 2-3x damage to things they ram
+                    float multA = em.healths[idxA].isHoming ? 2.5f : 1.f;
+                    float multB = em.healths[idxB].isHoming ? 2.5f : 1.f;
+
+                    em.healths[idxA].currentHp -= dmg * multB;
+                    em.healths[idxB].currentHp -= dmg * multA;
+
+                    sf::Vector2f midPos = (em.transforms[idxA].position + em.transforms[idxB].position) * 0.5f;
+                    em.spawnImpact(midPos, sf::Color(180, 180, 180),
+                        sf::Vector2f((vA2.x - vB2.x) * SCALE * 0.5f,
+                            (vA2.y - vB2.y) * SCALE * 0.5f));
+
+                    // Homing explosive asteroid: detonate on ANY contact
+                    if (em.healths[idxA].isHoming && em.healths[idxA].isExplosive)
+                        em.healths[idxA].currentHp = -1.f;
+                    if (em.healths[idxB].isHoming && em.healths[idxB].isExplosive)
+                        em.healths[idxB].currentHp = -1.f;
+                }
+            }
+
+            // ===== ASTEROID-ENEMY COLLISION DAMAGE (speed-based) =====
+            {
+                b2BodyId astBody = b2_nullBodyId, enBody = b2_nullBodyId;
+                BodyUserData* astUD = nullptr; BodyUserData* enUD = nullptr;
+
+                if (typeA == BodyType::Asteroid && typeB == BodyType::Enemy) {
+                    astBody = bodyA; astUD = udA; enBody = bodyB; enUD = udB;
+                }
+                else if (typeB == BodyType::Asteroid && typeA == BodyType::Enemy) {
+                    astBody = bodyB; astUD = udB; enBody = bodyA; enUD = udA;
+                }
+
+                if (b2Body_IsValid(astBody) && b2Body_IsValid(enBody) && astUD && enUD) {
+                    size_t astIdx = em.getEntityIndex(astUD->entityId);
+                    size_t enIdx = em.getEntityIndex(enUD->entityId);
+                    if (astIdx != (size_t)-1 && enIdx != (size_t)-1) {
+
+                        b2Vec2 vA2 = b2Body_GetLinearVelocity(astBody);
+                        b2Vec2 vB2 = b2Body_GetLinearVelocity(enBody);
+                        float relSpd = std::sqrt(std::pow(vA2.x - vB2.x, 2) +
+                            std::pow(vA2.y - vB2.y, 2));
+
+                        bool isHoming = em.healths[astIdx].isHoming;
+                        bool isExplosive = em.healths[astIdx].isExplosive;
+
+                        if (isHoming && isExplosive) {
+                            // Homing magma: detonate immediately, 5x damage
+                            em.healths[astIdx].explosionDamage *= 5.f;
+                            em.healths[astIdx].explosionRadius *= 1.5f;
+                            em.healths[astIdx].currentHp = -1.f;  // force death → explosion
+                        }
+                        else if (isHoming) {
+                            // Homing normal asteroid: 2.5x contact damage
+                            float dmg = (relSpd > 4.f) ? (relSpd - 4.f) * 4.f * 2.5f : 20.f;
+                            em.healths[enIdx].currentHp -= dmg;
+                            em.healths[astIdx].currentHp = -1.f;  // homing asteroid consumed on hit
+                            sf::Vector2f hitPos = em.transforms[astIdx].position;
+                            em.spawnExplosion(hitPos, sf::Color(0, 255, 200), 20, 3.f);
+                        }
+                        else if (relSpd > 8.f) {
+                            // Normal fast asteroid: speed-based damage
+                            float dmg = (relSpd - 8.f) * 2.5f;
+                            em.healths[enIdx].currentHp -= dmg;
+                            sf::Vector2f midPos = (em.transforms[astIdx].position +
+                                em.transforms[enIdx].position) * 0.5f;
+                            em.spawnImpact(midPos, sf::Color(180, 120, 60),
+                                sf::Vector2f((vA2.x) * SCALE * 0.3f,
+                                    (vA2.y) * SCALE * 0.3f));
+                        }
+                    }
+                }
+            }
         }
 
         // ===== DESTROY DEAD ENTITIES =====
@@ -478,7 +647,8 @@ public:
             if (i == playerIdx) continue;
             b2BodyId bodyId = em.physics[i].bodyId;
             if (!b2Body_IsValid(bodyId)) continue;
-            BodyType type = (BodyType)(uintptr_t)b2Body_GetUserData(bodyId);
+            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(bodyId);
+            BodyType type = ud ? ud->type : BodyType::Asteroid;
             bool shouldDestroy = false;
 
             if (em.healths[i].currentHp <= 0) {
@@ -491,16 +661,26 @@ public:
                     bool isExplosive = em.healths[i].isExplosive;
 
                     if (isExplosive) {
+                        // Check if this was a homing explosive — 5x damage/radius
+                        bool wasHoming = em.healths[i].isHoming;
+                        float damageMult = wasHoming ? 5.f : 1.f;
+                        float radiusMult = wasHoming ? 1.5f : 1.f;
+
                         em.spawnExplosion(deathPos, sf::Color(255, 100, 0), 40, 6.0f);
                         em.spawnExplosion(deathPos, sf::Color(255, 50, 0), 30, 4.0f);
+                        if (wasHoming) {
+                            // Extra green flash to signal parried origin
+                            em.spawnExplosion(deathPos, sf::Color(0, 255, 150), 20, 4.0f);
+                        }
+
                         for (int angle = 0; angle < 360; angle += 15) {
                             float rad = angle * 3.14159f / 180.f;
                             sf::Vector2f dir(std::cos(rad), std::sin(rad));
                             em.spawnImpact(sf::Vector2f(deathPos.x + dir.x * 30, deathPos.y + dir.y * 30),
                                 sf::Color(255, 100, 0), sf::Vector2f(dir.x * 500, dir.y * 500));
                         }
-                        float radius = em.healths[i].explosionRadius;
-                        float damage = em.healths[i].explosionDamage;
+                        float radius = em.healths[i].explosionRadius * radiusMult;
+                        float damage = em.healths[i].explosionDamage * damageMult;
                         for (size_t j = 0; j < em.physics.size(); ++j) {
                             if (j == i) continue;
                             sf::Vector2f otherPos = em.transforms[j].position;
@@ -518,10 +698,10 @@ public:
                         int pCount = (reward >= 200) ? 40 : (reward >= 50 ? 25 : 15);
                         em.spawnExplosion(deathPos, sf::Color(160, 160, 160), pCount, pSize);
                         if (reward >= 200) {
-                            for (int j = 0; j < 3; ++j) spawnChild(em, worldId, lua, deathPos, "MEDIUM");
+                            for (int j = 0; j < 3; ++j) spawnChild(ef, em, worldId, lua, deathPos, "MEDIUM");
                         }
                         else if (reward >= 50) {
-                            for (int j = 0; j < 2; ++j) spawnChild(em, worldId, lua, deathPos, "SMALL");
+                            for (int j = 0; j < 2; ++j) spawnChild(ef, em, worldId, lua, deathPos, "SMALL");
                         }
                     }
                 }
@@ -549,8 +729,9 @@ private:
         float nearestDistSq = FLT_MAX;
         for (size_t i = 0; i < em.physics.size(); ++i) {
             if (!b2Body_IsValid(em.physics[i].bodyId)) continue;
-            BodyType type = (BodyType)(uintptr_t)b2Body_GetUserData(em.physics[i].bodyId);
-            if (type == BodyType::Enemy) {
+            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(em.physics[i].bodyId);
+            if (!ud) continue;
+            if (ud->type == BodyType::Enemy) {
                 sf::Vector2f enemyPos = em.transforms[i].position;
                 float dx = pos.x - enemyPos.x;
                 float dy = pos.y - enemyPos.y;
@@ -564,13 +745,13 @@ private:
         return nearestIdx;
     }
 
-    static void spawnChild(EntityManager& em, b2WorldId worldId, sol::state& lua, sf::Vector2f pos, const char* typeKey) {
+    static void spawnChild(EntityFactory& ef, EntityManager& em, b2WorldId worldId, sol::state& lua, sf::Vector2f pos, const char* typeKey) {
         sol::table config = lua["asteroid_types"][typeKey];
         float angle = (rand() % 360) * 3.14159f / 180.f;
         sol::table speedRange = config["speed_range"];
         float speed = speedRange[1].get<float>() + (rand() % 100 / 100.f) * (speedRange[2].get<float>() - speedRange[1].get<float>());
         sf::Vector2f velocity(std::cos(angle) * speed * 0.5f, std::sin(angle) * speed * 0.5f);
-        uint32_t asteroidEntityId = em.createAsteroid(pos, velocity, config["base_size"], config, worldId);
+        uint32_t asteroidEntityId = ef.createAsteroid(em, pos, velocity, config["base_size"], config, worldId);
         size_t asteroidIdx = em.getEntityIndex(asteroidEntityId);
         float randomRotation = ((rand() % 200) - 100.f) / 50.f;
         if (asteroidIdx != (size_t)-1) {
@@ -674,6 +855,10 @@ public:
         if (playerIdx == (size_t)-1) return;
 
         auto& tf = em.transforms[playerIdx];
+
+        auto& statTf = em.players[playerIdx];
+
+
         auto& phys = em.physics[playerIdx];
         b2BodyId bodyId = phys.bodyId;
 
@@ -688,39 +873,39 @@ public:
         float penaltyTime = lua["penalty_energy"].get_or(3.0f);
         float dashVel = lua["dash_velocity"].get_or(40.f);
         float dashCost = lua["dash_energy_cost"].get_or(30.f);
-        tf.dashMaxCooldown = lua["dash_max_cooldown"].get_or(1.0f);
+        statTf.dashMaxCooldown = lua["dash_max_cooldown"].get_or(1.0f);
 
         sol::table binds = lua["key_bindings"];
 
         // Update cooldowns
-        if (tf.dashCooldown > 0) tf.dashCooldown -= dt;
-        if (tf.overheatTimer > 0) tf.overheatTimer -= dt;
+        if (statTf.dashCooldown > 0) statTf.dashCooldown -= dt;
+        if (statTf.overheatTimer > 0) statTf.overheatTimer -= dt;
 
         // Turbo boost (energy drain)
         std::string sprintKey = binds["sprint"].get<std::string>();
         bool wantSprint = InputRegistry::isPressed(sprintKey);
 
-        if (wantSprint && tf.energyDrive > 0 && tf.overheatTimer <= 0) {
-            tf.isTurbo = true;
-            tf.energyDrive -= drainRate * dt;
-            if (tf.energyDrive <= 0) {
-                tf.energyDrive = 0;
-                tf.overheatTimer = penaltyTime;
-                tf.isTurbo = false;
+        if (wantSprint && statTf.energyDrive > 0 && statTf.overheatTimer <= 0) {
+            statTf.isTurbo = true;
+            statTf.energyDrive -= drainRate * dt;
+            if (statTf.energyDrive <= 0) {
+                statTf.energyDrive = 0;
+                statTf.overheatTimer = penaltyTime;
+                statTf.isTurbo = false;
             }
         }
         else {
-            tf.isTurbo = false;
+            statTf.isTurbo = false;
         }
 
         // Energy regeneration (only when not turbo and not overheated)
-        if (!tf.isTurbo && tf.energyDrive < tf.maxEnergyDrive) {
-            tf.energyDrive += regenRate * dt;
-            if (tf.energyDrive > tf.maxEnergyDrive) tf.energyDrive = tf.maxEnergyDrive;
+        if (!statTf.isTurbo && statTf.energyDrive < statTf.maxEnergyDrive) {
+            statTf.energyDrive += regenRate * dt;
+            if (statTf.energyDrive > statTf.maxEnergyDrive) statTf.energyDrive = statTf.maxEnergyDrive;
         }
 
         // Turbo reduces turn speed (harder to control at high speed)
-        if (tf.isTurbo) rotationSpeed *= 0.3f;
+        if (statTf.isTurbo) rotationSpeed *= 0.3f;
 
         // Mouse aim: rotate ship to face cursor
         b2Vec2 b2Pos = b2Body_GetPosition(bodyId);
@@ -748,11 +933,15 @@ public:
         if (InputRegistry::isPressed(binds["right"].get<std::string>())) dx += 1.f;
 
         // Apply engine force
-        if (tf.isTurbo) {
+        if (statTf.isTurbo) {
             // Turbo: always thrust forward (nose direction)
             float noseRad = (tf.rotation - 90.f) * 3.14159f / 180.f;
             float finalPower = enginePower * multiplier;
             b2Body_ApplyForceToCenter(phys.bodyId, { std::cos(noseRad) * finalPower, std::sin(noseRad) * finalPower }, true);
+        }
+        else if (statTf.riftCharging) {
+            float chargePenalty = statTf.riftCharging ? 0.8f : 1.0f;
+            float finalPower = enginePower * chargePenalty;
         }
         else {
             // Normal: thrust in input direction
@@ -762,10 +951,12 @@ public:
             }
         }
 
+
+
         // Dash mechanic: instant velocity boost
         std::string dashKey = binds["dash"].get<std::string>();
-        if (InputRegistry::isPressed(dashKey) && tf.dashCooldown <= 0 && tf.overheatTimer <= 0) {
-            if (tf.energyDrive >= dashCost) {
+        if (InputRegistry::isPressed(dashKey) && statTf.dashCooldown <= 0 && statTf.overheatTimer <= 0) {
+            if (statTf.energyDrive >= dashCost) {
                 float vx, vy;
                 if (dx != 0 || dy != 0) {
                     float len = std::sqrt(dx * dx + dy * dy);
@@ -779,13 +970,13 @@ public:
                 }
                 b2Body_SetLinearVelocity(bodyId, { vx, vy });
 
-                tf.energyDrive -= dashCost;
-                tf.dashCooldown = tf.dashMaxCooldown;
+                statTf.energyDrive -= dashCost;
+                statTf.dashCooldown = statTf.dashMaxCooldown;
 
                 // Overheat if energy depleted
-                if (tf.energyDrive < 1.0f) {
-                    tf.energyDrive = 0;
-                    tf.overheatTimer = penaltyTime;
+                if (statTf.energyDrive < 1.0f) {
+                    statTf.energyDrive = 0;
+                    statTf.overheatTimer = penaltyTime;
                 }
             }
         }
@@ -795,39 +986,59 @@ public:
         float parryWindow = lua["parry_window"].get_or(0.2f);
         float parryAnimDuration = lua["parry_anim_duration"].get_or(0.6f);
         float parryCooldownTime = lua["parry_cooldown"].get_or(2.0f);
-        tf.parryMaxCooldown = parryCooldownTime;
+        statTf.parryMaxCooldown = parryCooldownTime;
 
         // Update timers
-        if (tf.parryTimer > 0) {
-            tf.parryTimer -= dt;
-            if (tf.parryTimer <= 0) {
-                tf.isParrying = false;   // Active parry ends, but animation continues
+        if (statTf.parryTimer > 0) {
+            statTf.parryTimer -= dt;
+            if (statTf.parryTimer <= 0) {
+                statTf.isParrying = false;   // Active parry ends, but animation continues
             }
         }
-        if (tf.parryAnimTimer > 0) {
-            tf.parryAnimTimer -= dt;
+        if (statTf.parryAnimTimer > 0) {
+            statTf.parryAnimTimer -= dt;
         }
-        if (tf.parryCooldown > 0) tf.parryCooldown -= dt;
+        if (statTf.parryCooldown > 0) statTf.parryCooldown -= dt;
 
         // Activate parry (only if not already in cooldown and not parrying)
-        if (InputRegistry::isPressed(parryKey) && tf.parryCooldown <= 0 && tf.parryTimer <= 0) {
-            tf.isParrying = true;
-            tf.parryTimer = parryWindow;           // Short active window
-            tf.parryAnimTimer = parryAnimDuration; // Longer spin animation
-            tf.parryCooldown = parryCooldownTime;
-            tf.parryStartRotation = tf.rotation;
-            tf.parrySpinAngle = 0.f;
-  
+        if (InputRegistry::isPressed(parryKey) && statTf.parryCooldown <= 0 && statTf.parryTimer <= 0) {
+            statTf.isParrying = true;
+            statTf.parryTimer = parryWindow;           // Short active window
+            statTf.parryAnimTimer = parryAnimDuration; // Longer spin animation
+            statTf.parryCooldown = parryCooldownTime;
+            statTf.parryStartRotation = tf.rotation;
+            statTf.parrySpinAngle = 0.f;
+
         }
 
         // Spin animation (runs for the full anim duration, even after active parry ends)
-        if (tf.parryAnimTimer > 0) {
-            float t = 1.0f - (tf.parryAnimTimer / parryAnimDuration);
+        if (statTf.parryAnimTimer > 0) {
+            float t = 1.0f - (statTf.parryAnimTimer / parryAnimDuration);
             // Ease-out cubic: fast start, smooth deceleration
             float ease = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
             float spinDegrees = 360.f;   // Full 360° spin – change to 720 if desired
-            float angle = tf.parryStartRotation + spinDegrees * ease;
+            float angle = statTf.parryStartRotation + spinDegrees * ease;
             tf.rotation = angle;
+
+            // ===== WHIFF RECOVERY =====
+            if (statTf.parryWhiffRecovery) {
+                statTf.parryWhiffTimer -= dt;
+                if (statTf.parryWhiffTimer <= 0.f) {
+                    statTf.parryWhiffRecovery = false;
+                    statTf.parryWhiffTimer = 0.f;
+                }
+            }
+
+            // Detect whiff: parry animation just ended, nothing was hit
+            static bool wasAnimating = false;
+            bool isAnimating = (statTf.parryAnimTimer > 0.f);
+            if (wasAnimating && !isAnimating && !statTf.parryHitSomething) {
+                statTf.parryWhiffRecovery = true;
+                statTf.parryWhiffTimer = lua["parry_whiff_duration"].get_or(0.5f);
+            }
+            if (!isAnimating) statTf.parryHitSomething = false;
+            wasAnimating = isAnimating;
+
 
             // Apply to Box2D body
             b2Vec2 b2Pos = b2Body_GetPosition(phys.bodyId);
@@ -872,8 +1083,8 @@ public:
  */
 class EnemySystem {
 private:
-    static inline sf::Clock asteroidSpawnClock;
-    static inline sf::Clock pirateSpawnClock;
+    sf::Clock asteroidSpawnClock;
+    sf::Clock pirateSpawnClock;
 
 public:
     /**
@@ -883,7 +1094,7 @@ public:
      * @param worldId Box2D world
      * @param playerEntityId Persistent player ID
      */
-    static void update(EntityManager& em, sol::state& lua, b2WorldId worldId, uint32_t playerEntityId) {
+    void update(EntityFactory& ef, EntityManager& em, sol::state& lua, b2WorldId worldId, uint32_t playerEntityId) {
         size_t playerIdx = em.getEntityIndex(playerEntityId);
         if (playerIdx == (size_t)-1) return;
 
@@ -898,7 +1109,10 @@ public:
         int currentAsteroids = 0;
         int currentPirates = 0;
         for (const auto& p : em.physics) {
-            BodyType type = (BodyType)(uintptr_t)b2Body_GetUserData(p.bodyId);
+            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(p.bodyId);
+            if (!ud) continue;
+            BodyType type = ud->type;
+
             if (type == BodyType::Asteroid) currentAsteroids++;
             if (type == BodyType::Enemy) currentPirates++;
         }
@@ -931,8 +1145,8 @@ public:
             sol::table speedRange = config["speed_range"];
             float speed = speedRange[1].get<float>() + (rand() % 100 / 100.f) * (speedRange[2].get<float>() - speedRange[1].get<float>());
 
-            uint32_t asteroidEntityId = em.createAsteroid(spawnPos, (dir / len) * speed, config["base_size"], config, worldId);
-            
+            uint32_t asteroidEntityId = ef.createAsteroid(em, spawnPos, (dir / len) * speed, config["base_size"], config, worldId);
+
             // Store explosion properties in a new component or use userData
             if (isMagmatic) {
                 size_t asteroidIdx = em.getEntityIndex(asteroidEntityId);
@@ -943,7 +1157,7 @@ public:
                     em.healths[asteroidIdx].explosionDamage = config["explosion_damage"].get_or(30.0f);
                 }
             }
-            
+
             size_t asteroidIdx = em.getEntityIndex(asteroidEntityId);
             if (asteroidIdx != (size_t)-1) {
                 b2Body_SetAngularVelocity(em.physics[asteroidIdx].bodyId, ((rand() % 200) - 100.f) / 50.f);
@@ -961,7 +1175,7 @@ public:
             float pirateSpawnDist = 1200.f;
             sf::Vector2f spawnPos = playerTf.position + sf::Vector2f(std::cos(angle) * pirateSpawnDist, std::sin(angle) * pirateSpawnDist);
 
-            em.createEnemy(spawnPos, lua, worldId);
+            ef.createEnemy(em, spawnPos, lua, worldId);
             pirateSpawnClock.restart();
         }
     }
@@ -989,57 +1203,282 @@ public:
      * @param dt Delta time
      * @param lua Lua state (bullet config)
      */
-    static void update(EntityManager& em, b2WorldId worldId, uint32_t playerEntityId, float dt, sol::state& lua) {
-        static float shootTimer = 0.f;
-        float fireRate = 0.2f;  // 5 shots per second
-        shootTimer -= dt;
+    static void update(EntityFactory& ef, EntityManager& em, b2WorldId worldId,
+        uint32_t playerEntityId, float dt, sol::state& lua) {
+
         sol::table binds = lua["key_bindings"];
+        size_t playerIdx = em.getEntityIndex(playerEntityId);
+        if (playerIdx == (size_t)-1) return;
 
-        // Shooting input
-        if (InputRegistry::isPressed(binds["fire"].get<std::string>()) && shootTimer <= 0) {
-            size_t playerIdx = em.getEntityIndex(playerEntityId);
-            if (playerIdx == (size_t)-1) return;
+        auto& playerStats = em.players[playerIdx];
+        auto& playerTf = em.transforms[playerIdx];
 
-            auto& playerTf = em.transforms[playerIdx];
+        playerStats.shootTimer -= dt;
 
-            float angleRad = (playerTf.rotation - 90.f) * 3.14159f / 180.f;
-            sf::Vector2f direction(std::cos(angleRad), std::sin(angleRad));
+        bool fireHeld = InputRegistry::isPressed(binds["fire"].get<std::string>());
+        bool detonateKey = InputRegistry::isPressed(lua["rift_detonate_key"].get_or(std::string("MouseRight")));
 
-            float bulletSpeed = lua["bullet_speed"].get_or(800.f);
-            sf::Vector2f bulletVel = direction * bulletSpeed;
-            sf::Vector2f spawnPos = playerTf.position + direction * 50.f;
-
-            em.createBullet(spawnPos, bulletVel, playerTf.rotation, lua, worldId);
-            shootTimer = fireRate;
+        // ===== RIFT SHOT CHARGING =====
+        if (detonateKey && !playerStats.riftBoltInFlight && !playerStats.riftCharging) {
+            playerStats.riftCharging = true;
+            playerStats.riftChargeTimer = 0.f;
         }
 
-        // Bullet lifetime and fade out
+        if (playerStats.riftCharging) {
+            playerStats.riftChargeTimer += dt;
+
+            // Charging visual: purple sparks from ship nose
+            if (rand() % 3 == 0) {
+                float rotRad = (playerTf.rotation - 90.f) * 3.14159f / 180.f;
+                sf::Vector2f fwd(std::cos(rotRad), std::sin(rotRad));
+                sf::Vector2f nosePos = playerTf.position + fwd * 40.f;
+                float spread = ((rand() % 60) - 30) * 3.14159f / 180.f;
+                sf::Vector2f sparkDir(
+                    fwd.x * std::cos(spread) - fwd.y * std::sin(spread),
+                    fwd.x * std::sin(spread) + fwd.y * std::cos(spread)
+                );
+                em.particles.push_back({
+                    em.nextEntityId++, nosePos,
+                    sparkDir * (float)(80 + rand() % 120),
+                    sf::Color(180 + rand() % 75, 80, 255, 200),
+                    0.15f, 0.15f, 3.f + rand() % 3
+                    });
+            }
+
+            // Release: either key released early (cancel) or charge complete (fire)
+            if (!detonateKey) {
+                playerStats.riftCharging = false;
+                playerStats.riftChargeTimer = 0.f;
+            }
+            else if (playerStats.riftChargeTimer >= lua["rift_charge_time"].get_or(0.6f)) {
+                // FIRE
+                playerStats.riftCharging = false;
+                playerStats.riftChargeTimer = 0.f;
+
+                float rotRad = (playerTf.rotation - 90.f) * 3.14159f / 180.f;
+                sf::Vector2f fwd(std::cos(rotRad), std::sin(rotRad));
+                sf::Vector2f spawnPos = playerTf.position + fwd * 55.f;
+                sf::Vector2f vel = fwd * lua["rift_bullet_speed"].get_or(1100.f);
+
+                uint32_t boltId = ef.createRiftBolt(em, spawnPos, vel, playerTf.rotation, lua, worldId);
+                playerStats.riftBoltEntityId = boltId;
+                playerStats.riftBoltInFlight = true;
+
+                // Launch burst
+                for (int n = 0; n < 16; ++n) {
+                    float a = (rand() % 360) * 3.14159f / 180.f;
+                    sf::Vector2f d(std::cos(a), std::sin(a));
+                    em.particles.push_back({
+                        em.nextEntityId++, spawnPos, d * (float)(200 + rand() % 200),
+                        sf::Color(160, 60, 255, 220),
+                        0.2f, 0.2f, 4.f
+                        });
+                }
+            }
+        }
+
+        // ===== RIFT BOLT TRAIL & DETONATION =====
+        if (playerStats.riftBoltInFlight) {
+            size_t boltIdx = em.getEntityIndex(playerStats.riftBoltEntityId);
+            if (boltIdx == (size_t)-1) {
+                playerStats.riftBoltInFlight = false;
+                playerStats.riftBoltEntityId = 0;
+            }
+            else {
+                // Purple trail
+                if (rand() % 2 == 0) {
+                    sf::Vector2f boltPos = em.transforms[boltIdx].position;
+                    em.particles.push_back({
+                        em.nextEntityId++, boltPos, { 0.f, 0.f },
+                        sf::Color(180, 60, 255, 180),
+                        0.12f, 0.12f, 6.f
+                        });
+                }
+
+                // DETONATE (left click while bolt in flight)
+                if (fireHeld && playerStats.shootTimer <= 0) {
+                    sf::Vector2f boltPos = em.transforms[boltIdx].position;
+
+                    // Find nearest entity to bolt
+                    float nearestDist = FLT_MAX;
+                    size_t nearestIdx = (size_t)-1;
+                    BodyType nearestType = BodyType::Asteroid;
+
+                    for (size_t j = 0; j < em.physics.size(); ++j) {
+                        if (j == playerIdx || j == boltIdx) continue;
+                        BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(em.physics[j].bodyId);
+                        if (!ud2) continue;
+                        if (ud2->type == BodyType::Bullet) continue;
+
+                        sf::Vector2f diff = boltPos - em.transforms[j].position;
+                        float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y);
+                        if (dist < nearestDist) {
+                            nearestDist = dist;
+                            nearestIdx = j;
+                            nearestType = ud2->type;
+                        }
+                    }
+
+                    float impactThreshold = 120.f; // pixels
+
+                    if (nearestIdx == (size_t)-1 || nearestDist > impactThreshold) {
+                        // AIR BURST
+                        float burstRadius = lua["rift_burst_radius"].get_or(220.f);
+                        float burstDamage = lua["rift_burst_damage"].get_or(18.f);
+
+                        // Visual shockwave
+                        for (int n = 0; n < 36; ++n) {
+                            float a = n * 10.f * 3.14159f / 180.f;
+                            sf::Vector2f d(std::cos(a), std::sin(a));
+                            em.particles.push_back({
+                                em.nextEntityId++,
+                                boltPos + d * burstRadius * 0.3f,
+                                d * 350.f,
+                                sf::Color(120, 60, 255, 200),
+                                0.35f, 0.35f, 5.f
+                                });
+                        }
+                        em.spawnExplosion(boltPos, sf::Color(160, 80, 255), 25, 4.f);
+
+                        // AoE damage + destroy enemy projectiles
+                        for (size_t j = 0; j < em.physics.size(); ++j) {
+                            if (j == playerIdx || j == boltIdx) continue;
+                            BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(em.physics[j].bodyId);
+                            if (!ud2) continue;
+
+                            sf::Vector2f diff = boltPos - em.transforms[j].position;
+                            float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y);
+                            if (dist > burstRadius) continue;
+
+                            float falloff = 1.f - (dist / burstRadius);
+                            if (ud2->type == BodyType::Bullet) {
+                                em.bullets[j].markedForDestroy = true;
+                            }
+                            else {
+                                em.healths[j].currentHp -= burstDamage * falloff;
+                            }
+                        }
+
+                    }
+                    else if (nearestType == BodyType::Asteroid) {
+                        // KINETIC HIJACK
+                        float homingSpeed = lua["homing_missile_speed"].get_or(800.f);
+                        size_t enemyIdx = (size_t)-1;
+                        float bestDist = FLT_MAX;
+                        for (size_t j = 0; j < em.physics.size(); ++j) {
+                            BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(em.physics[j].bodyId);
+                            if (!ud2 || ud2->type != BodyType::Enemy) continue;
+                            sf::Vector2f d = boltPos - em.transforms[j].position;
+                            float dist = d.x * d.x + d.y * d.y;
+                            if (dist < bestDist) { bestDist = dist; enemyIdx = j; }
+                        }
+
+                        if (enemyIdx != (size_t)-1) {
+                            sf::Vector2f toEnemy = em.transforms[enemyIdx].position - boltPos;
+                            float len = std::sqrt(toEnemy.x * toEnemy.x + toEnemy.y * toEnemy.y);
+                            if (len > 0.01f) toEnemy /= len;
+
+                            b2Body_SetLinearVelocity(em.physics[nearestIdx].bodyId,
+                                { toEnemy.x * homingSpeed / SCALE, toEnemy.y * homingSpeed / SCALE });
+                            em.healths[nearestIdx].isHoming = true;
+                            em.healths[nearestIdx].homingTargetEntityId = em.transforms[enemyIdx].entityId;
+
+                            // Hijack visual
+                            for (int n = 0; n < 24; ++n) {
+                                float a = n * 15.f * 3.14159f / 180.f;
+                                sf::Vector2f d(std::cos(a), std::sin(a));
+                                em.spawnImpact(boltPos + d * 30.f,
+                                    sf::Color(0, 255, 200, 200), d * 400.f);
+                            }
+                        }
+
+                    }
+                    else if (nearestType == BodyType::Enemy) {
+                        // SYSTEMS OVERLOAD
+                        float riftDamage = lua["rift_damage"].get_or(45.f) * 3.f;
+                        em.healths[nearestIdx].currentHp -= riftDamage;
+                        em.healths[nearestIdx].stunTimer = 2.f;
+
+                        em.spawnExplosion(em.transforms[nearestIdx].position, sf::Color(160, 60, 255), 40, 5.f);
+                        em.spawnExplosion(em.transforms[nearestIdx].position, sf::Color::White, 20, 3.f);
+                        for (int n = 0; n < 20; ++n) {
+                            float a = (rand() % 360) * 3.14159f / 180.f;
+                            sf::Vector2f d(std::cos(a), std::sin(a));
+                            em.spawnImpact(em.transforms[nearestIdx].position + d * 40.f,
+                                sf::Color(200, 100, 255), d * 300.f);
+                        }
+                    }
+
+                    // Destroy bolt after detonation
+                    em.bullets[boltIdx].markedForDestroy = true;
+                    playerStats.riftBoltInFlight = false;
+                    playerStats.riftBoltEntityId = 0;
+                    playerStats.shootTimer = 0.5f; // brief lockout
+                }
+            }
+        }
+
+        // ===== NORMAL SHOOTING =====
+        if (fireHeld && playerStats.shootTimer <= 0 &&
+            !playerStats.riftCharging && !playerStats.riftBoltInFlight &&
+            !playerStats.parryWhiffRecovery)
+        {
+            float rotRad = (playerTf.rotation - 90.f) * 3.14159f / 180.f;
+            sf::Vector2f direction(std::cos(rotRad), std::sin(rotRad));
+            float bulletSpeed = lua["bullet_speed"].get_or(800.f);
+            sf::Vector2f spawnPos = playerTf.position + direction * 50.f;
+
+            ef.createBullet(em, spawnPos, direction * bulletSpeed, playerTf.rotation, lua, worldId);
+            playerStats.shootTimer = lua["fire_rate"].get_or(0.2f);
+
+            // Muzzle flash particles
+            for (int n = 0; n < 5; ++n) {
+                float spread = ((rand() % 80) - 40) * 3.14159f / 180.f;
+                sf::Vector2f sparkDir(
+                    direction.x * std::cos(spread) - direction.y * std::sin(spread),
+                    direction.x * std::sin(spread) + direction.y * std::cos(spread)
+                );
+                float spd = 150.f + rand() % 200;
+                em.particles.push_back({
+                    em.nextEntityId++,
+                    spawnPos,
+                    sparkDir * spd,
+                    sf::Color(0, 220 + rand() % 35, 200, 230),
+                    0.08f + (rand() % 6) / 100.f,
+                    0.12f,
+                    2.5f + rand() % 2
+                    });
+            }
+        }
+
+        // ===== BULLET LIFETIME AND FADE (YOUR EXISTING CODE) =====
+        // Keep your existing loop that handles bullet lifetime, fade out, and destroy.
+        // Just make sure it doesn't interfere with the Rift Bolt (which is also a Bullet).
+        // Example:
         for (size_t i = em.bullets.size(); i-- > 0; ) {
             b2BodyId bodyId = em.physics[i].bodyId;
             if (!b2Body_IsValid(bodyId)) continue;
 
-            BodyType type = (BodyType)(uintptr_t)b2Body_GetUserData(bodyId);
+            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(bodyId);
+            BodyType type = ud ? ud->type : BodyType::Asteroid;
             if (type != BodyType::Bullet) continue;
 
             auto& bullet = em.bullets[i];
             bullet.lifetime -= dt;
 
-            // Fade out effect (alpha based on remaining lifetime)
-            float maxLifetime = lua["bullet_lifetime"].get_or(1.5f);
-            float ratio = bullet.lifetime / maxLifetime;
-            if (ratio < 0.f) ratio = 0.f;
+            // Fade out for player bullets (non-enemy, non-rift) – optional
+            if (!bullet.isEnemyBullet && !bullet.isRiftBolt) {
+                float maxLifetime = lua["bullet_lifetime"].get_or(1.5f);
+                float ratio = std::max(0.f, bullet.lifetime / maxLifetime);
+                auto& shape = em.renders[i].shape;
+                sf::Color outlineCol = shape.getOutlineColor();
+                sf::Color fillCol = shape.getFillColor();
+                outlineCol.a = static_cast<uint8_t>(ratio * 255);
+                fillCol.a = static_cast<uint8_t>(ratio * 255);
+                shape.setOutlineColor(outlineCol);
+                shape.setFillColor(fillCol);
+            }
 
-            auto& shape = em.renders[i].shape;
-            sf::Color outlineCol = shape.getOutlineColor();
-            sf::Color fillCol = shape.getFillColor();
-
-            outlineCol.a = static_cast<std::uint8_t>(ratio * 255);
-            fillCol.a = static_cast<std::uint8_t>(ratio * 255);
-
-            shape.setOutlineColor(outlineCol);
-            shape.setFillColor(fillCol);
-
-            // Destroy expired bullets
             if (bullet.lifetime <= 0 || bullet.markedForDestroy) {
                 em.destroyEntity(i);
             }
@@ -1103,6 +1542,155 @@ public:
             va.append(v2); va.append(v3); va.append(v0);
         }
         window.draw(va);
+    }
+};
+
+
+
+// ============================================================================
+// EFFECTS SYSTEM
+// ============================================================================
+
+class EffectsSystem {
+public:
+    static void update(EntityManager& em, uint32_t playerEntityId, float dt) {
+        size_t playerIdx = em.getEntityIndex(playerEntityId);
+
+        // ===== THRUSTER PARTICLES FOR ALL SHIPS =====
+        for (size_t i = 0; i < em.physics.size(); ++i) {
+            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(em.physics[i].bodyId);
+            if (!ud) continue;
+
+            b2Vec2 vel = b2Body_GetLinearVelocity(em.physics[i].bodyId);
+            float speed = std::sqrt(vel.x * vel.x + vel.y * vel.y);
+
+            if (ud->type == BodyType::Player && i == playerIdx) {
+                auto& tf = em.transforms[i];
+                auto& st = em.players[i];
+                float rot = tf.rotation * 3.14159f / 180.f;
+
+                // Ship nose direction (forward)
+                sf::Vector2f forward(std::sin(rot), -std::cos(rot));
+                sf::Vector2f right(std::cos(rot), std::sin(rot));
+
+                // Two engine nozzle positions (matching the ship shape stabilizers)
+                sf::Vector2f nozzleL = tf.position - forward * 20.f - right * 18.f;
+                sf::Vector2f nozzleR = tf.position - forward * 20.f + right * 18.f;
+
+                bool moving = (speed > 1.f);
+                bool turbo = st.isTurbo;
+
+                if (moving || turbo) {
+                    int count = turbo ? 3 : 1;
+                    for (int n = 0; n < count; ++n) {
+                        for (auto& nozzle : { nozzleL, nozzleR }) {
+                            float spread = ((rand() % 40) - 20) * 3.14159f / 180.f;
+                            sf::Vector2f dir = -forward;
+                            sf::Vector2f pVel = {
+                                (dir.x * std::cos(spread) - dir.y * std::sin(spread)) * (120.f + rand() % 80),
+                                (dir.x * std::sin(spread) + dir.y * std::cos(spread)) * (120.f + rand() % 80)
+                            };
+
+                            float life = turbo ? 0.25f + (rand() % 15) / 100.f
+                                : 0.12f + (rand() % 8) / 100.f;
+
+                            // Turbo: hot white-blue core. Normal: cool blue
+                            sf::Color col = turbo
+                                ? sf::Color(180, 220, 255, 220)
+                                : sf::Color(60, 160, 255, 180);
+
+                            float sz = turbo ? 4.f + (rand() % 3) : 2.5f + (rand() % 2);
+
+                            em.particles.push_back({
+                                em.nextEntityId++, nozzle, pVel,
+                                col, life, life, sz
+                                });
+                        }
+                    }
+                }
+
+                // ===== DASH BURST =====
+                // We detect a fresh dash by dashCooldown being very close to dashMaxCooldown
+                static float lastDashCooldown = 0.f;
+                bool justDashed = (st.dashCooldown > lastDashCooldown + 0.05f);
+                lastDashCooldown = st.dashCooldown;
+
+                if (justDashed) {
+                    // Radial burst of cyan streaks
+                    for (int n = 0; n < 20; ++n) {
+                        float angle = (rand() % 360) * 3.14159f / 180.f;
+                        sf::Vector2f dir(std::cos(angle), std::sin(angle));
+                        float spd = 300.f + rand() % 200;
+                        em.particles.push_back({
+                            em.nextEntityId++,
+                            tf.position,
+                            dir * spd,
+                            sf::Color(0, 220, 255, 230),
+                            0.2f, 0.2f,
+                            3.5f + (rand() % 3)
+                            });
+                    }
+                    // Afterimage: bright flash at ship center
+                    em.particles.push_back({
+                        em.nextEntityId++,
+                        tf.position,
+                        { 0.f, 0.f },
+                        sf::Color(100, 255, 255, 200),
+                        0.15f, 0.15f, 22.f
+                        });
+                }
+
+                // ===== PARRY ARC — drawn in RenderSystem, but we spawn
+                //       impact sparks at the parry ring edge here =====
+                if (st.isParrying && rand() % 3 == 0) {
+                    float angle = (rand() % 360) * 3.14159f / 180.f;
+                    sf::Vector2f rimPos = tf.position + sf::Vector2f(
+                        std::cos(angle) * 55.f,
+                        std::sin(angle) * 55.f
+                    );
+                    sf::Vector2f rimVel(std::cos(angle) * 80.f, std::sin(angle) * 80.f);
+                    em.particles.push_back({
+                        em.nextEntityId++,
+                        rimPos, rimVel,
+                        sf::Color(0, 255, 220, 200),
+                        0.15f, 0.15f, 2.5f
+                        });
+                }
+            }
+
+            // ===== ENEMY THRUSTER =====
+            else if (ud->type == BodyType::Enemy) {
+                if (speed < 0.5f) continue;  // not moving, no exhaust
+
+                auto& tf = em.transforms[i];
+                float rot = tf.rotation * 3.14159f / 180.f;
+                sf::Vector2f forward(std::sin(rot), -std::cos(rot));
+
+                // Single rear exhaust point
+                sf::Vector2f nozzle = tf.position - forward * 22.f;
+
+                if (rand() % 2 == 0) {  // 50% chance per frame — subtle
+                    float spread = ((rand() % 50) - 25) * 3.14159f / 180.f;
+                    sf::Vector2f dir = -forward;
+                    sf::Vector2f pVel = {
+                        (dir.x * std::cos(spread) - dir.y * std::sin(spread)) * (80.f + rand() % 60),
+                        (dir.x * std::sin(spread) + dir.y * std::cos(spread)) * (80.f + rand() % 60)
+                    };
+
+                    // Red-orange exhaust to match enemy color
+                    int rVar = 200 + rand() % 55;
+                    int gVar = 40 + rand() % 40;
+                    em.particles.push_back({
+                        em.nextEntityId++,
+                        nozzle, pVel,
+                        sf::Color(rVar, gVar, 0, 180),
+                        0.1f + (rand() % 8) / 100.f,
+                        0.15f,
+                        2.f + (rand() % 2)
+                        });
+                }
+            }
+        }
     }
 };
 
@@ -1200,7 +1788,7 @@ public:
      * @param dt Delta time
      * @param lua Lua state (enemy config)
      */
-    static void update(EntityManager& em, uint32_t playerEntityId, float dt, sol::state& lua) {
+    static void update(EntityFactory& ef, EntityManager& em, uint32_t playerEntityId, float dt, sol::state& lua, b2WorldId worldId) {
         size_t playerIdx = em.getEntityIndex(playerEntityId);
         if (playerIdx == (size_t)-1) return;
         sf::Vector2f playerPos = em.transforms[playerIdx].position;
@@ -1208,19 +1796,26 @@ public:
         sol::table config = lua["enemy_config"];
         float enginePower = config["engine_power"].get_or(150.0f);
         float maxSpeed = config["max_speed"].get_or(20.0f);
-        float visionRange = 200.f;   // Detection range (pixels)
-        float combatRange = 200.f;   // Preferred engagement distance
+        float visionRange = 500.f;   // Detection range (pixels)
+        float combatRange = 300.f;   // Preferred engagement distance
 
 
         // ===== HOMING MISSILE UPDATE =====
         for (size_t i = 0; i < em.physics.size(); ++i) {
-            BodyType type = (BodyType)(uintptr_t)b2Body_GetUserData(em.physics[i].bodyId);
+            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(em.physics[i].bodyId);
+            if (!ud) continue;
+            BodyType type = ud->type;
+
             if (type != BodyType::Asteroid) continue;
 
             if (em.healths[i].isHoming && em.healths[i].homingTargetEntityId != 0) {
                 size_t targetIdx = em.getEntityIndex(em.healths[i].homingTargetEntityId);
-                if (targetIdx == (size_t)-1 ||
-                    (BodyType)(uintptr_t)b2Body_GetUserData(em.physics[targetIdx].bodyId) != BodyType::Enemy) {
+                if (targetIdx == (size_t)-1) {
+                    em.healths[i].isHoming = false;
+                    continue;
+                }
+                BodyUserData* targetUD = (BodyUserData*)b2Body_GetUserData(em.physics[targetIdx].bodyId);
+                if (!targetUD || targetUD->type != BodyType::Enemy) {
                     em.healths[i].isHoming = false;
                     continue;
                 }
@@ -1254,7 +1849,9 @@ public:
 
 
         for (size_t i = 0; i < em.physics.size(); ++i) {
-            BodyType type = (BodyType)(uintptr_t)b2Body_GetUserData(em.physics[i].bodyId);
+            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(em.physics[i].bodyId);
+            if (!ud) continue;
+            BodyType type = ud->type;
             if (type != BodyType::Enemy) continue;
 
 
@@ -1352,15 +1949,224 @@ public:
                 ai.smoothedDesiredVel = targetVel;
             }
 
-            // ===== Obstacle Avoidance (asteroids) =====
+            // ===== PIRATE THREAT SYSTEM =====
+                        // Threats are split into two tiers:
+                        //   TIER 1 - slow/normal asteroids: pirate reacts well, avoids reliably
+                        //   TIER 2 - fast/homing asteroids and bullets: pirate has poor reaction,
+                        //            commits to a dodge direction that may already be wrong
+
             sf::Vector2f avoidance(0.f, 0.f);
+
+            // --- Tier 1: Normal asteroid avoidance (existing behavior, works fine) ---
             for (size_t j = 0; j < em.physics.size(); ++j) {
-                if ((BodyType)(uintptr_t)b2Body_GetUserData(em.physics[j].bodyId) == BodyType::Asteroid) {
+                BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(em.physics[j].bodyId);
+                if (!ud2 || ud2->type != BodyType::Asteroid) continue;
+
+                // Skip homing asteroids — handled by tier 2
+                if (em.healths[j].isHoming) continue;
+
+                sf::Vector2f diff = enemyPos - em.transforms[j].position;
+                float d = std::sqrt(diff.x * diff.x + diff.y * diff.y);
+
+                // Check speed — fast-moving normal asteroids get weaker avoidance
+                b2Vec2 astVel = b2Body_GetLinearVelocity(em.physics[j].bodyId);
+                float astSpeed = std::sqrt(astVel.x * astVel.x + astVel.y * astVel.y);
+                float speedPenalty = (astSpeed > 8.f) ? 0.35f : 1.0f; // fast = worse dodge
+
+                if (d < 300.f && d > 0.01f) {
+                    avoidance += (diff / d) * 600.f * (1.0f - d / 300.f) * speedPenalty;
+                }
+            }
+
+            // --- Tier 2: Homing asteroids — pirate reacts late and imprecisely ---
+            {
+                // Find the closest homing asteroid targeting this enemy
+                float closestHomingDist = FLT_MAX;
+                uint32_t closestHomingId = 0;
+                sf::Vector2f closestHomingPos;
+                sf::Vector2f closestHomingVel;
+
+                for (size_t j = 0; j < em.physics.size(); ++j) {
+                    BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(em.physics[j].bodyId);
+                    if (!ud2 || ud2->type != BodyType::Asteroid) continue;
+                    if (!em.healths[j].isHoming) continue;
+                    if (em.healths[j].homingTargetEntityId != entityId) continue;
+
                     sf::Vector2f diff = enemyPos - em.transforms[j].position;
                     float d = std::sqrt(diff.x * diff.x + diff.y * diff.y);
-                    if (d < 300.f) {
-                        avoidance += (diff / d) * 600.f * (1.0f - d / 300.f);
+                    if (d < closestHomingDist) {
+                        closestHomingDist = d;
+                        closestHomingId = ud2->entityId;
+                        closestHomingPos = em.transforms[j].position;
+                        b2Vec2 v = b2Body_GetLinearVelocity(em.physics[j].bodyId);
+                        closestHomingVel = { v.x * SCALE, v.y * SCALE };
                     }
+                }
+
+                // Homing threat logic
+                const float homingNoticeRange = 450.f;   // pirate notices at this distance
+                const float homingPanicRange = 180.f;   // panic dodge kicks in closer
+
+                if (closestHomingId != 0 && closestHomingDist < homingNoticeRange) {
+                    if (!ai.threatNoticed || ai.trackedThreatId != closestHomingId) {
+                        // New threat — pirate needs reaction time before doing anything
+                        // Pirate reaction delay: 0.3-0.7s (slow and inconsistent)
+                        ai.threatReactionDelay = 0.3f + (rand() % 40) / 100.f;
+                        ai.threatNoticed = true;
+                        ai.trackedThreatId = closestHomingId;
+                        ai.dodgeCommitTimer = 0.f; // not committed yet
+                    }
+
+                    if (ai.threatReactionDelay > 0.f) {
+                        // Still reacting — no dodge yet, pirate hasn't processed the threat
+                        ai.threatReactionDelay -= dt;
+                    }
+                    else {
+                        // Pirate has noticed — commit to a dodge direction if not already
+                        if (ai.dodgeCommitTimer <= 0.f) {
+                            // Compute dodge direction at THIS moment (may already be wrong
+                            // by the time pirate acts — that's the human factor)
+                            sf::Vector2f awayFromMissile = enemyPos - closestHomingPos;
+                            float len = std::sqrt(awayFromMissile.x * awayFromMissile.x +
+                                awayFromMissile.y * awayFromMissile.y);
+                            if (len > 0.01f) awayFromMissile /= len;
+
+                            // Perpendicular dodge (sidestep) — pirates do this poorly
+                            // Sometimes they dodge left, sometimes right, sometimes almost
+                            // straight away — randomised per-commit
+                            sf::Vector2f perp(-awayFromMissile.y, awayFromMissile.x);
+                            int dodgeChoice = rand() % 10;
+                            if (dodgeChoice < 4) {
+                                // Decent sidestep (40% chance)
+                                ai.pendingDodgeDir = perp * ((rand() % 2 == 0) ? 1.f : -1.f);
+                            }
+                            else if (dodgeChoice < 7) {
+                                // Partial sidestep mixed with away (30% chance — mediocre)
+                                ai.pendingDodgeDir = (awayFromMissile + perp * 0.6f);
+                                float plen = std::sqrt(ai.pendingDodgeDir.x * ai.pendingDodgeDir.x +
+                                    ai.pendingDodgeDir.y * ai.pendingDodgeDir.y);
+                                if (plen > 0.01f) ai.pendingDodgeDir /= plen;
+                            }
+                            else if (dodgeChoice < 9) {
+                                // Just run away (20% — slow and usually gets hit anyway)
+                                ai.pendingDodgeDir = awayFromMissile;
+                            }
+                            else {
+                                // Dodge the wrong direction (10% — pure pirate mistake)
+                                ai.pendingDodgeDir = -perp * ((rand() % 2 == 0) ? 1.f : -1.f);
+                            }
+
+                            // Commit duration: 0.4-0.8s (pirate holds this direction)
+                            ai.dodgeCommitTimer = 0.4f + (rand() % 40) / 100.f;
+                        }
+
+                        // Apply committed dodge — panic range boosts the force
+                        float dodgeStrength = (closestHomingDist < homingPanicRange)
+                            ? maxSpeed * 14.f
+                            : maxSpeed * 8.f;
+
+                        avoidance += ai.pendingDodgeDir * dodgeStrength;
+                        ai.dodgeCommitTimer -= dt;
+                    }
+                }
+                else {
+                    // No homing threat — reset tracking
+                    if (ai.trackedThreatId != 0) {
+                        ai.threatNoticed = false;
+                        ai.trackedThreatId = 0;
+                        ai.dodgeCommitTimer = 0.f;
+                        ai.threatReactionDelay = 0.f;
+                    }
+                }
+            }
+
+            // --- Tier 3: Bullet dodge — weak, delayed, mostly fails ---
+            {
+                // Find the most dangerous incoming bullet (closest + heading toward us)
+                float bestThreatScore = 0.f;
+                sf::Vector2f bestBulletPos;
+                sf::Vector2f bestBulletVel;
+                bool foundBullet = false;
+
+                for (size_t j = 0; j < em.physics.size(); ++j) {
+                    BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(em.physics[j].bodyId);
+                    if (!ud2 || ud2->type != BodyType::Bullet) continue;
+
+                    sf::Vector2f bPos = em.transforms[j].position;
+                    b2Vec2 bv = b2Body_GetLinearVelocity(em.physics[j].bodyId);
+                    sf::Vector2f bVel = { bv.x * SCALE, bv.y * SCALE };
+
+                    sf::Vector2f toEnemy = enemyPos - bPos;
+                    float dist = std::sqrt(toEnemy.x * toEnemy.x + toEnemy.y * toEnemy.y);
+                    if (dist > 400.f) continue;
+
+                    // Check if bullet is actually heading toward this enemy
+                    float bSpeed = std::sqrt(bVel.x * bVel.x + bVel.y * bVel.y);
+                    if (bSpeed < 0.01f) continue;
+                    sf::Vector2f bDir = bVel / bSpeed;
+                    sf::Vector2f toEnemyNorm = toEnemy / dist;
+                    float alignment = bDir.x * toEnemyNorm.x + bDir.y * toEnemyNorm.y;
+
+                    // Only care about bullets heading somewhat toward us (dot > 0.5)
+                    if (alignment < 0.5f) continue;
+
+                    float threatScore = alignment / (dist + 1.f);
+                    if (threatScore > bestThreatScore) {
+                        bestThreatScore = threatScore;
+                        bestBulletPos = bPos;
+                        bestBulletVel = bVel;
+                        foundBullet = true;
+                    }
+                }
+
+                if (foundBullet) {
+                    if (ai.bulletReactionDelay <= 0.f && ai.bulletDodgeTimer <= 0.f) {
+                        // Pirate just noticed a bullet — reaction delay 0.15-0.45s
+                        // At bullet speed (800px/s) this usually means getting hit anyway
+                        ai.bulletReactionDelay = 0.15f + (rand() % 30) / 100.f;
+                    }
+
+                    if (ai.bulletReactionDelay > 0.f) {
+                        ai.bulletReactionDelay -= dt;
+                    }
+                    else if (ai.bulletDodgeTimer <= 0.f) {
+                        // Finally reacting — pick a dodge direction
+                        // Bullets move fast so pirate uses incoming direction to sidestep
+                        float bSpeed = std::sqrt(bestBulletVel.x * bestBulletVel.x +
+                            bestBulletVel.y * bestBulletVel.y);
+                        sf::Vector2f bDir = (bSpeed > 0.01f) ? bestBulletVel / bSpeed
+                            : sf::Vector2f(1.f, 0.f);
+                        sf::Vector2f perp(-bDir.y, bDir.x);
+
+                        // 60% chance of picking the better perpendicular direction,
+                        // 25% chance of picking the worse one, 15% barely moves
+                        int r = rand() % 100;
+                        if (r < 60) {
+                            ai.bulletDodgeDir = perp * ((rand() % 2 == 0) ? 1.f : -1.f);
+                        }
+                        else if (r < 85) {
+                            // partial dodge mixed with bad direction
+                            ai.bulletDodgeDir = (perp * 0.4f - bDir * 0.3f);
+                            float len = std::sqrt(ai.bulletDodgeDir.x * ai.bulletDodgeDir.x +
+                                ai.bulletDodgeDir.y * ai.bulletDodgeDir.y);
+                            if (len > 0.01f) ai.bulletDodgeDir /= len;
+                        }
+                        else {
+                            // barely reacts
+                            ai.bulletDodgeDir = perp * 0.2f;
+                        }
+
+                        // Short commit: 0.1-0.25s (bullet moves fast, window is tiny)
+                        ai.bulletDodgeTimer = 0.1f + (rand() % 15) / 100.f;
+                    }
+                }
+                else {
+                    ai.bulletReactionDelay = 0.f;
+                }
+
+                if (ai.bulletDodgeTimer > 0.f) {
+                    avoidance += ai.bulletDodgeDir * (maxSpeed * 6.f);
+                    ai.bulletDodgeTimer -= dt;
                 }
             }
 
@@ -1380,6 +2186,100 @@ public:
             }
 
             b2Body_ApplyForceToCenter(bodyId, { impulse.x * 50.0f, impulse.y * 50.0f }, true);
+
+
+            // ===== ENEMY SHOOTING =====
+            // Pirates shoot at player when in COMBAT range.
+            // Moderate accuracy: they lead the target slightly but add random spread.
+            // Opportunistic asteroid shooting: if an asteroid is very close and blocking
+            // their path, they fire at it (~20% chance per shot opportunity).
+            if (ai.currentState == EnemyState::COMBAT) {
+                auto& enemyComp = em.enemies[i];
+                enemyComp.fireTimer -= dt;
+
+                float attackRange = config["attack_range"].get_or(480.f);
+                float fireRate = config["fire_rate"].get_or(1.8f);
+                float aimSpread = config["aim_spread"].get_or(18.f);
+
+                if (enemyComp.fireTimer <= 0.f && distToPlayer < attackRange) {
+                    // --- Aim at player with imperfect leading ---
+                    // Predict where player will be using their velocity
+                    b2Vec2 pVel = b2Body_GetLinearVelocity(em.physics[playerIdx].bodyId);
+                    sf::Vector2f playerVelocity(pVel.x * SCALE, pVel.y * SCALE);
+                    float bulletSpeed = config["bullet_speed"].get_or(550.f);
+                    float travelTime = distToPlayer / bulletSpeed;
+
+                    // Pirate leads the target, but imperfectly — only 60% of travel time
+                    // (they're dumb, they don't fully account for player speed)
+                    float leadFactor = 0.6f + (rand() % 30) / 100.f;  // 0.6–0.9
+                    sf::Vector2f predictedPos = playerPos + playerVelocity * (travelTime * leadFactor);
+
+                    sf::Vector2f aimDir = predictedPos - enemyPos;
+                    float aimLen = std::sqrt(aimDir.x * aimDir.x + aimDir.y * aimDir.y);
+                    if (aimLen > 0.01f) aimDir /= aimLen;
+
+                    // Add random angular spread
+                    float spreadRad = ((rand() % 200) - 100) / 100.f * (aimSpread * 3.14159f / 180.f);
+                    sf::Vector2f finalDir = {
+                        aimDir.x * std::cos(spreadRad) - aimDir.y * std::sin(spreadRad),
+                        aimDir.x * std::sin(spreadRad) + aimDir.y * std::cos(spreadRad)
+                    };
+
+                    float shotAngle = std::atan2(finalDir.y, finalDir.x) * 180.f / 3.14159f + 90.f;
+                    sf::Vector2f spawnPos = enemyPos + finalDir * 35.f;
+
+                    ef.createEnemyBullet(em, spawnPos, finalDir * bulletSpeed,
+                        shotAngle, entityId, lua, worldId);
+
+                    // Small muzzle flash
+                    em.spawnImpact(spawnPos, sf::Color(255, 120, 0), finalDir * -200.f);
+
+                    // Cooldown with slight variance (pirates aren't metronomes)
+                    enemyComp.fireTimer = fireRate + ((rand() % 40) - 20) / 100.f;
+                }
+            }
+
+            // Opportunistic asteroid destruction:
+            // If a large/medium asteroid is very close and roughly ahead, shoot it.
+            // This happens outside COMBAT too — pirates clear their own path.
+            {
+                auto& enemyComp = em.enemies[i];
+                // Only fire opportunistically if main fire timer has some cooldown left
+                // (don't waste shots needed for combat)
+                if (enemyComp.fireTimer > 0.3f) {
+                    for (size_t j = 0; j < em.physics.size(); ++j) {
+                        BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(em.physics[j].bodyId);
+                        if (!ud2 || ud2->type != BodyType::Asteroid) continue;
+
+                        sf::Vector2f astPos = em.transforms[j].position;
+                        sf::Vector2f toAst = astPos - enemyPos;
+                        float astDist = std::sqrt(toAst.x * toAst.x + toAst.y * toAst.y);
+                        if (astDist > 200.f || astDist < 0.01f) continue;
+
+                        // Is the asteroid roughly in the direction the enemy is moving?
+                        b2Vec2 ev = b2Body_GetLinearVelocity(bodyId);
+                        sf::Vector2f enemyMovDir(ev.x, ev.y);
+                        float emLen = std::sqrt(enemyMovDir.x * enemyMovDir.x + enemyMovDir.y * enemyMovDir.y);
+                        if (emLen < 0.01f) continue;
+                        enemyMovDir /= emLen;
+                        sf::Vector2f toAstNorm = toAst / astDist;
+                        float dot = enemyMovDir.x * toAstNorm.x + enemyMovDir.y * toAstNorm.y;
+                        if (dot < 0.6f) continue;  // not in our path
+
+                        // 20% chance to actually shoot it
+                        if (rand() % 5 != 0) continue;
+
+                        float shotAngle = std::atan2(toAstNorm.y, toAstNorm.x) * 180.f / 3.14159f + 90.f;
+                        sf::Vector2f spawnPos = enemyPos + toAstNorm * 35.f;
+                        float bulletSpeed = config["bullet_speed"].get_or(550.f);
+                        ef.createEnemyBullet(em, spawnPos, toAstNorm * bulletSpeed,
+                            shotAngle, entityId, lua, worldId);
+                        enemyComp.fireTimer = config["fire_rate"].get_or(1.8f);
+                        break; // one shot per frame max
+                    }
+                }
+            }
+
 
             // ===== Rotation (face movement direction or player in combat) =====
             float targetAngle = tf.rotation;

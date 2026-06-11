@@ -34,6 +34,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\components.hpp" />
+    <ClInclude Include="Include\EntityFactory.hpp" />
     <ClInclude Include="include\EntityManager.hpp" />
     <ClInclude Include="Include\GameConfig.hpp" />
     <ClInclude Include="include\Systems.hpp" />

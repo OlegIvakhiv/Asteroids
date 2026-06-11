@@ -88,7 +88,21 @@ dash_flash_color = { r = 100, g = 255, b = 255, a = 200 } -- Bright cyan flash d
 
 bullet_speed = 800.0         -- Projectile velocity (pixels/sec)
 bullet_lifetime = 1.5        -- Seconds before bullet auto-destructs
+fire_rate = 0.2
 bullet_color = { r = 0, g = 255, b = 200, a = 255 } -- Turquoise neon
+
+-- Rift Shot
+rift_charge_time    = 0.6     -- seconds to hold before firing
+rift_bullet_speed   = 1100.0  -- faster than normal (800)
+rift_damage         = 45.0    -- 3x normal bullet (15)
+rift_hitbox_radius  = 0.35    -- larger than normal bullet (0.1)
+
+-- Air Burst (detonate in open space)
+rift_burst_radius   = 220.0
+rift_burst_damage   = 18.0
+
+-- Parry whiff
+parry_whiff_duration = 0.5
 
 -- ============================================================================
 -- HEALTH & INVULNERABILITY
@@ -114,6 +128,7 @@ key_bindings = {
     right  = "D",           -- Strafe right
     dash   = "Space",       -- Dash / dodge roll (instant velocity burst)
     fire   = "MouseLeft",   -- Primary weapon (shoot bullets)
-    sprint = "LShift",       -- Turbo / energy boost (consumes energy)
-    parry = "R"             -- Parry button!
+    sprint = "LShift",      -- Turbo / energy boost (consumes energy)
+    parry = "R",            -- Parry button!
+    rift_detonate_key   = "MouseRight"
 }
