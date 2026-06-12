@@ -1533,10 +1533,10 @@ public:
             sf::Vector2f p = star.position;
 
             // Each star is a quad (2 triangles = 6 vertices)
-            sf::Vertex v0({ p.x - r, p.y - r }, star.color);
-            sf::Vertex v1({ p.x + r, p.y - r }, star.color);
-            sf::Vertex v2({ p.x + r, p.y + r }, star.color);
-            sf::Vertex v3({ p.x - r, p.y + r }, star.color);
+            sf::Vertex v0; v0.position = { p.x - r, p.y - r }; v0.color = star.color;
+            sf::Vertex v1; v1.position = { p.x + r, p.y - r }; v1.color = star.color;
+            sf::Vertex v2; v2.position = { p.x + r, p.y + r }; v2.color = star.color;
+            sf::Vertex v3; v3.position = { p.x - r, p.y + r }; v3.color = star.color;
 
             va.append(v0); va.append(v1); va.append(v2);
             va.append(v2); va.append(v3); va.append(v0);

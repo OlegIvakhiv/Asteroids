@@ -1,31 +1,123 @@
-cmake_minimum_required(VERSION 3.10)
-project(SpaceWarsEngine)
+cmake_minimum_required(VERSION 3.20)
+project(ModularSpaceEngine VERSION 1.1 LANGUAGES CXX)
 
-# Встановлюємо стандарт C++20 (потрібно для SFML 3.0 та sol2)
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 1. Шукаємо SFML 3.0
-find_package(SFML 3.0 COMPONENTS graphics window system audio REQUIRED)
+# ============================================================================
+# HARDCODED PATHS (your machine)
+# ============================================================================
 
-# 2. Шукаємо Lua
-find_package(Lua REQUIRED)
+set(SFML_DIR        "C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/lib/cmake/SFML"
+    CACHE PATH "" FORCE)
 
-# 3. Шукаємо sol2 (якщо вона встановлена через vcpkg або лежить в папці)
-find_package(sol2 REQUIRED)
+set(box2d_DIR       "C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/share/box2d"
+    CACHE PATH "" FORCE)
 
-# Додаємо твої папки з заголовками (.hpp)
-include_directories(include)
+set(LUA_INCLUDE_DIR "C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/include"
+    CACHE PATH "" FORCE)
 
-# Створюємо виконуваний файл з усіх твоїх .cpp файлів
-file(GLOB_RECURSE SOURCES "src/*.cpp")
-add_executable(${PROJECT_NAME} main.cpp ${SOURCES})
+set(LUA_LIBRARY     "C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/lib/lua.lib"
+    CACHE FILEPATH "" FORCE)
 
-# "Склеюємо" все докупи
-target_link_libraries(${PROJECT_NAME} 
-    sfml-graphics 
-    sfml-window 
-    sfml-system
-    ${LUA_LIBRARIES}
-    sol2::sol2
+# ============================================================================
+# SOURCE FILES
+# ============================================================================
+
+add_executable(${PROJECT_NAME}
+    src/game.cpp
 )
+
+target_include_directories(${PROJECT_NAME} PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+
+# ============================================================================
+# SFML 3.0
+# ============================================================================
+
+find_package(SFML 3 REQUIRED COMPONENTS Graphics)
+target_link_libraries(${PROJECT_NAME} PRIVATE SFML::Graphics)
+
+# ============================================================================
+# BOX2D v3
+# ============================================================================
+
+find_package(box2d REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE box2d)
+
+# ============================================================================
+# LUA + SOL2
+# ============================================================================
+
+find_package(Lua REQUIRED)
+target_include_directories(${PROJECT_NAME} PRIVATE ${LUA_INCLUDE_DIR})
+target_link_libraries(${PROJECT_NAME} PRIVATE ${LUA_LIBRARIES})
+
+find_package(sol2 QUIET)
+if (sol2_FOUND)
+    target_link_libraries(${PROJECT_NAME} PRIVATE sol2::sol2)
+else()
+    target_include_directories(${PROJECT_NAME} PRIVATE
+        ${CMAKE_SOURCE_DIR}/external/sol2/include
+    )
+endif()
+
+# ============================================================================
+# COMPILER FLAGS
+# ============================================================================
+
+if (MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE /W3 /O2)
+else()
+    target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -O2)
+endif()
+
+# ============================================================================
+# COPY ASSETS & SCRIPTS TO BUILD DIRECTORY
+# ============================================================================
+
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/assets
+        $<TARGET_FILE_DIR:${PROJECT_NAME}>/assets
+    COMMENT "Copying assets..."
+)
+
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/scripts
+        $<TARGET_FILE_DIR:${PROJECT_NAME}>/scripts
+    COMMENT "Copying Lua scripts..."
+)
+
+# ============================================================================
+# WINDOWS: copy DLLs next to the .exe
+# ============================================================================
+
+if (WIN32)
+    set(VCPKG_BIN "C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/bin")
+
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${VCPKG_BIN}/lua.dll"
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>
+        COMMENT "Copying lua.dll..."
+    )
+
+    # copy SFML DLLs
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_RUNTIME_DLLS:${PROJECT_NAME}>
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>
+        COMMAND_EXPAND_LISTS
+        COMMENT "Copying runtime DLLs..."
+    )
+
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${VCPKG_BIN}/box2d.dll"
+        $<TARGET_FILE_DIR:${PROJECT_NAME}>
+    COMMENT "Copying box2d.dll..."
+)
+endif()
