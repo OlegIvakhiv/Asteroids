@@ -1,4 +1,7 @@
-<img width="800" height="450" alt="ezgif-6024e53e2437849d" src="https://github.com/user-attachments/assets/6dd62573-4776-41df-a896-1dc655887db0" /># 🚀 Modular Space Engine
+<img width="800" height="450" alt="ezgif-6024e53e2437849d" src="https://github.com/user-attachments/assets/6c89f26f-5f2c-46a8-97cf-b8edb269c1d3" />
+
+
+# 🚀 Modular Space Engine
 
 > Модульний ігровий рушій на основі ECS-архітектури для 2D космічної аркади, натхненої класичними "Spacewar!" та "Asteroids".
 
@@ -227,6 +230,10 @@ PhysicsSystem + AISystem разом займають менше **0.5% кадр�
 
 <img width="800" height="450" alt="ezgif-66049663d8fffc05" src="https://github.com/user-attachments/assets/de188c57-e369-4bab-9ab2-6ae02b1576ec" />
 
+
+
 <img width="800" height="450" alt="ezgif-69e91a413470ef26" src="https://github.com/user-attachments/assets/16d9d5cb-5eaf-4817-9f1d-17ac77859142" />
+
+
 
 <img width="800" height="450" alt="ezgif-6024e53e2437849d" src="https://github.com/user-attachments/assets/d7510688-f3d8-4b2f-97c5-2cf1c8d0ef88" />
