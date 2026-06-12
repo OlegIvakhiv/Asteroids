@@ -86,8 +86,8 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\external\sol2\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/include"</AdditionalOptions>
+      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/include" /external:I "C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/include"</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <BufferSecurityCheck></BufferSecurityCheck>
@@ -109,16 +109,16 @@
       <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
       <UseFullPaths>false</UseFullPaths>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;CMAKE_INTDIR="Debug"</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;BOX2D_DLL;CMAKE_INTDIR="Debug"</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)</ObjectFileName>
       <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_DEBUG;_WINDOWS;CMAKE_INTDIR=\"Debug\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\external\sol2\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_DEBUG;_WINDOWS;BOX2D_DLL;CMAKE_INTDIR=\"Debug\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\external\sol2\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -126,7 +126,7 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <PostBuildEvent>
-      <Message>Copying assets...	Copying Lua scripts...	Copying lua.dll...	Copying runtime DLLs...	Copying box2d.dll...</Message>
+      <Message>Copying assets...	Copying Lua scripts...	Copying runtime DLLs...</Message>
       <Command>setlocal
 "C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_directory C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/assets C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/Debug/assets
 if %errorlevel% neq 0 goto :cmEnd
@@ -146,25 +146,7 @@ exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
-"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/bin/lua.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/Debug
-if %errorlevel% neq 0 goto :cmEnd
-:cmEnd
-endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
-:cmErrorLevel
-exit /b %1
-:cmDone
-if %errorlevel% neq 0 goto :VCEnd
-setlocal
-"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-graphics-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-window-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-system-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/Debug
-if %errorlevel% neq 0 goto :cmEnd
-:cmEnd
-endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
-:cmErrorLevel
-exit /b %1
-:cmDone
-if %errorlevel% neq 0 goto :VCEnd
-setlocal
-"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/bin/box2d.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/Debug
+"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-graphics-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/debug/bin/box2dd.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-window-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-system-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/Debug
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -174,7 +156,7 @@ exit /b %1
 if %errorlevel% neq 0 goto :VCEnd</Command>
     </PostBuildEvent>
     <Link>
-      <AdditionalDependencies>C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-graphics-d.lib;box2d.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\lib\lua.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-window-d.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-system-d.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalDependencies>C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-graphics-d.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\debug\lib\box2dd.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\lib\lua.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-window-d.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-system-d.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <DataExecutionPrevention></DataExecutionPrevention>
@@ -193,8 +175,8 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\external\sol2\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/include"</AdditionalOptions>
+      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/include" /external:I "C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/include"</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <BufferSecurityCheck></BufferSecurityCheck>
@@ -215,18 +197,18 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
       <UseFullPaths>false</UseFullPaths>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;CMAKE_INTDIR="Release"</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;BOX2D_DLL;CMAKE_INTDIR="Release"</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)</ObjectFileName>
       <DebugInformationFormat>
       </DebugInformationFormat>
       <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;CMAKE_INTDIR=\"Release\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\external\sol2\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;BOX2D_DLL;CMAKE_INTDIR=\"Release\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\external\sol2\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -234,7 +216,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <PostBuildEvent>
-      <Message>Copying assets...	Copying Lua scripts...	Copying lua.dll...	Copying runtime DLLs...	Copying box2d.dll...</Message>
+      <Message>Copying assets...	Copying Lua scripts...	Copying runtime DLLs...</Message>
       <Command>setlocal
 "C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_directory C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/assets C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/Release/assets
 if %errorlevel% neq 0 goto :cmEnd
@@ -254,25 +236,7 @@ exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
-"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/bin/lua.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/Release
-if %errorlevel% neq 0 goto :cmEnd
-:cmEnd
-endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
-:cmErrorLevel
-exit /b %1
-:cmDone
-if %errorlevel% neq 0 goto :VCEnd
-setlocal
-"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-graphics-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-window-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-system-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/Release
-if %errorlevel% neq 0 goto :cmEnd
-:cmEnd
-endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
-:cmErrorLevel
-exit /b %1
-:cmDone
-if %errorlevel% neq 0 goto :VCEnd
-setlocal
-"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/bin/box2d.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/Release
+"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-graphics-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/bin/box2d.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-window-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-system-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/Release
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -282,7 +246,7 @@ exit /b %1
 if %errorlevel% neq 0 goto :VCEnd</Command>
     </PostBuildEvent>
     <Link>
-      <AdditionalDependencies>C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-graphics.lib;box2d.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\lib\lua.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-window.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-system.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalDependencies>C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-graphics.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\lib\box2d.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\lib\lua.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-window.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-system.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <DataExecutionPrevention></DataExecutionPrevention>
@@ -301,8 +265,8 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\external\sol2\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/include"</AdditionalOptions>
+      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/include" /external:I "C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/include"</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <BufferSecurityCheck></BufferSecurityCheck>
@@ -323,18 +287,18 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
       <UseFullPaths>false</UseFullPaths>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;CMAKE_INTDIR="MinSizeRel"</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;BOX2D_DLL;CMAKE_INTDIR="MinSizeRel"</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)</ObjectFileName>
       <DebugInformationFormat>
       </DebugInformationFormat>
       <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;CMAKE_INTDIR=\"MinSizeRel\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\external\sol2\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;BOX2D_DLL;CMAKE_INTDIR=\"MinSizeRel\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\external\sol2\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -342,7 +306,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <PostBuildEvent>
-      <Message>Copying assets...	Copying Lua scripts...	Copying lua.dll...	Copying runtime DLLs...	Copying box2d.dll...</Message>
+      <Message>Copying assets...	Copying Lua scripts...	Copying runtime DLLs...</Message>
       <Command>setlocal
 "C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_directory C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/assets C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/MinSizeRel/assets
 if %errorlevel% neq 0 goto :cmEnd
@@ -362,25 +326,7 @@ exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
-"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/bin/lua.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/MinSizeRel
-if %errorlevel% neq 0 goto :cmEnd
-:cmEnd
-endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
-:cmErrorLevel
-exit /b %1
-:cmDone
-if %errorlevel% neq 0 goto :VCEnd
-setlocal
-"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-graphics-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-window-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-system-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/MinSizeRel
-if %errorlevel% neq 0 goto :cmEnd
-:cmEnd
-endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
-:cmErrorLevel
-exit /b %1
-:cmDone
-if %errorlevel% neq 0 goto :VCEnd
-setlocal
-"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/bin/box2d.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/MinSizeRel
+"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-graphics-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/debug/bin/box2dd.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-window-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-system-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/MinSizeRel
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -390,7 +336,7 @@ exit /b %1
 if %errorlevel% neq 0 goto :VCEnd</Command>
     </PostBuildEvent>
     <Link>
-      <AdditionalDependencies>C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-graphics-d.lib;box2d.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\lib\lua.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-window-d.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-system-d.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalDependencies>C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-graphics-d.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\debug\lib\box2dd.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\lib\lua.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-window-d.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-system-d.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <DataExecutionPrevention></DataExecutionPrevention>
@@ -409,8 +355,8 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\external\sol2\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/include"</AdditionalOptions>
+      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/include" /external:I "C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/include"</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <BufferSecurityCheck></BufferSecurityCheck>
@@ -432,16 +378,16 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
       <UseFullPaths>false</UseFullPaths>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;CMAKE_INTDIR="RelWithDebInfo"</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;BOX2D_DLL;B2_ENABLE_ASSERT;CMAKE_INTDIR="RelWithDebInfo"</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)</ObjectFileName>
       <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;CMAKE_INTDIR=\"RelWithDebInfo\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\external\sol2\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;BOX2D_DLL;B2_ENABLE_ASSERT;CMAKE_INTDIR=\"RelWithDebInfo\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\external\sol2\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\include;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -449,7 +395,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <PostBuildEvent>
-      <Message>Copying assets...	Copying Lua scripts...	Copying lua.dll...	Copying runtime DLLs...	Copying box2d.dll...</Message>
+      <Message>Copying assets...	Copying Lua scripts...	Copying runtime DLLs...</Message>
       <Command>setlocal
 "C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_directory C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/assets C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/RelWithDebInfo/assets
 if %errorlevel% neq 0 goto :cmEnd
@@ -469,25 +415,7 @@ exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd
 setlocal
-"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/bin/lua.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/RelWithDebInfo
-if %errorlevel% neq 0 goto :cmEnd
-:cmEnd
-endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
-:cmErrorLevel
-exit /b %1
-:cmDone
-if %errorlevel% neq 0 goto :VCEnd
-setlocal
-"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-graphics-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-window-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-system-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/RelWithDebInfo
-if %errorlevel% neq 0 goto :cmEnd
-:cmEnd
-endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
-:cmErrorLevel
-exit /b %1
-:cmDone
-if %errorlevel% neq 0 goto :VCEnd
-setlocal
-"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/bin/box2d.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/RelWithDebInfo
+"C:\Program Files (x86)\CMake\bin\cmake.exe" -E copy_if_different C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-graphics-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/debug/bin/box2dd.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-window-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/bin/sfml-system-d-3.dll C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build/RelWithDebInfo
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -497,7 +425,7 @@ exit /b %1
 if %errorlevel% neq 0 goto :VCEnd</Command>
     </PostBuildEvent>
     <Link>
-      <AdditionalDependencies>C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-graphics-d.lib;box2d.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\lib\lua.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-window-d.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-system-d.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalDependencies>C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-graphics-d.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\debug\lib\box2dd.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\A_New_new_game_2.0\vcpkg_installed\x64-windows\x64-windows\lib\lua.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-window-d.lib;C:\Users\Oleg\source\repos\A_New_new_game_2.0\sfml\lib\sfml-system-d.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <DataExecutionPrevention></DataExecutionPrevention>

@@ -15,6 +15,7 @@
     <None Include="scripts\Enemy.lua">
       <Filter>scripts</Filter>
     </None>
+    <None Include="CMakePresets.json" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="src %28.cpp%29">

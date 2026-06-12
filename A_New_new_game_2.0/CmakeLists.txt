@@ -5,20 +5,16 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ============================================================================
-# HARDCODED PATHS (your machine)
+# HARDCODED PATHS 
 # ============================================================================
 
-set(SFML_DIR        "C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/lib/cmake/SFML"
-    CACHE PATH "" FORCE)
+set(SFML_ROOT "C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml" CACHE PATH "Path to SFML install")
+list(APPEND CMAKE_PREFIX_PATH "${SFML_ROOT}")
 
-set(box2d_DIR       "C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/share/box2d"
-    CACHE PATH "" FORCE)
-
-set(LUA_INCLUDE_DIR "C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/include"
-    CACHE PATH "" FORCE)
-
-set(LUA_LIBRARY     "C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/lib/lua.lib"
-    CACHE FILEPATH "" FORCE)
+set(VCPKG_INSTALLED "${CMAKE_SOURCE_DIR}/vcpkg_installed/x64-windows/x64-windows")
+list(APPEND CMAKE_PREFIX_PATH "${VCPKG_INSTALLED}")
+set(LUA_INCLUDE_DIR "${VCPKG_INSTALLED}/include")
+set(LUA_LIBRARY     "${VCPKG_INSTALLED}/lib/lua.lib")
 
 # ============================================================================
 # SOURCE FILES
@@ -44,7 +40,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE SFML::Graphics)
 # ============================================================================
 
 find_package(box2d REQUIRED)
-target_link_libraries(${PROJECT_NAME} PRIVATE box2d)
+target_link_libraries(${PROJECT_NAME} PRIVATE box2d::box2d)
 
 # ============================================================================
 # LUA + SOL2
@@ -54,14 +50,8 @@ find_package(Lua REQUIRED)
 target_include_directories(${PROJECT_NAME} PRIVATE ${LUA_INCLUDE_DIR})
 target_link_libraries(${PROJECT_NAME} PRIVATE ${LUA_LIBRARIES})
 
-find_package(sol2 QUIET)
-if (sol2_FOUND)
-    target_link_libraries(${PROJECT_NAME} PRIVATE sol2::sol2)
-else()
-    target_include_directories(${PROJECT_NAME} PRIVATE
-        ${CMAKE_SOURCE_DIR}/external/sol2/include
-    )
-endif()
+find_path(SOL2_INCLUDE_DIRS "sol/sol.hpp")
+target_include_directories(${PROJECT_NAME} PRIVATE ${SOL2_INCLUDE_DIRS})
 
 # ============================================================================
 # COMPILER FLAGS
@@ -92,20 +82,10 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 )
 
 # ============================================================================
-# WINDOWS: copy DLLs next to the .exe
+# WINDOWS: copy all runtime DLLs next to the .exe
 # ============================================================================
 
 if (WIN32)
-    set(VCPKG_BIN "C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/bin")
-
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${VCPKG_BIN}/lua.dll"
-            $<TARGET_FILE_DIR:${PROJECT_NAME}>
-        COMMENT "Copying lua.dll..."
-    )
-
-    # copy SFML DLLs
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_RUNTIME_DLLS:${PROJECT_NAME}>
@@ -113,11 +93,4 @@ if (WIN32)
         COMMAND_EXPAND_LISTS
         COMMENT "Copying runtime DLLs..."
     )
-
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${VCPKG_BIN}/box2d.dll"
-        $<TARGET_FILE_DIR:${PROJECT_NAME}>
-    COMMENT "Copying box2d.dll..."
-)
 endif()

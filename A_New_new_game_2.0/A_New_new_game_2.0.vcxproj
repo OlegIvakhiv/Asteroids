@@ -22,6 +22,7 @@
     <Text Include="CmakeLists.txt" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="CMakePresets.json" />
     <None Include="README.md" />
     <None Include="scripts\asteroids.lua" />
     <None Include="scripts\Enemy.lua" />

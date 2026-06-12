@@ -206,6 +206,9 @@ CMAKE_STATIC_LINKER_FLAGS_RELEASE:STRING=
 // during RELWITHDEBINFO builds.
 CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO:STRING=
 
+//No help, variable specified on the command line.
+CMAKE_TOOLCHAIN_FILE:FILEPATH=/scripts/buildsystems/vcpkg.cmake
+
 //If this value is on, makefiles will be generated without the
 // .SILENT directive, and all commands will be echoed to the console
 // during the make.  This is useful for debugging only. With Visual
@@ -230,6 +233,12 @@ SFML_DIR:PATH=C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml/lib/cmake/SFML
 //Path to a file.
 SFML_DOC_DIR:PATH=SFML_DOC_DIR-NOTFOUND
 
+//Path to SFML install
+SFML_ROOT:PATH=C:/Users/Oleg/source/repos/A_New_new_game_2.0/sfml
+
+//Path to a file.
+SOL2_INCLUDE_DIRS:PATH=C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/include
+
 //Value Computed by CMake
 SpaceWarsEngine_BINARY_DIR:STATIC=C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/build
 
@@ -238,6 +247,9 @@ SpaceWarsEngine_IS_TOP_LEVEL:STATIC=ON
 
 //Value Computed by CMake
 SpaceWarsEngine_SOURCE_DIR:STATIC=C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0
+
+//No help, variable specified on the command line.
+VCPKG_TARGET_TRIPLET:UNINITIALIZED=x64-windows
 
 box2d_DIR:PATH=C:/Users/Oleg/source/repos/A_New_new_game_2.0/A_New_new_game_2.0/vcpkg_installed/x64-windows/x64-windows/share/box2d
 
