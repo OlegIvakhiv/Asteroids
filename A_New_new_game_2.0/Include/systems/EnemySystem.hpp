@@ -171,7 +171,7 @@ public:
             currentPirates < maxPirates) {
             // ---- Calculate spawn position ----
             float angle = (rand() % 360) * 3.14159f / 180.f;
-            float pirateSpawnDist = 1200.f;   // Distance from player to spawn pirates
+            float pirateSpawnDist = 1200.f;   // Distance fm player to spawn pirates
             sf::Vector2f spawnPos = playerTf.position +
                 sf::Vector2f(std::cos(angle) * pirateSpawnDist,
                     std::sin(angle) * pirateSpawnDist);
