@@ -33,11 +33,14 @@
     <Filter Include="data">
       <UniqueIdentifier>{26fe5a47-3b9a-4fe4-970e-32dd3e9d9676}</UniqueIdentifier>
     </Filter>
-    <Filter Include="include %28.hpp%29\AISystem">
-      <UniqueIdentifier>{8745e92d-a4b2-414b-ab1c-69497ae9e74c}</UniqueIdentifier>
+    <Filter Include="include %28.hpp%29\systems">
+      <UniqueIdentifier>{bfbe1e1a-c0ca-4a53-b620-2db12be1edda}</UniqueIdentifier>
     </Filter>
-    <Filter Include="include %28.hpp%29\ParticleSystem">
-      <UniqueIdentifier>{cd8042e1-8a1b-454b-beb0-9c9b509a15d2}</UniqueIdentifier>
+    <Filter Include="include %28.hpp%29\core">
+      <UniqueIdentifier>{43ab2397-1d12-4008-9c86-a9651be41bf4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include %28.hpp%29\utils">
+      <UniqueIdentifier>{985bb761-7df5-4e91-944a-e63135894663}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
@@ -47,20 +50,77 @@
     <ClCompile Include="dump.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="include\components.hpp">
-      <Filter>include %28.hpp%29</Filter>
+    <ClInclude Include="Include\systems\ISystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
     </ClInclude>
-    <ClInclude Include="include\EntityManager.hpp">
-      <Filter>include %28.hpp%29</Filter>
+    <ClInclude Include="Include\core\EntityFactory.hpp">
+      <Filter>include %28.hpp%29\core</Filter>
     </ClInclude>
-    <ClInclude Include="include\Systems.hpp">
-      <Filter>include %28.hpp%29</Filter>
+    <ClInclude Include="Include\core\EntityManager.hpp">
+      <Filter>include %28.hpp%29\core</Filter>
     </ClInclude>
-    <ClInclude Include="Include\GameConfig.hpp">
-      <Filter>include %28.hpp%29</Filter>
+    <ClInclude Include="Include\core\SystemManager.hpp">
+      <Filter>include %28.hpp%29\core</Filter>
     </ClInclude>
-    <ClInclude Include="Include\EntityFactory.hpp">
-      <Filter>include %28.hpp%29</Filter>
+    <ClInclude Include="Include\utils\components.hpp">
+      <Filter>include %28.hpp%29\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\utils\GameConfig.hpp">
+      <Filter>include %28.hpp%29\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\utils\InputRegistry.hpp">
+      <Filter>include %28.hpp%29\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\AISystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\PhysicsSystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\RenderSystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\DamageSystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\InputSystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\EnemySystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\WeaponSystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\BackgroundSystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\ParticleSystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\EffectsSystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\DebugSystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\ShipAnimSystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\CameraSystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\SpaceDustSystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\HudSystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\systems\DebrisSystem.hpp">
+      <Filter>include %28.hpp%29\systems</Filter>
+    </ClInclude>
+    <ClInclude Include="Include\core\FractureImpl.hpp">
+      <Filter>src %28.cpp%29</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

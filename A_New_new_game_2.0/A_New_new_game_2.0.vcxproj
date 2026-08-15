@@ -34,11 +34,30 @@
     <ClCompile Include="src\game.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="include\components.hpp" />
-    <ClInclude Include="Include\EntityFactory.hpp" />
-    <ClInclude Include="include\EntityManager.hpp" />
-    <ClInclude Include="Include\GameConfig.hpp" />
-    <ClInclude Include="include\Systems.hpp" />
+    <ClInclude Include="Include\core\EntityFactory.hpp" />
+    <ClInclude Include="Include\core\EntityManager.hpp" />
+    <ClInclude Include="Include\core\FractureImpl.hpp" />
+    <ClInclude Include="Include\core\SystemManager.hpp" />
+    <ClInclude Include="Include\systems\AISystem.hpp" />
+    <ClInclude Include="Include\systems\BackgroundSystem.hpp" />
+    <ClInclude Include="Include\systems\CameraSystem.hpp" />
+    <ClInclude Include="Include\systems\DamageSystem.hpp" />
+    <ClInclude Include="Include\systems\DebrisSystem.hpp" />
+    <ClInclude Include="Include\systems\DebugSystem.hpp" />
+    <ClInclude Include="Include\systems\EffectsSystem.hpp" />
+    <ClInclude Include="Include\systems\EnemySystem.hpp" />
+    <ClInclude Include="Include\systems\HudSystem.hpp" />
+    <ClInclude Include="Include\systems\InputSystem.hpp" />
+    <ClInclude Include="Include\systems\ISystem.hpp" />
+    <ClInclude Include="Include\systems\ParticleSystem.hpp" />
+    <ClInclude Include="Include\systems\PhysicsSystem.hpp" />
+    <ClInclude Include="Include\systems\RenderSystem.hpp" />
+    <ClInclude Include="Include\systems\ShipAnimSystem.hpp" />
+    <ClInclude Include="Include\systems\SpaceDustSystem.hpp" />
+    <ClInclude Include="Include\systems\WeaponSystem.hpp" />
+    <ClInclude Include="Include\utils\components.hpp" />
+    <ClInclude Include="Include\utils\GameConfig.hpp" />
+    <ClInclude Include="Include\utils\InputRegistry.hpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>

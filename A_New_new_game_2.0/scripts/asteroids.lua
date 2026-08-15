@@ -28,7 +28,13 @@ asteroid_types = {
         hp = 10,                                   -- One shot kill from player weapons
         score_reward = 10,                         -- Minimal points
         speed_range = { 7.0, 9.0 },                -- Fast movement (meters/sec)
-        
+        ase_size = 0.30,
+        size_variance_min = 0.80,   -- 0.24m ( 7px)
+        size_variance_max = 1.40,   -- 0.42m (13px)
+        hp_follows_size = 1.0,
+        jaggedness = 0.30,          -- compact; chips shouldn't look torn
+        tier = 0,
+
         -- Normal asteroid (no explosion)
         explosive = false
     },
@@ -46,7 +52,13 @@ asteroid_types = {
         hp = 35,                                   -- Requires 2-3 hits
         score_reward = 50,                         -- Medium reward
         speed_range = { 6.0, 7.0 },                -- Moderate speed
-        
+        base_size = 0.70,
+        size_variance_min = 0.70,   -- 0.49m (15px)  <- overlaps big SMALLs
+        size_variance_max = 1.30,   -- 0.91m (27px)
+        hp_follows_size = 1.0,
+        jaggedness = 0.42,
+        tier = 1,
+
         -- Normal asteroid (no explosion)
         explosive = false
     },
@@ -64,7 +76,13 @@ asteroid_types = {
         hp = 120,                                  -- Requires many hits
         score_reward = 200,                        -- High reward for risk
         speed_range = { 5.0, 6.0 },                -- Slow lumbering movement
-        
+        base_size = 1.50,
+        size_variance_min = 0.65,   -- 0.98m (29px)  <- overlaps big MEDIUMs
+        size_variance_max = 1.45,   -- 2.18m (65px)  <- genuine monsters
+        hp_follows_size = 1.0,
+        jaggedness = 0.50,          -- deep craters
+        tier = 2,
+
         -- Normal asteroid (no explosion)
         explosive = false
     },
@@ -81,22 +99,48 @@ asteroid_types = {
         color = { r = 255, g = 80, b = 40 },        -- Bright lava orange/red
         base_size = 0.9,                            -- Between medium and large (27 pixels)
         density = 6.0,                              -- Quite heavy
-        hp = 30,                                    -- Medium durability (2-3 hits)
+        hp = 50,                                    -- Medium durability (2-3 hits)
         score_reward = 75,                          -- Good reward for risk
-        
+         base_size = 0.90,
+        size_variance_min = 0.80,
+        size_variance_max = 1.25,
+        hp_follows_size = 1.0,
+        jaggedness = 0.45,
+        tier = 3,
+
         -- Movement
         speed_range = { 4.0, 5.0 },                 -- Moderate speed
         
         -- ===== EXPLOSIVE PROPERTIES =====
         explosive = true,                           -- Triggers explosion on death
-        explosion_radius = 300.0,                   -- Damage radius in pixels
+        explosion_radius = 150.0,                   -- Damage radius in pixels
         explosion_damage = 120.0,                    -- Damage to entities in radius
         
         -- Visual effects
-        particle_count = 50,                        -- Extra particles for explosion
+        particle_count = 80,                        -- Extra particles for explosion
         glow_intensity = 0.8                        -- Pulsing glow effect
     }
 }
+
+
+
+asteroid_visuals = {
+    -- ===== MAGMATIC =====
+    magma_detail = 0,             -- 0 = fill + pulsing outline only (most minimal)
+                                  -- 1 = short cracks from the rim  <- recommended
+                                  -- 2 = full cracks, previous look
+    magma_core_size      = 0.0,   -- off by default now
+    magma_vein_depth_min = 0.34,  -- crack length at detail 1
+    magma_vein_depth     = 0.32,  -- crack length at detail 2
+    magma_wave_speed     = 2.6,
+    magma_wave_sharpness = 1.8,
+    facets = 0,
+
+    -- ===== NORMAL ASTEROIDS =====
+    facets = 0,                   -- 1 = flat interior lines, 0 = plain rock.
+                                  -- Default off; the minimal look is better.
+}
+
 
 -- ============================================================================
 -- SPAWN CONFIGURATION

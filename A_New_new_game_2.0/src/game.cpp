@@ -2,21 +2,8 @@
  * @file game.cpp
  * @brief Main game loop and entry point for the Modular Space Engine
  *
- * Initializes Box2D physics world, Lua scripting, and SFML rendering.
- * Main loop follows a fixed order of systems:
- * 1. Input handling (player controls)
- * 2. Physics simulation (Box2D step)
- * 3. World cleanup (despawn distant entities)
- * 4. Enemy spawning (timed intervals)
- * 5. Damage processing (collisions, death)
- * 6. Weapon updates (shooting, bullet lifetime)
- * 7. Particle effects (update and draw)
- * 8. AI behavior (enemy state machine)
- * 9. Background parallax scrolling
- * 10. Rendering (UI, particles, entities, stars)
- *
  * @author Oleg Ivakhiv
- * @version 1.1
+ * @version 1.2 (refactored with SystemManager)
  */
 
 #define SOL_ALL_SAFETIES_ON 1
@@ -24,48 +11,28 @@
 #define LUA_ERRGCMM 9
 
 #include <SFML/Graphics.hpp>
-#include "EntityManager.hpp"
-#include "EntityFactory.hpp"
-#include "Systems.hpp"
+#include "core/SystemManager.hpp"
 #include <sol/sol.hpp>
 #include <iostream>
-#include <vector>
-#include <random>
+#include <algorithm>
 
- // Legacy global score variable (not used - em.totalScore is the source of truth)
-int score = 0;
-
-EnemySystem enemySystem;
-
-/**
- * @brief Main entry point
- * @return Exit code (0 on success)
- */
 int main() {
-    // =========================================================================
-    // BOX2D PHYSICS WORLD INITIALIZATION
-    // =========================================================================
-
-    b2WorldDef worldDef = b2DefaultWorldDef();
-    worldDef.gravity = { 0.0f, 0.0f };      // No gravity in space
-    b2WorldId worldId = b2CreateWorld(&worldDef);
-
     // =========================================================================
     // LUA SCRIPTING INITIALIZATION
     // =========================================================================
 
     sol::state lua;
-    lua.open_libraries(sol::lib::base, sol::lib::math);  // Basic Lua + math functions
-    InputRegistry::init();                               // Setup keyboard/mouse mappings
+    lua.open_libraries(sol::lib::base, sol::lib::math);
 
-    // Load configuration scripts
     try {
-        lua.script_file("scripts/player.lua");      // Player stats, shape, colors
-        lua.script_file("scripts/asteroids.lua");   // Asteroid types and spawn settings
-        lua.script_file("scripts/enemy.lua");       // Enemy stats and behavior
+        lua.script_file("scripts/player.lua");
+        lua.script_file("scripts/asteroids.lua");
+        lua.script_file("scripts/enemy.lua");
+        std::cout << "Scripts reloaded!" << std::endl;
     }
     catch (const std::exception& e) {
         std::cerr << "Could not load Lua script: " << e.what() << std::endl;
+        return 1;
     }
 
     // =========================================================================
@@ -73,165 +40,113 @@ int main() {
     // =========================================================================
 
     sf::RenderWindow window(sf::VideoMode({ 1920, 1080 }), "Modular Space Engine");
-    window.setFramerateLimit(60);               // Cap at 60 FPS
-
-    EntityManager em;  // Create entity manager
-    EntityFactory ef;
-    uint32_t playerEntityId = ef.createPlayer(em, { 640.f, 360.f }, lua, worldId);
-
-    em.initBackground(window.getSize(), 400);   // Generate starfield
-
-    sf::Clock clock;                            // Delta time measurement
+    window.setFramerateLimit(60);
 
     // Load font for UI text
     sf::Font font;
     if (!font.openFromFile("assets/upheavtt.ttf")) {
-        std::cout << "Error loading font!" << std::endl;
+        std::cout << "Warning: Could not load font 'assets/upheavtt.ttf'!" << std::endl;
     }
 
-    // Score display text
-    sf::Text scoreText(font);
-    scoreText.setCharacterSize(30);
-    scoreText.setFillColor(sf::Color::Yellow);
-    scoreText.setPosition({ 20.f, 60.f });
+    // (scoreText removed -- HudSystem owns the score display now.)
 
-    // Camera view (will follow player)
-    sf::View gameView = window.getDefaultView();
+    // =========================================================================
+    // SYSTEM MANAGER INITIALIZATION
+    // =========================================================================
+
+    SystemManager manager(window, lua);
+    manager.init();
+    manager.getHudSystem().setFont(&font);
+
+    EntityManager& em = manager.getEntityManager();
+    uint32_t playerEntityId = manager.getPlayerId();
+
+    sf::Clock clock;
 
     // =========================================================================
     // MAIN GAME LOOP
     // =========================================================================
 
     while (window.isOpen()) {
-        // ---------------------------------------------------------------------
-        // HOT RELOAD (F5 key) - Allows live script updates during development
-        // ---------------------------------------------------------------------
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F5)) {
-            lua.script_file("scripts/enemy.lua");
-            std::cout << "AI Script Reloaded!" << std::endl;
-        }
-
-        // ---------------------------------------------------------------------
-        // EVENT HANDLING
-        // ---------------------------------------------------------------------
+        // ---- EVENT HANDLING ----
         while (const std::optional event = window.pollEvent()) {
             if (event->is<sf::Event::Closed>()) {
                 window.close();
             }
-            if (event->is<sf::Event::FocusLost>()) {
-                // Optional: pause game when window loses focus
-            }
         }
 
-        // ---------------------------------------------------------------------
-        // DELTA TIME (time since last frame)
-        // ---------------------------------------------------------------------
-        float dt = clock.restart().asSeconds();
+        // ---- HOT RELOAD (F5 key) ----
+        // Reloads ALL THREE scripts. It used to reload only enemy.lua, which
+        // meant every value in `visuals`, `weapon`, `asteroid_visuals` and the
+        // asteroid type tables was silently NOT hot-reloadable despite living
+        // in Lua specifically so it would be.
+        //
+        // Edge-detected: isKeyPressed is level-triggered, so holding F5 used to
+        // re-parse and re-execute all scripts ~60 times per second.
+        static bool f5WasPressed = false;
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F5)) {
+            if (!f5WasPressed) {
+                try {
+                    lua.script_file("scripts/player.lua");
+                    lua.script_file("scripts/asteroids.lua");
+                    lua.script_file("scripts/enemy.lua");
+                    std::cout << "Scripts reloaded!" << std::endl;
+                }
+                catch (const std::exception& e) {
+                    std::cerr << "Failed to reload Lua script: " << e.what() << std::endl;
+                }
+            }
+            f5WasPressed = true;
+        }
+        else {
+            f5WasPressed = false;
+        }
 
-        // ---------------------------------------------------------------------
-        // GET PLAYER INDEX (entity ID is stable, index changes with deletions)
-        // ---------------------------------------------------------------------
+        // ---- DELTA TIME ----
+        float dt = clock.restart().asSeconds();
+        dt = std::min(dt, 0.05f);
+
+        // ---- CHECK IF PLAYER IS ALIVE ----
         size_t playerIdx = em.getEntityIndex(playerEntityId);
         if (playerIdx == (size_t)-1) {
-            // Player is dead - exit game loop
             break;
         }
 
-        // =====================================================================
-        // GAME SYSTEMS UPDATE (executed in order every frame)
-        // =====================================================================
-
-        InputSystem::update(em, playerEntityId, dt, window, lua);       // Player controls
-        PhysicsSystem::update(em, worldId, dt);                         // Box2D simulation
-        EffectsSystem::update(em, playerEntityId, dt);
-        PhysicsSystem::cleanup(em, worldId, playerEntityId, lua);       // Despawn distant entities
-        enemySystem.update(ef, em, lua, worldId, playerEntityId);       // Spawn enemies/asteroids
-        DamageSystem::update(ef, em, worldId, playerEntityId, dt, lua); // Collisions, death, scoring
-        WeaponSystem::update(ef, em, worldId, playerEntityId, dt, lua); // Shooting, bullet lifetime
-        ParticleSystem::update(em, dt);                                 // Explosion particles
-        AISystem::update(ef, em, playerEntityId, dt, lua, worldId);     // Enemy AI behavior
-
-        // Background parallax scrolling (needs player velocity)
-        auto& playerPhysics = em.physics[playerIdx];
-        b2Vec2 b2Vel = b2Body_GetLinearVelocity(playerPhysics.bodyId);
-        sf::Vector2f playerVel(b2Vel.x * SCALE, b2Vel.y * SCALE);
-        BackgroundSystem::update(em, playerVel, window.getSize(), dt);
-
-        // =====================================================================
-        // RENDERING
-        // =====================================================================
-
-        window.clear(sf::Color(10, 10, 15));    // Dark space background
-
-        // ---------------------------------------------------------------------
-        // UI ELEMENTS (drawn in screen space, not affected by camera)
-        // ---------------------------------------------------------------------
-
-        auto& hp = em.healths[playerIdx];       // Player health for health bar
-        auto& tf = em.transforms[playerIdx];    // Player transform for energy bar
-        auto& statTf = em.players[playerIdx];
-
-        // Score text
-        scoreText.setString("Score: " + std::to_string(em.totalScore));
-        window.setView(window.getDefaultView());
-        window.draw(scoreText);
-
-        // Health bar (red)
-        sf::RectangleShape healthBarBack({ 200.f, 20.f });
-        healthBarBack.setPosition({ 20.f, 20.f });
-        healthBarBack.setFillColor(sf::Color(50, 50, 50));   // Dark gray background
-
-        float displayHp = std::max(0.f, std::min(hp.currentHp, hp.maxHp));
-        float barWidth_HP = (displayHp / hp.maxHp) * 200.f;
-
-        sf::RectangleShape healthBarFront({ barWidth_HP, 20.f });
-        healthBarFront.setPosition({ 20.f, 20.f });
-        healthBarFront.setFillColor(sf::Color::Red);        // Red fill
-
-        window.draw(healthBarBack);
-        window.draw(healthBarFront);
-
-        // Energy bar (cyan normally, orange when overheated)
-        sf::RectangleShape energyBarBack({ 200.f, 10.f });
-        energyBarBack.setPosition({ 20.f, 45.f });
-        energyBarBack.setFillColor(sf::Color(50, 50, 50));   // Dark gray background
-
-        float displayEnergy = std::max(0.f, std::min(statTf.energyDrive, statTf.maxEnergyDrive));
-        float barWidth_energy = (displayEnergy / statTf.maxEnergyDrive) * 200.f;
-
-        sf::RectangleShape energyBarFront({ barWidth_energy, 10.f });
-        energyBarFront.setPosition({ 20.f, 45.f });
-
-        // Color changes based on overheat state
-        if (statTf.overheatTimer > 0) {
-            energyBarFront.setFillColor(sf::Color(255, 69, 0));   // OrangeRed (overheated)
+        static bool f3WasPressed = false;
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F3)) {
+            if (!f3WasPressed) {
+                manager.getDebugSystem().toggle();
+                std::cout << "Debug " << (manager.getDebugSystem().isEnabled() ? "ON" : "OFF") << std::endl;
+            }
+            f3WasPressed = true;
         }
         else {
-            energyBarFront.setFillColor(sf::Color(0, 191, 255));  // DeepSkyBlue (normal)
+            f3WasPressed = false;
         }
 
-        window.draw(energyBarBack);
-        window.draw(energyBarFront);
 
-        // ---------------------------------------------------------------------
-        // GAME WORLD (camera follows player)
-        // ---------------------------------------------------------------------
+        // =====================================================================
+        // CLEAR THE WINDOW (CRITICAL – prevents ghosting)
+        // =====================================================================
+        window.clear(sf::Color(10, 10, 15));
 
-        sf::Vector2f playerPos = em.transforms[playerIdx].position;
-        gameView.setCenter(playerPos);
-        window.setView(gameView);
+        // =====================================================================
+        // UPDATE ALL GAME SYSTEMS (includes rendering)
+        // =====================================================================
+        manager.update(dt);
 
-        // Draw particles (explosions, impacts)
-        ParticleSystem::draw(window, em);
-
-        // Draw stars (parallax background - uses default view)
-        window.setView(window.getDefaultView());
-        BackgroundSystem::draw(window, em);
-
-        // Draw all game entities (player, asteroids, enemies, bullets)
-        RenderSystem::draw(em, window, lua, playerEntityId);
-
-        // Present the frame to the screen
+        // =====================================================================
+        // UI RENDERING (screen space)
+        // =====================================================================
+        // NOTE: the HUD is drawn by HudSystem inside manager.update(). The
+        // duplicate scoreText draw that used to be here was never setString'd
+        // inside the loop, so it rendered stale text on top of the real HUD.
+        //
+        // The `hp` / `statTf` locals that used to be here indexed with a
+        // playerIdx captured BEFORE manager.update() -- which destroys entities
+        // -- so the index could be stale by the time it was used. Both were
+        // unused leftovers from the pre-HudSystem bars.
+        // ---- Present the frame ----
         window.display();
     }
 
