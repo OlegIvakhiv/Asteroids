@@ -2,7 +2,7 @@
 
 A custom 2D space combat engine built from scratch in C++, inspired by *Spacewar!* and *Asteroids*. Built around a data-oriented Entity-Component-System, with real-time physics, FSM-driven enemy AI, and a fully Lua-scriptable gameplay layer for balancing without recompiling.
 
-![gameplay](https://github.com/user-attachments/assets/6c89f26f-5f2c-46a8-97cf-b8edb269c1d3)
+![gameplay](https://github.com/user-attachments/assets/47d9af69-f7d2-4fbb-9357-6e50a09f9d2c)
 
 ---
 
@@ -136,8 +136,9 @@ Physics + AI combined stay under 0.5% of the frame budget at 52 active entities.
 
 ## Gameplay
 
-![gameplay2](https://github.com/user-attachments/assets/de188c57-e369-4bab-9ab2-6ae02b1576ec)
-![gameplay3](https://github.com/user-attachments/assets/16d9d5cb-5eaf-4817-9f1d-17ac77859142)
+![gameplay2](https://github.com/user-attachments/assets/fb1477c9-849e-4ea4-94fa-e98ccb8c2549)
+![gameplay3](https://github.com/user-attachments/assets/a0155e28-cc4c-4842-ba9f-214a4dd3bf33)
+![gameplay4](https://github.com/user-attachments/assets/f5855998-496b-4c9e-bc74-d568e179dc99)
 
 ---
 
