@@ -11,6 +11,7 @@
 #include "core/FractureImpl.hpp"
 #include "utils/GameConfig.hpp"
 #include "utils/InputRegistry.hpp"
+#include "utils/GameState.hpp"
 
 // Include all system headers
 #include "systems/ISystem.hpp"
@@ -30,6 +31,7 @@
 #include "systems/SpaceDustSystem.hpp"
 #include "systems/HudSystem.hpp"
 #include "systems/DebrisSystem.hpp"
+#include "systems/MenuSystem.hpp"
 
 class SystemManager {
 public:
@@ -99,15 +101,41 @@ public:
         // corruption in a busy fight is not.
         m_entityManager.reserveAll(8192);
         m_debrisSystem.init(ctx);
+        m_menuSystem.init(ctx);
+        m_state = GameState::MainMenu;
     }
 
     void update(float realDt) {
-        // Scaled time drives the WORLD. Real time drives the CAMERA and the
-        // screen FX — that separation is what makes a freeze read as impact
-        // rather than as a stall.
+        m_menuSystem.setState(m_state, m_entityManager.totalScore);
+
+        // ====================================================================
+        // 1. MENU STATES (no game logic)
+        // ====================================================================
+        if (m_state == GameState::MainMenu || m_state == GameState::Tutorial) {
+            m_menuSystem.update(realDt);
+            return;
+        }
+
+        // ====================================================================
+        // 2. PAUSED (draw frozen world, show menu)
+        // ====================================================================
+        if (m_state == GameState::Paused) {
+            m_window.setView(m_cameraSystem.getWorldView());
+            m_particleSystem.update(0.f);
+            m_renderSystem.update(0.f);
+            m_debugSystem.update(0.f);
+
+            m_window.setView(m_window.getDefaultView());
+            m_menuSystem.update(realDt);
+            return;
+        }
+
+        // ====================================================================
+        // 3. PLAYING / GAME OVER (run the simulation)
+        // ====================================================================
         const float dt = m_entityManager.advanceTime(realDt);
 
-        // ----- 1. LOGIC (scaled) -----
+        // ----- 3a. LOGIC (scaled) -----
         m_inputSystem.update(dt);
         m_physicsSystem.update(dt);
         m_shipAnimSystem.update(dt);
@@ -119,17 +147,19 @@ public:
         m_aiSystem.update(dt);
 
         size_t playerIdx = m_entityManager.getEntityIndex(m_playerEntityId);
-        if (playerIdx == (size_t)-1) return;
+        if (playerIdx == (size_t)-1) {
+            m_state = GameState::GameOver;
+        }
 
-        // ----- 2. CAMERA + SCREEN FX (real time) -----
+        // ----- 3b. CAMERA + SCREEN FX (real time) -----
         m_cameraSystem.update(realDt);
         m_entityManager.updateFx(realDt);
 
-        // ----- 3. STARS (screen space, inheriting shake + zoom) -----
+        // ----- 3c. STARS (screen space, inheriting shake + zoom) -----
         m_window.setView(m_cameraSystem.makeStarView(m_entityManager.starFieldSize));
         m_backgroundSystem.update(dt);
 
-        // ----- 4. WORLD SPACE -----
+        // ----- 3d. WORLD SPACE -----
         m_window.setView(m_cameraSystem.getWorldView());
         m_spaceDustSystem.update(dt);
         m_debrisSystem.update(dt);
@@ -137,21 +167,113 @@ public:
         m_renderSystem.update(dt);
         m_debugSystem.update(dt);
 
-        // ----- 5. SCREEN OVERLAY (flashes, above the world, below the UI) -----
+        // ----- 3e. SCREEN OVERLAY -----
         m_window.setView(m_window.getDefaultView());
         m_renderSystem.drawScreenSpace();
 
-        // ----- 6. HUD (screen space, above everything) -----
-        m_hudSystem.update(realDt);   // real time: the HUD keeps animating
-        // through hitstop, which is what makes a
-        // freeze read as impact and not a stall
+        // ----- 3f. HUD -----
+        m_hudSystem.update(realDt);
+
+        // ----- 3g. GAME OVER OVERLAY -----
+        if (m_state == GameState::GameOver) {
+            m_menuSystem.update(realDt);
+        }
     }
 
+
+  
     // Accessors for main.cpp (if needed)
     EntityManager& getEntityManager() { return m_entityManager; }
     uint32_t getPlayerId() const { return m_playerEntityId; }
     DebugSystem& getDebugSystem() { return m_debugSystem; }
     HudSystem& getHudSystem() { return m_hudSystem; }
+    GameState getState() const { return m_state; }
+    MenuSystem& getMenuSystem() { return m_menuSystem; }
+
+    /// Called by game.cpp when the menu confirms StartGame/RestartGame.
+    void restart() {
+        // 1. Free BodyUserData + clear all ECS vectors (does NOT touch Box2D)
+        m_entityManager.reset();
+
+        // 2. Tear down and recreate the Box2D world
+        if (b2World_IsValid(m_worldId)) {
+            b2DestroyWorld(m_worldId);
+        }
+        b2WorldDef worldDef = b2DefaultWorldDef();
+        worldDef.gravity = { 0.0f, 0.0f };
+        m_worldId = b2CreateWorld(&worldDef);
+
+        // 3. Re-create the player
+        m_playerEntityId = m_entityFactory.createPlayer(
+            m_entityManager, { 640.f, 360.f }, m_lua, m_worldId);
+
+        m_gameView.setCenter(m_entityManager.transforms[
+            m_entityManager.getEntityIndex(m_playerEntityId)].position);
+
+        // 4. Re-point every system's context at the NEW worldId/playerEntityId
+        //    (systems cached these by value in init(), so they're stale otherwise)
+        SystemContext ctx;
+        ctx.em = &m_entityManager;
+        ctx.ef = &m_entityFactory;
+        ctx.worldId = m_worldId;
+        ctx.playerEntityId = m_playerEntityId;
+        ctx.lua = &m_lua;
+        ctx.window = &m_window;
+        ctx.gameView = &m_gameView;
+
+        m_inputSystem.init(ctx);
+        m_physicsSystem.init(ctx);
+        m_renderSystem.init(ctx);
+        m_damageSystem.init(ctx);
+        m_weaponSystem.init(ctx);
+        m_aiSystem.init(ctx);
+        m_enemySystem.init(ctx);
+        m_particleSystem.init(ctx);
+        m_backgroundSystem.init(ctx);
+        m_effectsSystem.init(ctx);
+        m_debugSystem.init(ctx);
+        m_cameraSystem.init(ctx);
+        m_shipAnimSystem.init(ctx);
+        m_spaceDustSystem.init(ctx);
+        m_hudSystem.init(ctx);
+        m_debrisSystem.init(ctx);
+        m_menuSystem.init(ctx);
+
+        m_state = GameState::Playing;
+    }
+
+    /// Central place all state transitions go through, so UI stays in sync.
+    void requestAction(MenuAction action) {
+        switch (action) {
+        case MenuAction::StartGame:
+        case MenuAction::RestartGame:
+            restart();
+            break;
+        case MenuAction::ResumeGame:
+            m_state = GameState::Playing;
+            break;
+        case MenuAction::QuitGame:
+            m_window.close();
+            break;
+        case MenuAction::ShowTutorial:
+            m_state = GameState::Tutorial;
+            m_menuSystem.setState(m_state);
+            break;
+        case MenuAction::BackToMenu:
+            m_state = GameState::MainMenu;
+            m_menuSystem.setState(m_state);
+            break;
+        default:
+            break;
+        }
+    }
+
+    void togglePause() {
+        if (m_state == GameState::Playing) m_state = GameState::Paused;
+        else if (m_state == GameState::Paused) m_state = GameState::Playing;
+    }
+
+
 
 private:
     sf::RenderWindow& m_window;
@@ -162,6 +284,7 @@ private:
     EntityManager m_entityManager;
     EntityFactory m_entityFactory;
     uint32_t m_playerEntityId = 0;
+    GameState m_state = GameState::MainMenu;
 
     // ---- All systems (default-constructible) ----
     InputSystem m_inputSystem;
@@ -180,4 +303,5 @@ private:
     SpaceDustSystem m_spaceDustSystem;
     HudSystem m_hudSystem;
     DebrisSystem m_debrisSystem;
+    MenuSystem m_menuSystem;
 };

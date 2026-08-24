@@ -131,6 +131,68 @@ public:
         debris.reserve(512);
     }
 
+
+    /**
+     * @brief Wipe all entities and transient state for a fresh game
+     *
+     * IMPORTANT: this does NOT touch Box2D bodies. Callers must destroy the
+     * Box2D world (b2DestroyWorld) and physics vector's bodies BEFORE calling
+     * this, or recreate the world entirely -- otherwise this leaves orphaned
+     * BodyUserData allocations and dangling b2BodyId handles. The intended
+     * flow (see SystemManager::restart()) is:
+     *   1. b2DestroyWorld(old world)   // frees all bodies + their userData...
+     *      -- actually NO: Box2D does NOT call delete on your userData.
+     *         You must free BodyUserData yourself first (see below).
+     *   2. em.reset()
+     *   3. b2CreateWorld(...)          // new world
+     *   4. re-create player via EntityFactory
+     */
+    void reset() {
+        // Free the heap-allocated BodyUserData for every live body before
+        // the world (and the bodies with it) goes away underneath us.
+        for (auto& p : physics) {
+            if (b2Body_IsValid(p.bodyId)) {
+                delete (BodyUserData*)b2Body_GetUserData(p.bodyId);
+            }
+        }
+
+        transforms.clear();
+        renders.clear();
+        physics.clear();
+        healths.clear();
+        bullets.clear();
+        enemies.clear();
+        players.clear();
+        physicsShapes.clear();
+        scoreRewards.clear();
+        debugAoEs.clear();
+        screenFlashes.clear();
+        shockRings.clear();
+        particles.clear();
+        debris.clear();
+        // NOTE: `stars` is deliberately NOT cleared -- the starfield is
+        // cosmetic background, not game state, and initBackground() is
+        // expensive-ish (regenerates 800 stars with an RNG loop).
+
+        entityIdMap.clear();
+        nextEntityId = 1;
+        totalScore = 0;
+
+        timeScale = 1.f;
+        hitstopFreeze = 0.f;
+        hitstopSlomo = 0.f;
+        hitstopSlomoMax = 0.f;
+
+        cameraTrauma = 0.f;
+        cameraZoomKick = 0.f;
+
+        reserveAll(8192); // vectors were cleared, not shrunk-and-freed, but
+        // re-asserting capacity costs nothing and guards
+        // against a future change to clear()'s semantics
+    }
+
+
+
     // ===== Entity ID Management =====
     std::unordered_map<uint32_t, size_t> entityIdMap;  ///< Maps persistent entity ID → current vector index
     uint32_t nextEntityId = 1;                         ///< Auto-incrementing ID generator (0 is invalid)

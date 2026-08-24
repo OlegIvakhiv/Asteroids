@@ -57,18 +57,23 @@ int main() {
     SystemManager manager(window, lua);
     manager.init();
     manager.getHudSystem().setFont(&font);
+    manager.getMenuSystem().setFont(&font);
 
     EntityManager& em = manager.getEntityManager();
     uint32_t playerEntityId = manager.getPlayerId();
-
-    sf::Clock clock;
 
     // =========================================================================
     // MAIN GAME LOOP
     // =========================================================================
 
+    sf::Clock clock;
+
+    bool escWasPressed = false;
+    bool upWasPressed = false;
+    bool downWasPressed = false;
+    bool enterWasPressed = false;
+
     while (window.isOpen()) {
-        // ---- EVENT HANDLING ----
         while (const std::optional event = window.pollEvent()) {
             if (event->is<sf::Event::Closed>()) {
                 window.close();
@@ -106,10 +111,70 @@ int main() {
         float dt = clock.restart().asSeconds();
         dt = std::min(dt, 0.05f);
 
-        // ---- CHECK IF PLAYER IS ALIVE ----
-        size_t playerIdx = em.getEntityIndex(playerEntityId);
-        if (playerIdx == (size_t)-1) {
-            break;
+        // ---- ESCAPE: toggle pause, only meaningful while playing/paused ----
+        bool escPressed = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Escape);
+        if (escPressed && !escWasPressed) {
+            GameState s = manager.getState();
+            if (s == GameState::Playing || s == GameState::Paused) {
+                manager.togglePause();
+            }
+        }
+        escWasPressed = escPressed;
+
+        // ---- T key for quick tutorial from pause ----
+        static bool tWasPressed = false;
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::T)) {
+            if (!tWasPressed) {
+                if (manager.getState() == GameState::Paused) {
+                    manager.requestAction(MenuAction::ShowTutorial);
+                }
+            }
+            tWasPressed = true;
+        }
+        else {
+            tWasPressed = false;
+        }
+
+        // ---- MENU NAVIGATION: only outside active gameplay ----
+        if (manager.getState() != GameState::Playing) {
+            bool upPressed = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::W)
+                || sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Up);
+            bool downPressed = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S)
+                || sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Down);
+            bool enterPressed = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Enter);
+
+            // Tutorial screen uses W/S for scrolling instead of selection
+            if (manager.getState() == GameState::Tutorial) {
+                
+                if (upPressed && !upWasPressed) {
+                    manager.getMenuSystem().scrollTutorial(1);  
+                }
+                
+                if (downPressed && !downWasPressed) {
+                    manager.getMenuSystem().scrollTutorial(-1);   
+                }
+                // Enter still confirms the "Back" button
+                if (enterPressed && !enterWasPressed) {
+                    MenuAction action = manager.getMenuSystem().confirmSelection();
+                    manager.requestAction(action);
+                }
+            }
+            else {
+                // Normal menu navigation
+                if (upPressed && !upWasPressed)     manager.getMenuSystem().moveSelection(-1);
+                if (downPressed && !downWasPressed) manager.getMenuSystem().moveSelection(1);
+                if (enterPressed && !enterWasPressed) {
+                    MenuAction action = manager.getMenuSystem().confirmSelection();
+                    manager.requestAction(action);
+                }
+            }
+
+            upWasPressed = upPressed;
+            downWasPressed = downPressed;
+            enterWasPressed = enterPressed;
+        }
+        else {
+            upWasPressed = downWasPressed = enterWasPressed = false;
         }
 
         static bool f3WasPressed = false;
