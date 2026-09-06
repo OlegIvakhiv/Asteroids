@@ -12,6 +12,7 @@
 #include "utils/GameConfig.hpp"
 #include "utils/InputRegistry.hpp"
 #include "utils/GameState.hpp"
+#include "utils/ShipDesign.hpp"
 
 // Include all system headers
 #include "systems/ISystem.hpp"
@@ -32,6 +33,7 @@
 #include "systems/HudSystem.hpp"
 #include "systems/DebrisSystem.hpp"
 #include "systems/MenuSystem.hpp"
+#include "systems/RefitSystem.hpp"
 
 class SystemManager {
 public:
@@ -49,8 +51,6 @@ public:
         b2WorldDef worldDef = b2DefaultWorldDef();
         worldDef.gravity = { 0.0f, 0.0f };
         m_worldId = b2CreateWorld(&worldDef);
-
-
 
         // 2. Create Player
         m_playerEntityId = m_entityFactory.createPlayer(
@@ -102,6 +102,12 @@ public:
         m_entityManager.reserveAll(8192);
         m_debrisSystem.init(ctx);
         m_menuSystem.init(ctx);
+        if (m_shipDesign.mountedGuns().empty() && m_shipDesign.mountedEngines().empty())
+            m_shipDesign.autoMount();
+
+        m_refitSystem.init(ctx);
+        m_refitSystem.setDesign(&m_shipDesign);
+
         m_state = GameState::MainMenu;
     }
 
@@ -113,6 +119,19 @@ public:
         // ====================================================================
         if (m_state == GameState::MainMenu || m_state == GameState::Tutorial) {
             m_menuSystem.update(realDt);
+            // Mouse clicks on rows and buttons arrive through this channel
+            const MenuAction clicked = m_menuSystem.takeClickAction();
+            if (clicked != MenuAction::None) requestAction(clicked);
+            return;
+        }
+
+        if (m_state == GameState::Refit) {
+            m_refitSystem.update(realDt);
+            if (m_refitSystem.wantsExit()) {
+                m_refitSystem.clearExit();
+                m_state = GameState::MainMenu;
+                m_menuSystem.setState(m_state);   // this now calls primeInput()
+            }
             return;
         }
 
@@ -125,8 +144,15 @@ public:
             m_renderSystem.update(0.f);
             m_debugSystem.update(0.f);
 
-            m_window.setView(m_window.getDefaultView());
+            // UI view – always matches current window size
+            m_window.setView(sf::View(sf::FloatRect({ 0.f, 0.f },
+                { static_cast<float>(m_window.getSize().x),
+                  static_cast<float>(m_window.getSize().y) })));
+
             m_menuSystem.update(realDt);
+            // Consume click actions for paused menu
+            const MenuAction clicked = m_menuSystem.takeClickAction();
+            if (clicked != MenuAction::None) requestAction(clicked);
             return;
         }
 
@@ -147,8 +173,12 @@ public:
         m_aiSystem.update(dt);
 
         size_t playerIdx = m_entityManager.getEntityIndex(m_playerEntityId);
-        if (playerIdx == (size_t)-1) {
+        if (playerIdx == (size_t)-1 && m_state != GameState::GameOver) {
+            // Edge-triggered: this block re-runs every frame while dead,
+            // so anything stateful in here MUST check the transition.
             m_state = GameState::GameOver;
+            m_hunterLosses++;
+            m_menuSystem.setHunterLosses(m_hunterLosses);
         }
 
         // ----- 3b. CAMERA + SCREEN FX (real time) -----
@@ -168,7 +198,10 @@ public:
         m_debugSystem.update(dt);
 
         // ----- 3e. SCREEN OVERLAY -----
-        m_window.setView(m_window.getDefaultView());
+        m_window.setView(sf::View(sf::FloatRect({ 0.f, 0.f },
+            { static_cast<float>(m_window.getSize().x),
+              static_cast<float>(m_window.getSize().y) })));
+
         m_renderSystem.drawScreenSpace();
 
         // ----- 3f. HUD -----
@@ -180,8 +213,6 @@ public:
         }
     }
 
-
-  
     // Accessors for main.cpp (if needed)
     EntityManager& getEntityManager() { return m_entityManager; }
     uint32_t getPlayerId() const { return m_playerEntityId; }
@@ -189,6 +220,7 @@ public:
     HudSystem& getHudSystem() { return m_hudSystem; }
     GameState getState() const { return m_state; }
     MenuSystem& getMenuSystem() { return m_menuSystem; }
+    RefitSystem& getRefitSystem() { return m_refitSystem; }
 
     /// Called by game.cpp when the menu confirms StartGame/RestartGame.
     void restart() {
@@ -204,8 +236,8 @@ public:
         m_worldId = b2CreateWorld(&worldDef);
 
         // 3. Re-create the player
-        m_playerEntityId = m_entityFactory.createPlayer(
-            m_entityManager, { 640.f, 360.f }, m_lua, m_worldId);
+        m_playerEntityId = m_entityFactory.createPlayerFromDesign(
+            m_entityManager, { 640.f, 360.f }, m_lua, m_worldId, m_shipDesign);
 
         m_gameView.setCenter(m_entityManager.transforms[
             m_entityManager.getEntityIndex(m_playerEntityId)].position);
@@ -238,6 +270,11 @@ public:
         m_hudSystem.init(ctx);
         m_debrisSystem.init(ctx);
         m_menuSystem.init(ctx);
+        if (m_shipDesign.mountedGuns().empty() && m_shipDesign.mountedEngines().empty())
+            m_shipDesign.autoMount();
+
+        m_refitSystem.init(ctx);
+        m_refitSystem.setDesign(&m_shipDesign);
 
         m_state = GameState::Playing;
     }
@@ -256,11 +293,28 @@ public:
             m_window.close();
             break;
         case MenuAction::ShowTutorial:
+            // Only record a real screen -- re-entering the tutorial from
+            // itself must not make it its own return target.
+            if (m_state != GameState::Tutorial)
+                m_tutorialReturnTo = m_state;
             m_state = GameState::Tutorial;
             m_menuSystem.setState(m_state);
             break;
+        case MenuAction::ShowRefit:
+            m_state = GameState::Refit;
+            m_menuSystem.setState(m_state);
+            m_refitSystem.onEnter();
+            break;
         case MenuAction::BackToMenu:
-            m_state = GameState::MainMenu;
+            // Closing the tutorial goes back where it came from. Every other
+            // use of BackToMenu (ABANDON, RETURN AFTER DEATH) means the
+            // terminal, and those are deliberate exits from the run.
+            if (m_state == GameState::Tutorial) {
+                m_state = m_tutorialReturnTo;
+            }
+            else {
+                m_state = GameState::MainMenu;
+            }
             m_menuSystem.setState(m_state);
             break;
         default:
@@ -273,8 +327,6 @@ public:
         else if (m_state == GameState::Paused) m_state = GameState::Playing;
     }
 
-
-
 private:
     sf::RenderWindow& m_window;
     sf::View m_gameView;
@@ -285,6 +337,15 @@ private:
     EntityFactory m_entityFactory;
     uint32_t m_playerEntityId = 0;
     GameState m_state = GameState::MainMenu;
+
+    /// Where ShowTutorial was requested from, so closing it returns there
+    /// instead of dumping the player out of a live run.
+    GameState m_tutorialReturnTo = GameState::MainMenu;
+
+    int m_hunterLosses = 0;
+
+    ship::ShipDesign m_shipDesign = ship::ShipDesign::stock();
+    RefitSystem m_refitSystem;
 
     // ---- All systems (default-constructible) ----
     InputSystem m_inputSystem;

@@ -1,9 +1,9 @@
 ﻿/**
  * @file game.cpp
- * @brief Main game loop and entry point for the Modular Space Engine
+ * @brief Main game loop and entry point for VOID HUNTER
  *
  * @author Oleg Ivakhiv
- * @version 1.2 (refactored with SystemManager)
+ * @version 1.3 (window sizing, fullscreen toggle, refit input routing)
  */
 
 #define SOL_ALL_SAFETIES_ON 1
@@ -36,19 +36,35 @@ int main() {
     }
 
     // =========================================================================
-    // SFML WINDOW & RENDERING SETUP
+    // WINDOW
+    // =========================================================================
+    //
+    // VideoMode sizes the CLIENT AREA, not the whole window. Asking for
+    // 1920x1080 on a 1920x1080 desktop makes the OS add a titlebar and borders
+    // on top of that, so the total exceeds the screen and the bottom of the
+    // frame is pushed off-display -- which is what was eating the status bar
+    // and the bottom fifth of every menu.
+    //
+    // 85% of the desktop leaves room for decoration on any monitor. F11 gives
+    // real fullscreen, which is what most people actually want.
     // =========================================================================
 
-    sf::RenderWindow window(sf::VideoMode({ 1920, 1080 }), "Modular Space Engine");
+    const sf::VideoMode desktop = sf::VideoMode::getDesktopMode();
+    const sf::Vector2u windowedSize{
+        static_cast<unsigned>(desktop.size.x * 0.85f),
+        static_cast<unsigned>(desktop.size.y * 0.85f)
+    };
+
+    sf::RenderWindow window(sf::VideoMode(windowedSize), "VOID HUNTER");
     window.setFramerateLimit(60);
+
+    bool fullscreen = false;
 
     // Load font for UI text
     sf::Font font;
     if (!font.openFromFile("assets/upheavtt.ttf")) {
         std::cout << "Warning: Could not load font 'assets/upheavtt.ttf'!" << std::endl;
     }
-
-    // (scoreText removed -- HudSystem owns the score display now.)
 
     // =========================================================================
     // SYSTEM MANAGER INITIALIZATION
@@ -58,6 +74,7 @@ int main() {
     manager.init();
     manager.getHudSystem().setFont(&font);
     manager.getMenuSystem().setFont(&font);
+    manager.getRefitSystem().setFont(&font);
 
     EntityManager& em = manager.getEntityManager();
     uint32_t playerEntityId = manager.getPlayerId();
@@ -78,16 +95,44 @@ int main() {
             if (event->is<sf::Event::Closed>()) {
                 window.close();
             }
+            // Resize needs no view fix-up here: every UI system rebuilds its
+            // own screen view from the live window size each frame (uiView()),
+            // and CameraSystem owns the world view. Draining the event is
+            // enough. Do NOT reintroduce getDefaultView() anywhere -- it is
+            // frozen at creation size and is what broke mouse input on resize.
+            if (const auto* rs = event->getIf<sf::Event::Resized>()) {
+                // Re-apply a view matching the new size so the world doesn't
+                // stretch. UI screens build their own view each frame.
+                window.setView(sf::View(sf::FloatRect({ 0.f, 0.f },
+                    { static_cast<float>(rs->size.x),
+                      static_cast<float>(rs->size.y) })));
+            }
+        }
+
+        // ---- F11: toggle real fullscreen ----
+        // Recreating the window keeps the same sf::RenderWindow object, so
+        // every pointer systems hold stays valid. The framerate limit does NOT
+        // survive create(), so it has to be reapplied.
+        static bool f11WasPressed = false;
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F11)) {
+            if (!f11WasPressed) {
+                fullscreen = !fullscreen;
+                window.create(
+                    fullscreen ? desktop
+                    : sf::VideoMode(windowedSize),
+                    "VOID HUNTER",
+                    fullscreen ? sf::State::Fullscreen : sf::State::Windowed);
+                window.setFramerateLimit(60);
+            }
+            f11WasPressed = true;
+        }
+        else {
+            f11WasPressed = false;
         }
 
         // ---- HOT RELOAD (F5 key) ----
-        // Reloads ALL THREE scripts. It used to reload only enemy.lua, which
-        // meant every value in `visuals`, `weapon`, `asteroid_visuals` and the
-        // asteroid type tables was silently NOT hot-reloadable despite living
-        // in Lua specifically so it would be.
-        //
-        // Edge-detected: isKeyPressed is level-triggered, so holding F5 used to
-        // re-parse and re-execute all scripts ~60 times per second.
+        // Reloads ALL THREE scripts. Edge-detected: isKeyPressed is
+        // level-triggered, so holding F5 used to re-parse every frame.
         static bool f5WasPressed = false;
         if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F5)) {
             if (!f5WasPressed) {
@@ -112,6 +157,7 @@ int main() {
         dt = std::min(dt, 0.05f);
 
         // ---- ESCAPE: toggle pause, only meaningful while playing/paused ----
+        // Refit handles its own Escape, so it must not also reach this.
         bool escPressed = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Escape);
         if (escPressed && !escWasPressed) {
             GameState s = manager.getState();
@@ -135,45 +181,56 @@ int main() {
             tWasPressed = false;
         }
 
-        // ---- MENU NAVIGATION: only outside active gameplay ----
-        if (manager.getState() != GameState::Playing) {
+        // ---- MENU NAVIGATION ----
+        //
+        // Refit is excluded: RefitSystem polls its own keyboard and mouse. If
+        // both ran, the Enter that leaves the refit bay would ALSO be read
+        // here as a menu confirm on whatever row happened to be selected.
+        const GameState navState = manager.getState();
+        if (navState != GameState::Playing && navState != GameState::Refit) {
             bool upPressed = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::W)
                 || sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Up);
             bool downPressed = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S)
                 || sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Down);
             bool enterPressed = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Enter);
 
-            // Tutorial screen uses W/S for scrolling instead of selection
-            if (manager.getState() == GameState::Tutorial) {
-                
-                if (upPressed && !upWasPressed) {
-                    manager.getMenuSystem().scrollTutorial(1);  
+            // Boot overlay: ANY input skips it, and that same input is
+            // swallowed so you never accidentally launch a run while trying
+            // to dismiss the intro.
+            if (manager.getMenuSystem().isBooting()) {
+                if (upPressed || downPressed || enterPressed
+                    || sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Space)
+                    || sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Escape)) {
+                    manager.getMenuSystem().skipBoot();
                 }
-                
-                if (downPressed && !downWasPressed) {
-                    manager.getMenuSystem().scrollTutorial(-1);   
-                }
-                // Enter still confirms the "Back" button
+                upWasPressed = upPressed;
+                downWasPressed = downPressed;
+                enterWasPressed = enterPressed;
+            }
+            else if (navState == GameState::Tutorial) {
+                if (upPressed && !upWasPressed)     manager.getMenuSystem().scrollTutorial(1);
+                if (downPressed && !downWasPressed) manager.getMenuSystem().scrollTutorial(-1);
                 if (enterPressed && !enterWasPressed) {
-                    MenuAction action = manager.getMenuSystem().confirmSelection();
-                    manager.requestAction(action);
+                    manager.requestAction(manager.getMenuSystem().confirmSelection());
                 }
+                upWasPressed = upPressed;
+                downWasPressed = downPressed;
+                enterWasPressed = enterPressed;
             }
             else {
-                // Normal menu navigation
                 if (upPressed && !upWasPressed)     manager.getMenuSystem().moveSelection(-1);
                 if (downPressed && !downWasPressed) manager.getMenuSystem().moveSelection(1);
                 if (enterPressed && !enterWasPressed) {
-                    MenuAction action = manager.getMenuSystem().confirmSelection();
-                    manager.requestAction(action);
+                    manager.requestAction(manager.getMenuSystem().confirmSelection());
                 }
+                upWasPressed = upPressed;
+                downWasPressed = downPressed;
+                enterWasPressed = enterPressed;
             }
-
-            upWasPressed = upPressed;
-            downWasPressed = downPressed;
-            enterWasPressed = enterPressed;
         }
         else {
+            // Clear the edge flags on the way out so the first keypress after
+            // returning to a menu is seen as a fresh press, not a held one.
             upWasPressed = downWasPressed = enterWasPressed = false;
         }
 
@@ -189,28 +246,16 @@ int main() {
             f3WasPressed = false;
         }
 
-
         // =====================================================================
-        // CLEAR THE WINDOW (CRITICAL – prevents ghosting)
+        // CLEAR THE WINDOW (CRITICAL - prevents ghosting)
         // =====================================================================
-        window.clear(sf::Color(10, 10, 15));
+        window.clear(sf::Color(2, 3, 5));
 
         // =====================================================================
         // UPDATE ALL GAME SYSTEMS (includes rendering)
         // =====================================================================
         manager.update(dt);
 
-        // =====================================================================
-        // UI RENDERING (screen space)
-        // =====================================================================
-        // NOTE: the HUD is drawn by HudSystem inside manager.update(). The
-        // duplicate scoreText draw that used to be here was never setString'd
-        // inside the loop, so it rendered stale text on top of the real HUD.
-        //
-        // The `hp` / `statTf` locals that used to be here indexed with a
-        // playerIdx captured BEFORE manager.update() -- which destroys entities
-        // -- so the index could be stale by the time it was used. Both were
-        // unused leftovers from the pre-HudSystem bars.
         // ---- Present the frame ----
         window.display();
     }

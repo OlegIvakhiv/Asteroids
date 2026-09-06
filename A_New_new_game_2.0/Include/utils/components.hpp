@@ -127,6 +127,11 @@ struct PlayerComponent {
     float maxWeaponHeat = 100.f;
     float heatCoolDelay = 0.f;          // Grace period before it starts cooling
     bool  weaponOverheated = false;     // True = firing locked until it vents
+
+    // ---- Hull-derived (written by EntityFactory from ShipDesign) ----
+    float        enginePower = 150.f;   ///< InputSystem should read THIS, not Lua
+    sf::Vector2f gunMounts[4];          ///< Local pixels, where shots originate
+    int          gunMountCount = 0;
 };
 
 // ============================================================================

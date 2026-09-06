@@ -12,6 +12,7 @@
 #pragma once
 
 #include "EntityManager.hpp"
+#include "utils/ShipDesign.hpp"
 #include <sol/sol.hpp>
 
 class EntityFactory {
@@ -126,6 +127,111 @@ public:
 
         return entityId;
     }
+
+
+
+    /**
+ * @brief Create the player from a ShipDesign instead of hardcoded points.
+ *
+ * The design's outline IS the collision hull -- ShipDesign enforces
+ * convexity and the 8-point cap, so it feeds b2ComputeHull with no
+ * conversion and no visual/physics mismatch.
+ *
+ * HP, energy and engine power come from geometry. Mass is not set here at
+ * all: Box2D derives it from shape area x density, which is why a bigger
+ * hull is slower without a single tuning value.
+ */
+    uint32_t createPlayerFromDesign(EntityManager& em, sf::Vector2f pos,
+        sol::state& lua, b2WorldId worldId,
+        const ship::ShipDesign& design) {
+        const ship::ShipStats& st = design.stats();
+        const auto& outline = design.outline();
+
+        uint32_t entityId = em.nextEntityId++;
+
+        em.transforms.push_back({ entityId, pos, {0.f, 0.f}, {0.f, 0.f}, 0.f });
+        em.bullets.push_back({ entityId });
+        em.players.push_back({ entityId });
+        em.scoreRewards.push_back({});
+        em.enemies.push_back({});
+        em.healths.push_back({ entityId, st.hpMax, st.hpMax, 0.f, 0.f });
+
+        // ---- Hull-derived stats onto the player component ----
+        PlayerComponent& pc = em.players.back();
+        pc.maxEnergyDrive = st.energyMax;
+        pc.energyDrive = st.energyMax;
+        pc.enginePower = st.thrustN;
+
+        pc.gunMountCount = 0;
+        for (int gi : design.mountedGuns()) {
+            if (pc.gunMountCount >= 4) break;
+            if (gi >= 0 && gi < static_cast<int>(outline.size()))
+                pc.gunMounts[pc.gunMountCount++] = outline[gi];
+        }
+        // Never leave the ship unable to shoot, whatever the editor produced.
+        if (pc.gunMountCount == 0) {
+            pc.gunMounts[0] = { 0.f, -30.f };
+            pc.gunMountCount = 1;
+        }
+
+        // ---- Box2D body ----
+        b2BodyDef bodyDef = b2DefaultBodyDef();
+        bodyDef.type = b2_dynamicBody;
+        BodyUserData* ud = new BodyUserData{ BodyType::Player, entityId };
+        bodyDef.userData = ud;
+        bodyDef.position = { pos.x / SCALE, pos.y / SCALE };
+        bodyDef.linearDamping = lua["lineardrag_factor"].get_or(0.5f);
+        bodyDef.angularDamping = lua["angulardrag_factor"].get_or(0.5f);
+
+        b2BodyId bid = b2CreateBody(worldId, &bodyDef);
+
+        // The design outline goes straight in -- convex and <= 8 by construction.
+        b2Vec2 b2Points[ship::MAX_HULL_POINTS];
+        const int pc_n = std::min(static_cast<int>(outline.size()),
+            ship::MAX_HULL_POINTS);
+        for (int i = 0; i < pc_n; ++i)
+            b2Points[i] = { outline[i].x / SCALE, outline[i].y / SCALE };
+
+        b2Hull hull = b2ComputeHull(b2Points, static_cast<int32_t>(pc_n));
+        b2Polygon polygon = b2MakePolygon(&hull, 0.0f);
+
+        b2ShapeDef shapeDef = b2DefaultShapeDef();
+        shapeDef.filter.categoryBits = CATEGORY_PLAYER;
+        shapeDef.filter.maskBits = CATEGORY_ASTEROID | CATEGORY_ENEMY
+            | CATEGORY_ENEMY_BULLET | CATEGORY_BULLET;
+        shapeDef.enableContactEvents = true;
+        shapeDef.density = design.tuning().density;
+
+        b2CreatePolygonShape(bid, &shapeDef, &polygon);
+
+        PhysicsShapeData shapeData;
+        shapeData.type = PhysicsShapeData::Type::Polygon;
+        shapeData.vertices = outline;
+        shapeData.offset = { 0.f, 0.f };
+        em.physicsShapes.push_back(shapeData);
+
+        em.physics.push_back({ entityId, bid });
+
+        // ---- Render: same outline, so what you built is what you fly ----
+        RenderComponent rc;
+        rc.shape.setPointCount(outline.size());
+        for (std::size_t i = 0; i < outline.size(); ++i)
+            rc.shape.setPoint(i, outline[i]);
+
+        sol::table luaColor = lua["color"];
+        rc.shape.setFillColor(sf::Color(
+            luaColor["r"].get_or(40), luaColor["g"].get_or(100),
+            luaColor["b"].get_or(255), luaColor["a"].get_or(255)));
+        rc.shape.setOutlineThickness(2.5f);
+        rc.shape.setOutlineColor(sf::Color(255, 255, 255, 150));
+        rc.entityId = entityId;
+
+        em.renders.push_back(rc);
+        em.entityIdMap[entityId] = em.transforms.size() - 1;
+
+        return entityId;
+    }
+
 
     /**
      * @brief Create an asteroid entity
@@ -515,7 +621,6 @@ public:
 
         return entityId;
     }
-
 
 
 

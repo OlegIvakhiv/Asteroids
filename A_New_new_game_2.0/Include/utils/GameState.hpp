@@ -13,7 +13,8 @@ enum class GameState {
     Playing,
     Paused,
     GameOver,
-    Tutorial   
+    Tutorial,
+    Refit
 };
 
 /**
@@ -26,6 +27,7 @@ enum class MenuAction {
     ResumeGame,
     RestartGame,
     QuitGame,
-    ShowTutorial,    // NEW: Navigate to tutorial
-    BackToMenu       // NEW: Return from tutorial
+    ShowTutorial,
+    BackToMenu,
+    ShowRefit
 };
