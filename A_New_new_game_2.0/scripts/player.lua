@@ -254,19 +254,19 @@ weapon = {
     reflect_turn_rate = 420.0,  -- deg/sec steering authority
     reflect_lifetime  = 3.0,
 
--- ===== DODGE PUNISH (was staggering on ~29% of all bullets) =====
+    -- ===== DODGE PUNISH (was staggering on ~29% of all bullets) =====
     dodge_punish_chance     = 45.0,
     dodge_punish_min_damage = 40.0,  -- basic shots (25) never trigger it
     dodge_punish_knockback  = 320.0, -- was 700
 }
 
 -- ===== KINETIC WEAPONS (parry-launched and rift-hijacked rocks) =====
-    kinetic_base_damage = 170.0   -- before tier and speed scaling
-    kinetic_tier_small  = 0.38    -- ~65 dmg  -> ~4 hits on a 250 HP enemy
-    kinetic_tier_medium = 0.78    -- ~133 dmg -> 2 hits
-    kinetic_tier_large  = 1.50    -- ~255 dmg -> ONE SHOT
-    kinetic_tier_magma  = 2.00    -- overkill, plus the blast on top
-    kinetic_knockback   = 950.0   -- scaled by tier
+kinetic_base_damage = 170.0   -- before tier and speed scaling
+kinetic_tier_small  = 0.38    -- ~65 dmg  -> ~4 hits on a 250 HP enemy
+kinetic_tier_medium = 0.78    -- ~133 dmg -> 2 hits
+kinetic_tier_large  = 1.50    -- ~255 dmg -> ONE SHOT
+kinetic_tier_magma  = 2.00    -- overkill, plus the blast on top
+kinetic_knockback   = 950.0   -- scaled by tier
 
 -- ============================================================================
 -- HEALTH & INVULNERABILITY
@@ -277,6 +277,66 @@ max_hp = 100                 -- Maximum health points
 -- Invulnerability frames (i-frames) after taking damage
 invul_time = 0.4             -- Full invincibility duration (seconds)
 cheap_invul_time = 0.1       -- Partial invincibility for minor collisions
+
+
+
+-- ===== VENT QTE =====
+-- Fires automatically whenever the weapon overheats. Three outcomes:
+--   perfect (yellow) -> heat zeroed + overdrive
+--   good    (blue)   -> heat zeroed
+--   miss             -> vent normally, exactly as before
+--
+-- Miss is deliberately free. Stacking a penalty on top of an overheat would
+-- punish one mistake twice, and the player who most needs the vent is already
+-- the one under the most pressure. Upside-only is what makes reaching for it
+-- feel like an opportunity instead of a bomb.
+qte_timeout          = 2.4     -- WAS 3.2. Venting is frozen while this runs, so
+                               -- the window is now wagered time, not free time.
+qte_max_sweeps       = 3       -- WAS 4, same reason.
+qte_speed            = 1.30    -- Sweeps/sec at streak 0
+qte_good_half        = 0.105   -- Blue zone half-width (0..1 of the bar)
+qte_perfect_half     = 0.035   -- WAS 0.028. The zone is read against a bar that
+                               -- is 340px wide at most, and 0.028 gave a ~43ms
+                               -- window – under 3 frames at 60fps.
+qte_perfect_trauma   = 0.28
+
+-- Consecutive perfects speed the marker up. Without this, "perfect vent grants
+-- unlimited fire" is a closed loop: fire freely, overheat, hit perfect, repeat.
+-- A player who can hit the check once can hit it forever, and the heat system
+-- stops existing for them. The ramp lets a skilled player ride the loop for a
+-- while and then closes it on its own, with no arbitrary hard cap.
+qte_streak_speed_step = 0.16
+qte_speed_max         = 2.35   -- ~1.8x base. Past this it stops reading as a
+                               -- skill check and starts reading as a coin flip.
+
+overdrive_duration   = 4.0     -- Seconds of free fire on a perfect vent
+overdrive_exit_heat  = 0.0     -- Heat set when overdrive ends. 0 = the plain
+                               -- reading of "heat doesn't rise for a few
+                               -- seconds". Raise toward 45 if the streak ramp
+                               -- alone does not close the loop in playtesting.
+
+
+-- ===== PERFECT PARRY =====
+-- A parry counts as PERFECT when it connects in the first slice of its active
+-- window -- i.e. you pressed just before the hit landed rather than pressing
+-- early and waiting. Perfect parries on BULLETS and SHIPS skip the recovery
+-- entirely and grant brief i-frames.
+--
+-- Asteroids are excluded on purpose. Parrying a rock already pays out a kinetic
+-- weapon, which is the largest single reward in the game; adding free recovery
+-- and i-frames on top would make rock-parrying strictly better than every other
+-- defensive option. Rocks are also big and slow, so the timing is not the
+-- achievement there.
+parry_perfect_fraction = 0.45  -- First 45% of parry_window counts as perfect
+parry_perfect_cooldown = 0.12  -- Instead of parry_cooldown (1.0)
+parry_perfect_iframes  = 0.22  -- THIS is what fixes "parried one bullet and the
+                               -- next one hit me anyway". Cancelling recovery
+                               -- lets you parry again; it does not help against
+                               -- a shot already in flight when the first
+                               -- connected. Only i-frames cover that.
+parry_perfect_chain_falloff = 0.75  -- Each chained perfect gets this fraction
+                                    -- of the i-frames, so a parry-lock cannot
+                                    -- be held indefinitely.
 
 -- ============================================================================
 -- KEY BINDINGS
@@ -294,5 +354,10 @@ key_bindings = {
     fire   = "MouseLeft",   -- Primary weapon (shoot bullets)
     sprint = "LShift",      -- Turbo / energy boost (consumes energy)
     parry = "R",            -- Parry button!
-    rift_detonate_key   = "MouseRight"
+    rift_detonate_key   = "MouseRight",
+    vent   = "E",           -- Overheat vent QTE
+
+    -- NOT the fire button, deliberately. Players mash fire the instant they
+    -- overheat -- that is the reflex the lockout creates -- so binding the QTE
+    -- to fire would auto-fail it before the bar could even be read.
 }

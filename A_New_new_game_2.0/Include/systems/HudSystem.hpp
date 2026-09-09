@@ -36,6 +36,7 @@
 
 #include "ISystem.hpp"
 #include "core/EntityManager.hpp"
+#include "utils/UiPalette.hpp"       
 #include <SFML/Graphics.hpp>
 #include <cmath>
 #include <algorithm>
@@ -50,6 +51,7 @@ public:
         m_time = 0.f;
         m_ghostHp = -1.f;
         m_displayScore = 0.f;
+        m_qteOpen = 0.f;
     }
 
     /// Fonts are owned by game.cpp; pass one in after init().
@@ -103,8 +105,6 @@ public:
             ? pulse(sf::Color(255, 69, 0), sf::Color(255, 150, 60), 12.f)
             : sf::Color(0, 191, 255);
 
-        // Dim the segment you're about to spend on a dash — shows affordability
-        // before you commit, which is the whole point of a resource bar.
         const float dashCost = (*m_lua)["dash_energy_cost"].get_or(30.f);
         const float costRatio = clamp01(dashCost / std::max(1.f, ps.maxEnergyDrive));
 
@@ -118,24 +118,16 @@ public:
         y += 20.f;
 
         // ================================================================
-        // WEAPON HEAT
+        // WEAPON HEAT / VENT QTE — unified widget
         // ================================================================
-        const float heatRatio = clamp01(ps.weaponHeat / std::max(1.f, ps.maxWeaponHeat));
+        const float qteT = ps.qteActive ? 1.f : 0.f;
+        m_qteOpen += (qteT - m_qteOpen) * (1.f - std::exp(-11.f * dt));
 
-        sf::Color heatCol = ps.weaponOverheated
-            ? pulse(sf::Color(255, 70, 30), sf::Color(255, 220, 180), 16.f)
-            : heatRamp(heatRatio);
+        const float bw = 260.f + 80.f * m_qteOpen;   // 260 -> 340
+        const float bh = 13.f + 15.f * m_qteOpen;    // 13  -> 28
 
-        drawBar(x, y, 260.f, 13.f, heatRatio, heatCol,
-            -1.f, sf::Color::Transparent,
-            0.1f, false);
-
-        // Threshold pips: the vent-unlock point and the overheat point.
-        const float unlockAt = wcfg("heat_unlock_threshold", 30.f)
-            / std::max(1.f, ps.maxWeaponHeat);
-        drawPip(x, y, 260.f, 13.f, unlockAt, sf::Color(120, 220, 255, 210));
-        drawPip(x, y, 260.f, 13.f, 0.999f, sf::Color(255, 90, 40, 230));
-        y += 26.f;
+        drawHeatWidget(x, y, bw, bh, ps);
+        y += bh + 13.f + 18.f * m_qteOpen;
 
         // ================================================================
         // SCORE
@@ -146,7 +138,6 @@ public:
             score.setString(std::to_string(static_cast<int>(m_displayScore + 0.5f)));
             score.setPosition({ x + 3.f, y });
 
-            // Cheap faux-shadow: same glyphs offset and darkened.
             sf::Text shadow = score;
             shadow.setFillColor(sf::Color(0, 0, 0, 170));
             shadow.setPosition({ x + 5.f, y + 2.f });
@@ -159,11 +150,9 @@ public:
 
 private:
     // ========================================================================
-    // DRAWING
+    // DRAWING HELPERS (legacy skew quads)
     // ========================================================================
 
-    /// Skewed quad. `skew` shifts the top edge right, giving the whole HUD
-    /// a consistent forward lean.
     void quad(float px, float py, float w, float h, sf::Color c, float skew = 12.f) const {
         sf::ConvexShape s(4);
         s.setPoint(0, { px + skew,     py });
@@ -179,20 +168,15 @@ private:
         float ghostRatio, sf::Color ghostCol,
         float segmentStep, bool flashFrame) const
     {
-        // ---- Backing plate + inner well ----
         quad(px - 3.f, py - 3.f, w + 6.f, h + 6.f, sf::Color(15, 18, 26, 220));
         quad(px, py, w, h, sf::Color(38, 44, 58, 235));
 
-        // ---- Damage ghost (behind the real fill) ----
         if (ghostRatio > 0.f && ghostRatio > ratio) {
             quad(px, py, w * ghostRatio, h, ghostCol);
         }
 
-        // ---- Fill ----
         if (ratio > 0.001f) {
             quad(px, py, w * ratio, h, fill);
-
-            // Top highlight: a lighter sliver sells depth without a gradient.
             sf::Color hi = fill;
             hi.r = static_cast<uint8_t>(std::min(255, hi.r + 60));
             hi.g = static_cast<uint8_t>(std::min(255, hi.g + 60));
@@ -201,14 +185,12 @@ private:
             quad(px, py, w * ratio, h * 0.34f, hi);
         }
 
-        // ---- Segment ticks ----
         if (segmentStep > 0.001f) {
             for (float t = segmentStep; t < 0.999f; t += segmentStep) {
                 quad(px + w * t, py, 2.f, h, sf::Color(12, 14, 20, 200), 12.f);
             }
         }
 
-        // ---- I-frame flash ----
         if (flashFrame) {
             const float f = 0.5f + 0.5f * std::sin(m_time * 30.f);
             quad(px, py, w, h, sf::Color(255, 255, 255,
@@ -216,15 +198,117 @@ private:
         }
     }
 
-    /// Vertical marker line at a normalised position along the bar.
     void drawPip(float px, float py, float w, float h, float t, sf::Color c) const {
         quad(px + w * clamp01(t) - 1.f, py - 3.f, 2.5f, h + 6.f, c, 12.f);
     }
 
-    /// Bracket showing where energy would sit after paying for a dash.
     void drawCostMarker(float px, float py, float w, float h, float t) const {
         quad(px + w * clamp01(t) - 1.f, py - 2.f, 2.f, h + 4.f,
             sf::Color(255, 255, 255, 130), 12.f);
+    }
+
+    // ========================================================================
+    // HEAT GAUGE / VENT QTE (unified)
+    // ========================================================================
+    void drawHeatWidget(float x, float y, float w, float h,
+        const PlayerComponent& ps) {
+        const float heatRatio = clamp01(ps.weaponHeat /
+            std::max(1.f, ps.maxWeaponHeat));
+
+        // ---- Chassis ----
+        ui::panel(*m_window, x - 3.f, y - 3.f, w + 6.f, h + 6.f, ui::PANEL_BG);
+        ui::brackets(*m_window, x - 3.f, y - 3.f, w + 6.f, h + 6.f,
+            ps.qteActive ? ui::CYAN_MID : ui::CYAN_LOW);
+
+        if (!ps.qteActive) {
+            // ---- Normal gauge ----
+            const sf::Color hot = ps.weaponOverheated
+                ? pulse(ui::HAZARD, sf::Color(255, 200, 170), 16.f)
+                : ui::mix(ui::CYAN, ui::HAZARD, heatRatio);
+
+            ui::segBar(*m_window, x, y, w, h, heatRatio, 20,
+                hot, ui::alpha(ui::CYAN_LOW, 0.35f));
+
+            // Vent-unlock threshold
+            const float unlockAt = wcfg("heat_unlock_threshold", 30.f)
+                / std::max(1.f, ps.maxWeaponHeat);
+            ui::vline(*m_window, x + unlockAt * w, y - 2.f, h + 4.f, ui::CYAN_MID);
+
+            // ---- Overdrive readout ----
+            if (ps.overdriveTimer > 0.f) {
+                const float od = clamp01(ps.overdriveTimer /
+                    std::max(0.01f, wcfgLua("overdrive_duration", 4.f)));
+                ui::fill(*m_window, x, y + h + 3.f, w * od, 2.f,
+                    pulse(ui::AMBER_HOT, ui::AMBER, 13.f));
+                ui::label(*m_window, m_font, x, y + h + 7.f,
+                    "COOLANT LOCK", 12, ui::alpha(ui::AMBER_HOT, 0.92f));
+            }
+
+            // ---- Verdict display (right after QTE ends) ----
+            if (ps.qteResultFlash > 0.f && m_font) {
+                const float a = clamp01(ps.qteResultFlash / 0.55f);
+                const char* txt = (ps.qteResult == 1) ? "PERFECT VENT"
+                    : (ps.qteResult == 2) ? "VENT OK"
+                    : "VENT MISSED";
+                const sf::Color col = (ps.qteResult == 1) ? ui::AMBER_HOT
+                    : (ps.qteResult == 2) ? ui::BLUE_COOL
+                    : ui::TEXT_DIM;
+                ui::label(*m_window, m_font, x, y - 19.f, txt, 16,
+                    ui::alpha(col, a * 255.f));
+            }
+            return;
+        }
+
+        // ================================================================
+        // QTE MODE
+        // ================================================================
+
+        // Track
+        ui::fill(*m_window, x, y, w, h, ui::alpha(ui::CYAN_LOW, 0.30f));
+
+        // Frozen heat (still visible at full)
+        ui::fill(*m_window, x, y, w, h, ui::alpha(ui::HAZARD, 0.18f));
+
+        // ---- Zones (nested: amber inside blue) ----
+        auto zone = [&](float half, sf::Color c, float inset) {
+            const float zx = x + (ps.qteGoodCenter - half) * w;
+            ui::fill(*m_window, zx, y + inset, half * 2.f * w, h - inset * 2.f, c);
+        };
+        zone(ps.qteGoodHalf, ui::alpha(ui::BLUE_COOL, 0.55f), 1.f);
+        zone(ps.qtePerfectHalf, ui::alpha(ui::AMBER_HOT, 0.95f), 1.f);
+
+        // Tick marks above/below the amber zone
+        const float ax = x + ps.qteGoodCenter * w;
+        ui::vline(*m_window, ax, y - 5.f, 4.f, ui::AMBER_HOT);
+        ui::vline(*m_window, ax, y + h + 1.f, 4.f, ui::AMBER_HOT);
+
+        // ---- Marker ----
+        const float mx = x + ps.qtePos * w;
+        ui::fill(*m_window, mx - 1.f, y - 4.f, 2.f, h + 8.f, sf::Color(245, 250, 255));
+        ui::fill(*m_window, mx - ps.qteDir * 13.f, y + h * 0.35f, 13.f, h * 0.3f,
+            ui::alpha(sf::Color(200, 235, 255), 0.28f));
+
+        // ---- Timeout (converging from both ends) ----
+        const float tR = clamp01(ps.qteTimeout /
+            std::max(0.01f, wcfgLua("qte_timeout", 2.4f)));
+        const float gone = (1.f - tR) * w * 0.5f;
+        ui::fill(*m_window, x, y + h + 3.f, gone, 2.f, ui::alpha(ui::HAZARD, 0.85f));
+        ui::fill(*m_window, x + w - gone, y + h + 3.f, gone, 2.f,
+            ui::alpha(ui::HAZARD, 0.85f));
+
+        // ---- Prompt ----
+        ui::label(*m_window, m_font, x, y - 19.f, "COOLANT VENT", 13,
+            pulse(ui::CYAN, ui::CYAN_MID, 7.f));
+        ui::label(*m_window, m_font, x + w - 34.f, y - 19.f, "[E]", 13, ui::AMBER);
+
+        if (ps.qteStreak > 0) {
+            ui::label(*m_window, m_font, x + w - 96.f, y - 19.f,
+                "SYNC X" + std::to_string(ps.qteStreak), 12,
+                ui::alpha(ui::AMBER_HOT, 0.9f));
+        }
+
+        // ---- Scanlines for QTE state ----
+        ui::scanlines(*m_window, x, y, w, h, 26, 3.f);
     }
 
     // ========================================================================
@@ -241,7 +325,6 @@ private:
             static_cast<uint8_t>(a.b + (b.b - a.b) * f));
     }
 
-    /// Matches WeaponSystem::heatColor and RenderSystem::heatRamp.
     static sf::Color heatRamp(float t) {
         t = std::clamp(t, 0.f, 1.f);
         float r, g, b;
@@ -268,6 +351,14 @@ private:
         return (*v)[key].get_or(def);
     }
 
+    float wcfgLua(const char* key, float fallback) const {
+        if (!m_lua) return fallback;
+        return (*m_lua)[key].get_or(fallback);
+    }
+
+    // ========================================================================
+    // MEMBERS
+    // ========================================================================
     EntityManager* m_em = nullptr;
     sf::RenderWindow* m_window = nullptr;
     sol::state* m_lua = nullptr;
@@ -275,6 +366,7 @@ private:
     uint32_t m_playerEntityId = 0;
 
     float m_time = 0.f;
-    float m_ghostHp = -1.f;      ///< Lagging health value for the damage ghost
-    float m_displayScore = 0.f;  ///< Eased score for the count-up
+    float m_ghostHp = -1.f;
+    float m_displayScore = 0.f;
+    float m_qteOpen = 0.f;          // 0..1 smooth expansion of QTE widget
 };

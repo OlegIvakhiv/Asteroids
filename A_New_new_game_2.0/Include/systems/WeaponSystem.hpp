@@ -85,7 +85,11 @@ public:
             !playerStats.riftCharging &&
             !playerStats.weaponOverheated &&
             playerStats.energyDrive >= riftEnergy &&
-            playerStats.weaponHeat + riftHeat < playerStats.maxWeaponHeat;
+            // Under overdrive the Rift generates no heat, so gating it on a
+            // heat budget it will never spend would lock out the one weapon
+            // the buff most exists to enable.
+            (playerStats.overdriveTimer > 0.f ||
+                playerStats.weaponHeat + riftHeat < playerStats.maxWeaponHeat);
 
         if (detonateKey && canStartRift) {
             playerStats.riftCharging = true;
@@ -520,7 +524,7 @@ private:
                 m_em->healths[nearestIdx].isHoming = true;
                 m_em->healths[nearestIdx].homingTargetEntityId =
                     m_em->transforms[enemyIdx].entityId;
-                
+
                 m_em->healths[nearestIdx].isKineticWeapon = true;
 
                 for (int n = 0; n < 24; ++n) {
@@ -600,6 +604,32 @@ private:
         if (ps.heatCoolDelay > 0.f) ps.heatCoolDelay -= dt;
 
         if (ps.weaponOverheated) {
+            // ---- QTE OPEN -> the gauge stops dead at the overheat line ----
+            // This system owns the freeze because it owns cooling. Venting
+            // through the minigame would tell the player they can simply wait
+            // it out, which is the exact behaviour the QTE replaces. The bar
+            // pinned at maximum is what turns a passive lockout into a prompt.
+            if (ps.qteActive) {
+                ps.weaponHeat = ps.maxWeaponHeat;
+
+                // Keep the strain venting, so a frozen bar still looks like a
+                // machine under load rather than a paused game.
+                if ((rand() % 100) < 70) {
+                    const float rotRad = (tf.rotation - 90.f) * 3.14159f / 180.f;
+                    const sf::Vector2f fwd(std::cos(rotRad), std::sin(rotRad));
+                    const sf::Vector2f side(-fwd.y, fwd.x);
+                    const float s = ((rand() % 2) ? 1.f : -1.f);
+                    m_em->particles.push_back({
+                        m_em->nextEntityId++,
+                        tf.position + fwd * 18.f + side * (s * 12.f),
+                        side * (s * (110.f + rand() % 90)) + fwd * float(rand() % 50),
+                        sf::Color(255, 190, 150, 205),
+                        0.26f, 0.42f, 3.f + rand() % 3 });
+                }
+                return;
+            }
+
+            // ---- Normal venting (when QTE is not active) ----
             ps.weaponHeat = std::max(0.f, ps.weaponHeat - ventRate * dt);
 
             if ((rand() % 100) < 60) {
@@ -651,7 +681,28 @@ private:
         }
     }
 
+    /**
+     * @brief Every heat source in the game goes through here.
+     *
+     * ONE funnel, deliberately. Plasma (line ~227) and Rift (line ~151) both
+     * call this, so a single guard covers every weapon, present and future.
+     * Any new weapon that adds heat by touching ps.weaponHeat directly will
+     * silently ignore overdrive -- which is precisely how you get "it works
+     * for plasma but not the Rift". Do not write to weaponHeat anywhere except
+     * this function and the cooling code.
+     */
     void addHeat(PlayerComponent& ps, float amount, sf::Vector2f pos) {
+        // OVERDRIVE: earned by an amber vent. NOTHING generates heat.
+        //
+        // Early return rather than scaling the amount down, so the promise
+        // stays literal: "no weapon generates heat" should mean the gauge does
+        // not move, not that it moves slower.
+        if (ps.overdriveTimer > 0.f) {
+            ps.weaponHeat = 0.f;
+            ps.heatCoolDelay = 0.f;
+            return;
+        }
+
         ps.weaponHeat = std::min(ps.maxWeaponHeat, ps.weaponHeat + amount);
         ps.heatCoolDelay = wcfg("heat_cool_delay", 0.40f);
 

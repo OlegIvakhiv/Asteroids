@@ -36,6 +36,7 @@
 
 #include "ISystem.hpp"
 #include "core/EntityManager.hpp"
+#include "core/EnemyArchetypes.hpp"        // added for archetype registry and geometry
 #include <SFML/Graphics.hpp>
 #include <unordered_map>
 #include <vector>
@@ -51,6 +52,7 @@ public:
         m_window = ctx.window;
         m_lua = ctx.lua;
         m_playerEntityId = ctx.playerEntityId;
+        m_enemyReg = ctx.enemyRegistry;      // store registry pointer
         m_magmaPulseTime = 0.f;
     }
 
@@ -203,51 +205,44 @@ public:
                 continue;
             }
 
+            // ================================================================
+            // ENEMY – new archetype-based rendering
+            // ================================================================
             if (type == BodyType::Enemy) {
                 auto& ec = m_em->enemies[i];
 
-                // ====================================================================
-                // 1. STATE COLOUR
-                //
-                // Hue alone carries the state. The player should be able to read a
-                // whole screen of pirates at a glance without counting effects.
-                //   PATROL — muted, desaturated: "not your problem yet"
-                //   ALERT  — amber: "something's wrong"
-                //   COMBAT — hot red: "engaged"
-                // ====================================================================
-                sol::table clr = (*m_lua)["enemy_config"]["color"];
-                const float cr = clr["r"].get_or(255), cg = clr["g"].get_or(50), cb = clr["b"].get_or(50);
+                // Resolve the archetype once for this enemy
+                const enemyarch::ArchetypeDef& adef = m_enemyReg->resolve(ec.archetype);
 
+                // ====================================================================
+                // 1. STATE COLOUR (fill)
+                // ====================================================================
                 sf::Color fill;
                 switch (ec.visualState) {
                 case EnemyState::PATROL:
-                    // Dimmed and pulled toward grey.
                     fill = sf::Color(
-                        // Clamped: cr/cg/cb come from Lua, so a brighter
-                        // enemy colour would overflow uint8_t and WRAP to a
-                        // dark value -- showing up as random dark flicker
-                        // rather than an obvious error.
-                        static_cast<uint8_t>(std::clamp(cr * 0.52f + 30.f, 0.f, 255.f)),
-                        static_cast<uint8_t>(std::clamp(cg * 0.52f + 34.f, 0.f, 255.f)),
-                        static_cast<uint8_t>(std::clamp(cb * 0.52f + 38.f, 0.f, 255.f)));
+                        static_cast<uint8_t>(std::clamp(adef.color.r * 0.52f + 30.f, 0.f, 255.f)),
+                        static_cast<uint8_t>(std::clamp(adef.color.g * 0.52f + 34.f, 0.f, 255.f)),
+                        static_cast<uint8_t>(std::clamp(adef.color.b * 0.52f + 38.f, 0.f, 255.f)));
                     break;
                 case EnemyState::ALERT: {
-                    // Amber, with a slow throb so it reads as "actively searching".
                     const float p = 0.5f + 0.5f * std::sin(m_enemyAnimTime * 5.0f);
                     fill = sf::Color(
                         static_cast<uint8_t>(std::clamp(228.f + 27.f * p, 0.f, 255.f)),
                         static_cast<uint8_t>(std::clamp(150.f + 40.f * p, 0.f, 255.f)),
-                        static_cast<uint8_t>(40));
+                        40);
                     break;
                 }
                 case EnemyState::COMBAT:
                 default:
                     fill = sf::Color(
-                        static_cast<uint8_t>(cr), static_cast<uint8_t>(cg), static_cast<uint8_t>(cb));
+                        static_cast<uint8_t>(adef.color.r),
+                        static_cast<uint8_t>(adef.color.g),
+                        static_cast<uint8_t>(adef.color.b));
                     break;
                 }
 
-                // ---- Damage flash overrides everything ----
+                // Damage flash
                 if (ec.hitFlashTimer > 0.f) {
                     const float w = std::clamp(ec.hitFlashTimer / 0.16f, 0.f, 1.f);
                     fill = sf::Color(
@@ -256,7 +251,7 @@ public:
                         static_cast<uint8_t>(fill.b + (255 - fill.b) * w));
                 }
 
-                // ---- Stagger / stun: drained, unpowered ----
+                // Stagger / stun
                 const bool broken = (ec.staggerTimer > 0.f || ec.staggerRecoverTimer > 0.f ||
                     m_em->healths[i].stunTimer > 0.f);
                 if (broken) {
@@ -267,36 +262,36 @@ public:
                         static_cast<uint8_t>(fill.b * 0.45f * f + 20));
                 }
 
-                rd.shape.setFillColor(fill);
+                // ---- Ram charge overrides everything ----
+                if (ec.ramState == RamState::Charge) {
+                    fill = sf::Color(255, 245, 215);
+                }
 
                 // ====================================================================
                 // 2. OUTLINE — carries the telegraph
                 // ====================================================================
+                float     outlineWidth = 1.6f;
+                sf::Color outlineColor(std::min(255, fill.r + 60),
+                    std::min(255, fill.g + 50),
+                    std::min(255, fill.b + 50), 200);
+
                 if (ec.telegraphActive && ec.telegraphDuration > 0.f) {
-                    // Ramps up as the shot approaches: the player's cue to move.
                     const float u = 1.f - (ec.telegraphTimer / ec.telegraphDuration);
-                    rd.shape.setOutlineThickness(1.6f + 5.0f * u);
-                    rd.shape.setOutlineColor(sf::Color(255,
+                    outlineWidth = 1.6f + 5.0f * u;
+                    outlineColor = sf::Color(255,
                         static_cast<uint8_t>(240 - 140 * u),
                         static_cast<uint8_t>(200 - 180 * u),
-                        static_cast<uint8_t>(180 + 75 * u)));
+                        static_cast<uint8_t>(180 + 75 * u));
                 }
                 else if (ec.stormActive) {
                     const float p = 0.5f + 0.5f * std::sin(m_enemyAnimTime * 30.f);
-                    rd.shape.setOutlineThickness(2.0f + 3.0f * p);
-                    rd.shape.setOutlineColor(sf::Color(255, 200, 80, 240));
-                }
-                else {
-                    rd.shape.setOutlineThickness(1.6f);
-                    rd.shape.setOutlineColor(sf::Color(
-                        std::min(255, fill.r + 60), std::min(255, fill.g + 50),
-                        std::min(255, fill.b + 50), 200));
+                    outlineWidth = 2.0f + 3.0f * p;
+                    outlineColor = sf::Color(255, 200, 80, 240);
                 }
 
                 // ====================================================================
                 // 3. DRAW THE SHIP with animation offsets
-                //    Same pivot maths as the player: rotating about a point near the
-                //    nose swings the TAIL, which reads as banking.
+                //    Same pivot maths as the player.
                 // ====================================================================
                 const float baseRad = tf.rotation * 3.14159f / 180.f;
                 const float ecs = std::cos(baseRad), esn = std::sin(baseRad);
@@ -304,21 +299,168 @@ public:
                     tf.position.x + (tf.visualPivot.x * ecs - tf.visualPivot.y * esn),
                     tf.position.y + (tf.visualPivot.x * esn + tf.visualPivot.y * ecs));
 
-                rd.shape.setOrigin(tf.visualPivot);
-                rd.shape.setScale(tf.visualScale);
-                rd.shape.setPosition(pivotWorld);
-                rd.shape.setRotation(sf::degrees(tf.rotation + tf.visualOffsetAngle));
-                m_window->draw(rd.shape);
+                // Matches Transformable's order: T(pos) * R * S * T(-origin)
+                sf::Transform xf;
+                xf.translate(pivotWorld);
+                xf.rotate(sf::degrees(tf.rotation + tf.visualOffsetAngle));
+                xf.scale(tf.visualScale);
+                xf.translate(-tf.visualPivot);
 
-                // Reset origin/scale so the next frame's default path isn't affected
-                // if this enemy ever renders through another branch.
-                rd.shape.setOrigin({ 0.f, 0.f });
-                rd.shape.setScale({ 1.f, 1.f });
+                sf::RenderStates states;
+                states.transform = xf;
+
+                // ---- Fill ----
+                if (!adef.visualTris.empty()) {
+                    sf::VertexArray body(sf::PrimitiveType::Triangles, adef.visualTris.size());
+                    for (size_t k = 0; k < adef.visualTris.size(); ++k)
+                        body[k] = sf::Vertex{ adef.visualTris[k], fill };
+                    m_window->draw(body, states);
+                }
+
+                // ---- Outline ----
+                m_outlineScratch = enemyarch::geom::outlineStrip(adef.visual, outlineWidth);
+                if (m_outlineScratch.size() >= 4) {
+                    sf::VertexArray edge(sf::PrimitiveType::TriangleStrip,
+                        m_outlineScratch.size());
+                    for (size_t k = 0; k < m_outlineScratch.size(); ++k)
+                        edge[k] = sf::Vertex{ m_outlineScratch[k], outlineColor };
+                    m_window->draw(edge, states);
+                }
+
+                // ====================================================================
+                // 3b. TURRET — drawn in its OWN frame, not the hull's
+                // ====================================================================
+                for (size_t mi = 0; mi < adef.turrets.size(); ++mi) {
+                    const sf::Vector2f local = adef.turrets[mi];
+                    const float hr = tf.rotation * 3.14159f / 180.f;
+                    const sf::Vector2f mountPos(
+                        tf.position.x + (local.x * std::cos(hr) - local.y * std::sin(hr)),
+                        tf.position.y + (local.x * std::sin(hr) + local.y * std::cos(hr)));
+
+                    sf::Transform txf;
+                    txf.translate(mountPos);
+                    txf.rotate(sf::degrees(ec.turretAngle));
+
+                    sf::RenderStates tst;
+                    tst.transform = txf;
+
+                    const float ts = adef.config["turret_size"].get_or(10.f);
+
+                    // Wind-up heat on the barrel: the shot tell.
+                    float heat = 0.f;
+                    if (ec.turretTelegraphActive && ec.turretTelegraphDuration > 0.f)
+                        heat = 1.f - (ec.turretTelegraphTimer / ec.turretTelegraphDuration);
+                    if (ec.turretMuzzleFlash > 0.f) heat = 1.f;
+
+                    const sf::Color barrelCol(
+                        255,
+                        static_cast<uint8_t>(std::clamp(200.f - 120.f * heat, 0.f, 255.f)),
+                        static_cast<uint8_t>(std::clamp(150.f - 130.f * heat, 0.f, 255.f)),
+                        static_cast<uint8_t>(std::clamp(200.f + 55.f * heat, 0.f, 255.f)));
+
+                    // Barrel: a bar running forward (-Y local) from the mount.
+                    const float bl = ts * (2.1f + 0.25f * heat);
+                    const float bw = ts * 0.28f;
+                    sf::VertexArray barrel(sf::PrimitiveType::TriangleStrip, 4);
+                    barrel[0] = sf::Vertex{ { -bw, 0.f },  barrelCol };
+                    barrel[1] = sf::Vertex{ {  bw, 0.f },  barrelCol };
+                    barrel[2] = sf::Vertex{ { -bw, -bl },  barrelCol };
+                    barrel[3] = sf::Vertex{ {  bw, -bl },  barrelCol };
+                    m_window->draw(barrel, tst);
+
+                    // Housing: an octagon, so the gun reads as a separate
+                    // machine bolted on rather than part of the hull plating.
+                    sf::VertexArray housing(sf::PrimitiveType::TriangleFan, 10);
+                    housing[0] = sf::Vertex{ { 0.f, 0.f },
+                        sf::Color(std::min(255, fill.r + 40),
+                                  std::min(255, fill.g + 30),
+                                  std::min(255, fill.b + 30)) };
+                    for (int k = 0; k <= 8; ++k) {
+                        const float a = k * 3.14159f * 2.f / 8.f;
+                        housing[k + 1] = sf::Vertex{
+                            { std::cos(a) * ts, std::sin(a) * ts }, outlineColor };
+                    }
+                    m_window->draw(housing, tst);
+
+                    // Muzzle flash.
+                    if (ec.turretMuzzleFlash > 0.f) {
+                        const float u = ec.turretMuzzleFlash / 0.11f;
+                        sf::VertexArray fl(sf::PrimitiveType::TriangleFan, 4);
+                        const sf::Color fc(255, 230, 150,
+                            static_cast<uint8_t>(230 * u));
+                        fl[0] = sf::Vertex{ { 0.f, -bl }, fc };
+                        fl[1] = sf::Vertex{ { -ts * 0.8f * u, -bl - ts * 0.6f }, sf::Color(255,180,80,0) };
+                        fl[2] = sf::Vertex{ { 0.f, -bl - ts * 2.2f * u },        sf::Color(255,200,90,0) };
+                        fl[3] = sf::Vertex{ {  ts * 0.8f * u, -bl - ts * 0.6f }, sf::Color(255,180,80,0) };
+                        m_window->draw(fl, tst);
+                    }
+                }
+
+                // ====================================================================
+                // 3c. RAM WAKE (fades out after charge)
+                // ====================================================================
+                if (ec.ramTrailFade > 0.f && ec.ramTrailCount >= 2) {
+                    const int n = ec.ramTrailCount;
+                    sf::VertexArray wake(sf::PrimitiveType::TriangleStrip, n * 2);
+                    const float headW = adef.radius * 0.5f;
+
+                    for (int k = 0; k < n; ++k) {
+                        // Segment direction, from the neighbouring samples.
+                        const sf::Vector2f a = ec.ramTrail[std::max(0, k - 1)];
+                        const sf::Vector2f b = ec.ramTrail[std::min(n - 1, k + 1)];
+                        sf::Vector2f d = b - a;
+                        const float l = std::sqrt(d.x * d.x + d.y * d.y);
+                        if (l > 0.01f) { d.x /= l; d.y /= l; }
+                        else { d = { 0.f, -1.f }; }
+                        const sf::Vector2f perp(-d.y, d.x);
+
+                        const float t = 1.f - static_cast<float>(k) / (n - 1);  // 1 -> 0
+                        const float w = headW * t;
+                        const sf::Color c(255,
+                            static_cast<uint8_t>(150 + 70 * t),
+                            static_cast<uint8_t>(70 + 60 * t),
+                            static_cast<uint8_t>(210 * t * t * ec.ramTrailFade));
+
+                        wake[k * 2] = sf::Vertex{ ec.ramTrail[k] - perp * w, c };
+                        wake[k * 2 + 1] = sf::Vertex{ ec.ramTrail[k] + perp * w, c };
+                    }
+                    m_window->draw(wake);
+                }
+
+                // ====================================================================
+                // 3d. RAM WIND-UP GLOW (only during windup)
+                // ====================================================================
+                if (ec.ramState == RamState::Windup && ec.ramGlow > 0.f) {
+                    const float g = ec.ramGlow;
+                    const float r = tf.rotation * 3.14159f / 180.f;
+                    const sf::Vector2f fwd(std::sin(r), -std::cos(r));
+                    const sf::Vector2f rgt(std::cos(r), std::sin(r));
+                    const sf::Vector2f nose = tf.position + fwd * (adef.radius * 0.95f);
+
+                    const float w = 18.f + 30.f * g;
+                    sf::VertexArray bar(sf::PrimitiveType::TriangleStrip, 4);
+                    const sf::Color hot(255, static_cast<uint8_t>(220 - 120 * g), 80,
+                        static_cast<uint8_t>(120 + 135 * g));
+                    bar[0] = sf::Vertex{ nose - rgt * w,                    hot };
+                    bar[1] = sf::Vertex{ nose + rgt * w,                    hot };
+                    bar[2] = sf::Vertex{ nose - rgt * w * 0.5f + fwd * 26.f * g,
+                                         sf::Color(255, 240, 180, 0) };
+                    bar[3] = sf::Vertex{ nose + rgt * w * 0.5f + fwd * 26.f * g,
+                                         sf::Color(255, 240, 180, 0) };
+                    m_window->draw(bar);
+
+                    // Aim line: shows the committed lane, not just that
+                    // something is coming.
+                    sf::VertexArray lane(sf::PrimitiveType::Lines, 2);
+                    lane[0] = sf::Vertex{ nose, sf::Color(255, 140, 60,
+                                          static_cast<uint8_t>(40 + 120 * g)) };
+                    lane[1] = sf::Vertex{ nose + fwd * (300.f + 500.f * g),
+                                          sf::Color(255, 140, 60, 0) };
+                    m_window->draw(lane);
+                }
 
                 // ====================================================================
                 // 4. TELEGRAPH AIM LINE
-                //    Shows WHERE the shot is going, not just that one is coming. This is
-                //    what turns the wind-up into a dodge prompt instead of a warning.
                 // ====================================================================
                 if (ec.telegraphActive && ec.telegraphDuration > 0.f) {
                     const float u = 1.f - (ec.telegraphTimer / ec.telegraphDuration);
@@ -334,13 +476,10 @@ public:
                 }
 
                 // ====================================================================
-                // 5. VISION CONE (ALERT only)
-                //    Only drawn while searching — always-on cones would clutter the
-                //    screen, and in COMBAT the enemy has already found you, so the
-                //    information is worthless.
+                // 5. VISION CONE (ALERT only) — uses adef.config
                 // ====================================================================
                 if (ec.visualState == EnemyState::ALERT) {
-                    sol::table cfg = (*m_lua)["enemy_config"];
+                    sol::table cfg = adef.config;
                     const float range = cfg["vision_range"].get_or(620.f) * 0.55f;
                     const float half = cfg["vision_fov"].get_or(110.f) * 0.5f *
                         cfg["vision_fov_alert_mult"].get_or(1.45f);
@@ -361,15 +500,18 @@ public:
                 }
 
                 // ====================================================================
-                // 6. ALERT ICON — flat polygons, pop-and-fade
+                // 6. ALERT ICON
                 // ====================================================================
                 if (ec.alertIconTimer > 0.f && ec.alertIconDuration > 0.f) {
                     drawAlertIcon(tf.position, ec);
                 }
 
-                continue;   // already drawn
+                continue;   // enemy drawn, skip generic render
             }
 
+            // ================================================================
+            // DEFAULT (fallback for any other type)
+            // ================================================================
             rd.shape.setPosition(drawPos);
             rd.shape.setRotation(sf::degrees(drawRot));
             m_window->draw(rd.shape);
@@ -493,13 +635,6 @@ private:
         if (m_em->healths[idx].isExplosive) {
             // ================================================================
             // VEINS — count and depth driven by the detail budget
-            //
-            // The whole game draws objects as: flat fill + one accent. A rock
-            // with 8 full-length cracks AND a core has four layers of detail on
-            // a screen where nothing else has more than two, which is why it
-            // reads as belonging to a different game. Level 1 spends the same
-            // budget as everything else: short cracks from the rim, nothing
-            // more.
             // ================================================================
             const int detailLevel = static_cast<int>(acfg("magma_detail", 1.f));
             if (detailLevel > 0) {
@@ -516,9 +651,6 @@ private:
 
                 for (int v = 0; v < veinCount; ++v, vi = (vi + step) % n) {
                     Vein vn;
-                    // waveOrder is the START VERTEX's position around the rock,
-                    // not the loop counter — otherwise a sparse subset pulses
-                    // in a sequence that doesn't match where the cracks are.
                     vn.waveOrder = vi / static_cast<float>(n);
 
                     const sf::Vector2f start = P[vi];
@@ -544,12 +676,6 @@ private:
         else {
             // ================================================================
             // FACETS (optional, default off)
-            //
-            // Flat straight lines between non-adjacent vertices, one shade
-            // lighter than the fill. Reads as a faceted/chipped surface while
-            // staying in the game's vocabulary: no gradients, no fake
-            // lighting, no curves. This is the on-style alternative to the
-            // craters that were cut in 1.6.
             // ================================================================
             const int count = std::clamp(1 + static_cast<int>(maxR / 18.f), 1, 3);
             for (int f = 0; f < count && n >= 5; ++f) {
@@ -557,7 +683,6 @@ private:
                 const int b = (a + 2 + (rand() % std::max(1, n - 3))) % n;
                 if (a == b) continue;
 
-                // Pull both ends inward so the line doesn't sit on the outline.
                 Facet fc;
                 fc.a = { P[a].x * 0.82f, P[a].y * 0.82f };
                 fc.b = { P[b].x * 0.72f, P[b].y * 0.72f };
@@ -616,8 +741,6 @@ private:
             static_cast<uint8_t>(22 + 10 * heatN + 8 * wounded),
             static_cast<uint8_t>(18 + 6 * heatN)));
 
-        // Thinner than before (was 2.5 + 1.5). The grey rocks use 1.8–2.5, so
-        // matching them keeps magmatics from out-shouting the player ship.
         rd.shape.setOutlineThickness(2.0f + heatN * 0.8f);
         rd.shape.setOutlineColor(sf::Color(255,
             static_cast<uint8_t>(std::clamp(45.f + 150.f * heatN + 55.f * wounded, 0.f, 255.f)),
@@ -632,11 +755,6 @@ private:
 
         // ====================================================================
         // VEINS — sequential pulse wave around the rock
-        //
-        // Each vein's brightness is offset by its position around the
-        // perimeter, so heat visibly travels around the rim rather than every
-        // crack flashing at once. Speed and direction are Lua-tunable; set
-        // magma_wave_speed to 0 for the old all-at-once behaviour.
         // ====================================================================
         const float waveSpeed = acfg("magma_wave_speed", 2.6f);
         const float waveSharp = acfg("magma_wave_sharpness", 1.8f);
@@ -647,8 +765,6 @@ private:
             w = std::pow(w, waveSharp);
             const float b = 0.40f + 0.60f * w;
 
-            // SINGLE pass. The old dark underlay was faking a glow — an extra
-            // mark per crack, which is exactly the budget problem.
             sf::VertexArray line(sf::PrimitiveType::LineStrip, 4);
             const uint8_t a = static_cast<uint8_t>(std::clamp(235.f * b, 0.f, 255.f));
 
@@ -665,18 +781,11 @@ private:
 
         // ====================================================================
         // CORE — flat polygon, hard edge, Lua-sized
-        //
-        // Set magma_core_size to 0 to remove it entirely; the veins alone read
-        // fine and are arguably cleaner. The old version was a 5-layer soft
-        // bloom, i.e. a gradient — which is the one thing this art style
-        // consistently avoids.
         // ====================================================================
         const float coreScale = acfg("magma_core_size", 0.30f);
         if (coreScale > 0.01f) {
             const float r = det.minRadius * coreScale * (0.88f + 0.12f * heatN + 0.15f * wounded);
 
-            // Hexagon, rotated slowly — a low-poly shape sits with the
-            // faceted rocks far better than a smooth circle does.
             sf::CircleShape core(r, 6);
             core.setOrigin({ r, r });
             core.setPosition(xf.transformPoint({ 0.f, 0.f }));
@@ -710,8 +819,6 @@ private:
     void drawNoseHeat(const sf::ConvexShape& hull, const PlayerComponent& ps, float heatT) {
         if (heatT <= 0.02f && !ps.weaponOverheated) return;
 
-        // Local (0,-30) is the nose vertex. Read from the shape's own transform
-        // so the glow inherits the pivot, lean and scale from ShipAnimSystem.
         const sf::Vector2f nose = hull.getTransform().transformPoint({ 0.f, -30.f });
 
         float intensity = heatT;
@@ -891,4 +998,6 @@ private:
     sol::state* m_lua = nullptr;
     uint32_t m_playerEntityId = 0;
     float m_magmaPulseTime = 0.f;
+    const enemyarch::EnemyRegistry* m_enemyReg = nullptr;   // added for archetype access
+    std::vector<sf::Vector2f> m_outlineScratch;             // reused across enemies
 };

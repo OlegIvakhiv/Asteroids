@@ -34,6 +34,8 @@
 #include "systems/DebrisSystem.hpp"
 #include "systems/MenuSystem.hpp"
 #include "systems/RefitSystem.hpp"
+#include "systems/TurretSystem.hpp"          // turret AI
+#include "systems/VentQTESystem.hpp"        // vent QTE and overdrive
 
 class SystemManager {
 public:
@@ -51,6 +53,7 @@ public:
         b2WorldDef worldDef = b2DefaultWorldDef();
         worldDef.gravity = { 0.0f, 0.0f };
         m_worldId = b2CreateWorld(&worldDef);
+        m_enemyRegistry.load(m_lua);
 
         // 2. Create Player
         m_playerEntityId = m_entityFactory.createPlayer(
@@ -77,14 +80,17 @@ public:
         ctx.lua = &m_lua;
         ctx.window = &m_window;
         ctx.gameView = &m_gameView;
+        ctx.enemyRegistry = &m_enemyRegistry;
 
         // 6. Init all systems (order doesn't matter here)
         m_inputSystem.init(ctx);
         m_physicsSystem.init(ctx);
         m_renderSystem.init(ctx);
         m_damageSystem.init(ctx);
+        m_ventQTESystem.init(ctx);          // added
         m_weaponSystem.init(ctx);
         m_aiSystem.init(ctx);
+        m_turretSystem.init(ctx);
         m_enemySystem.init(ctx);
         m_particleSystem.init(ctx);
         m_backgroundSystem.init(ctx);
@@ -169,8 +175,10 @@ public:
         m_physicsSystem.cleanup();
         m_enemySystem.update(dt);
         m_damageSystem.update(dt);
+        m_ventQTESystem.update(dt);            // must set overdrive before weapon reads it
         m_weaponSystem.update(dt);
         m_aiSystem.update(dt);
+        m_turretSystem.update(dt);
 
         size_t playerIdx = m_entityManager.getEntityIndex(m_playerEntityId);
         if (playerIdx == (size_t)-1 && m_state != GameState::GameOver) {
@@ -252,13 +260,16 @@ public:
         ctx.lua = &m_lua;
         ctx.window = &m_window;
         ctx.gameView = &m_gameView;
+        ctx.enemyRegistry = &m_enemyRegistry;
 
         m_inputSystem.init(ctx);
         m_physicsSystem.init(ctx);
         m_renderSystem.init(ctx);
         m_damageSystem.init(ctx);
+        m_ventQTESystem.init(ctx);          // added
         m_weaponSystem.init(ctx);
         m_aiSystem.init(ctx);
+        m_turretSystem.init(ctx);
         m_enemySystem.init(ctx);
         m_particleSystem.init(ctx);
         m_backgroundSystem.init(ctx);
@@ -327,10 +338,15 @@ public:
         else if (m_state == GameState::Paused) m_state = GameState::Playing;
     }
 
+    void reloadEnemyRegistry() { m_enemyRegistry.load(m_lua); }
+
+    const enemyarch::EnemyRegistry& getEnemyRegistry() const { return m_enemyRegistry; }
+
 private:
     sf::RenderWindow& m_window;
     sf::View m_gameView;
     sol::state& m_lua;
+    enemyarch::EnemyRegistry m_enemyRegistry;
 
     b2WorldId m_worldId;
     EntityManager m_entityManager;
@@ -352,8 +368,10 @@ private:
     PhysicsSystem m_physicsSystem;
     RenderSystem m_renderSystem;
     DamageSystem m_damageSystem;
+    VentQTESystem m_ventQTESystem;           // added
     WeaponSystem m_weaponSystem;
     AISystem m_aiSystem;
+    TurretSystem m_turretSystem;
     EnemySystem m_enemySystem;
     ParticleSystem m_particleSystem;
     BackgroundSystem m_backgroundSystem;

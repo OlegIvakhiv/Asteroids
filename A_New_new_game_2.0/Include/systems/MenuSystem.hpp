@@ -40,6 +40,7 @@
 #include "ISystem.hpp"
 #include "utils/GameState.hpp"
 #include "utils/TerminalUI.hpp"
+#include "utils/UiPalette.hpp"       
 #include <SFML/Graphics.hpp>
 #include <vector>
 #include <string>
@@ -254,23 +255,21 @@ private:
     };
 
     // ========================================================================
-    // PALETTE
-    //
-    // Contrast pass: every grey went DOWN, every accent went UP. On black,
-    // mid-grey text reads as fog. Structure should nearly disappear and
-    // values should burn.
+    // PALETTE — aliases to the shared ui:: palette
     // ========================================================================
-
-    static inline const sf::Color VOID_BG{ 2,   3,   5 };  ///< true ground
-    static inline const sf::Color PANEL_BG{ 6,   8,  12 };  ///< panel interior
-    static inline const sf::Color CYAN{ 40, 245, 255 };  ///< hot: values, active
-    static inline const sf::Color CYAN_MID{ 20, 150, 170 };  ///< borders
-    static inline const sf::Color CYAN_LOW{ 12,  70,  84 };  ///< dead structure
-    static inline const sf::Color AMBER{ 255, 214,   0 };  ///< selection, confirm
-    static inline const sf::Color RED{ 255,  48,   0 };  ///< danger
-    static inline const sf::Color TEXT{ 214, 222, 232 };  ///< body
-    static inline const sf::Color TEXT_DIM{ 84,  92, 104 };  ///< keys, captions
-    static inline const sf::Color TEXT_DEAD{ 52,  58,  68 };  ///< locked rows
+    // All colour values are now defined centrally in ui/UiPalette.hpp.
+    // These aliases keep the existing references working without any visual
+    // change, and ensure the menu and HUD stay in sync.
+    static inline const sf::Color VOID_BG = ui::VOID_BG;
+    static inline const sf::Color PANEL_BG = ui::PANEL_BG;
+    static inline const sf::Color CYAN = ui::CYAN;
+    static inline const sf::Color CYAN_MID = ui::CYAN_MID;
+    static inline const sf::Color CYAN_LOW = ui::CYAN_LOW;
+    static inline const sf::Color AMBER = ui::AMBER;
+    static inline const sf::Color RED = ui::RED;
+    static inline const sf::Color TEXT = ui::TEXT;
+    static inline const sf::Color TEXT_DIM = ui::TEXT_DIM;
+    static inline const sf::Color TEXT_DEAD = ui::TEXT_DEAD;
 
     static constexpr float BOOT_TOTAL = 4.6f;   ///< Cold start only, always skippable.
     static constexpr float OPEN_DUR = 0.34f;  ///< Per-panel CRT reveal length.

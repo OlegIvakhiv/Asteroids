@@ -14,6 +14,7 @@
 
 #include "core/EntityManager.hpp"
 #include "core/EntityFactory.hpp"
+#include "core/EnemyArchetypes.hpp"
 #include <sol/sol.hpp>
 #include <box2d/box2d.h>
 #include <SFML/Graphics.hpp>
@@ -37,6 +38,10 @@ struct SystemContext {
     sol::state* lua = nullptr;            ///< Lua scripting state
     sf::RenderWindow* window = nullptr;   ///< SFML render window
     sf::View* gameView = nullptr;   ///< Shared world view — written by CameraSystem
+    /// Loaded unit and faction tables. Owned by SystemManager, valid for the
+    /// lifetime of the game. Passed here rather than made global to match how
+    /// every other dependency in this project travels.
+    const enemyarch::EnemyRegistry* enemyRegistry = nullptr;
 };
 
 /**

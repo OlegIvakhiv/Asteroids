@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "core/EnemyArchetypes.hpp"
 #include "EntityManager.hpp"
 #include "utils/ShipDesign.hpp"
 #include <sol/sol.hpp>
@@ -529,106 +530,120 @@ public:
     }
 
     /**
-     * @brief Create an enemy ship entity
-     * @param pos Initial position in pixels
-     * @param lua Lua state with enemy configuration
-     * @param worldId Box2D world identifier
-     * @return Persistent entity ID
-     *
-     * Enemies have complex polygon shape (12 points) resembling a pirate ship.
-     * AI behavior is handled separately in AISystem.
-     */
-    uint32_t createEnemy(EntityManager& em, sf::Vector2f pos, sol::state& lua, b2WorldId worldId) {
-        sol::table config = lua["enemy_config"];
-        uint32_t entityId = em.nextEntityId++;
+ * @brief Create an enemy ship of a given archetype.
+ *
+ * Both hulls come from the registry, derived from one authored silhouette:
+ * the visual polygon (any point count, may be concave) drives rendering,
+ * and a convex <= 8-point reduction of it drives Box2D. Nothing here
+ * hardcodes a shape any more.
+ */
+    uint32_t createEnemy(EntityManager& em, sf::Vector2f pos, sol::state& lua,
+        b2WorldId worldId,
+        const enemyarch::EnemyRegistry& registry,
+        uint8_t archetypeId)
+    {
+        const enemyarch::ArchetypeDef* defPtr = registry.byId(archetypeId);
+        if (!defPtr) {
+            std::cerr << "[EntityFactory] createEnemy: bad archetype id "
+                << static_cast<int>(archetypeId) << ". Nothing spawned.\n";
+            return 0;
+        }
+        const enemyarch::ArchetypeDef& def = *defPtr;
+        sol::table config = def.config;
+
+        const uint32_t entityId = em.nextEntityId++;
 
         TransformComponent tf;
         tf.entityId = entityId;
         tf.position = pos;
         em.transforms.push_back(tf);
 
-        // Pirate ship shape (12 points)
+        // ---- Visual ----
+        //
+        // rc.shape is kept populated as a fallback for any path that still
+        // draws it, but the enemy branch of RenderSystem now draws the
+        // triangulated hull from the registry instead. Concave silhouettes
+        // cannot go through sf::ConvexShape: SFML fans from the bounding-box
+        // centre, which fills in any notch deep enough to be hidden from it.
         RenderComponent rc;
-        rc.shape.setPointCount(12);
-        rc.shape.setPoint(0, { 0, -10 });
-        rc.shape.setPoint(1, { 8, -25 });
-        rc.shape.setPoint(2, { 12, -10 });
-        rc.shape.setPoint(3, { 25, 5 });
-        rc.shape.setPoint(4, { 25, 15 });
-        rc.shape.setPoint(5, { 15, 10 });
-        rc.shape.setPoint(6, { 0, 20 });
-        rc.shape.setPoint(7, { -15, 10 });
-        rc.shape.setPoint(8, { -25, 15 });
-        rc.shape.setPoint(9, { -25, 5 });
-        rc.shape.setPoint(10, { -12, -10 });
-        rc.shape.setPoint(11, { -8, -25 });
-
-        rc.shape.setFillColor(sf::Color(config["color"]["r"], config["color"]["g"], config["color"]["b"]));
+        rc.shape.setPointCount(def.visual.size());
+        for (size_t k = 0; k < def.visual.size(); ++k)
+            rc.shape.setPoint(k, def.visual[k]);
+        rc.shape.setFillColor(def.color);
         rc.shape.setOutlineThickness(1.5f);
         rc.shape.setOutlineColor(sf::Color(255, 255, 255, 150));
 
-        // Box2D physics body
+        // ---- Physics body ----
         b2BodyDef bodyDef = b2DefaultBodyDef();
         bodyDef.type = b2_dynamicBody;
         bodyDef.position = { pos.x / SCALE, pos.y / SCALE };
         BodyUserData* ud = new BodyUserData{ BodyType::Enemy, entityId };
         bodyDef.userData = ud;
-        bodyDef.linearDamping = config["lineardrag_factor"].get_or(0.5f);
-        bodyDef.angularDamping = config["angulardgrag_factor"].get_or(0.5f);
+        bodyDef.linearDamping = config["lineardrag_factor"].get_or(1.0f);
+        // NOTE: the old code read "angulardgrag_factor" -- a typo that never
+        // matched anything in enemy.lua, so every pirate has silently been
+        // using get_or's 0.5 default instead of the configured 2.0.
+        bodyDef.angularDamping = config["angulardrag_factor"].get_or(2.0f);
 
-        b2BodyId bid = b2CreateBody(worldId, &bodyDef);
+        const b2BodyId bid = b2CreateBody(worldId, &bodyDef);
 
-
-
-        // Simplified collision hull (6 points, not full visual shape)
         b2ShapeDef shapeDef = b2DefaultShapeDef();
         shapeDef.filter.categoryBits = CATEGORY_ENEMY;
-        shapeDef.filter.maskBits = CATEGORY_ASTEROID | CATEGORY_PLAYER | CATEGORY_BULLET | CATEGORY_ENEMY;
+        shapeDef.filter.maskBits = CATEGORY_ASTEROID | CATEGORY_PLAYER |
+            CATEGORY_BULLET | CATEGORY_ENEMY;
         shapeDef.enableContactEvents = true;
-        shapeDef.density = config["density"].get_or(3.0f);
+        shapeDef.density = config["density"].get_or(4.0f);
         shapeDef.material.restitution = 0.4f;
 
-        b2Vec2 physicsPoints[6] = {
-            {0.0f, -25.0f / SCALE},
-            {25.0f / SCALE, 5.0f / SCALE},
-            {25.0f / SCALE, 15.0f / SCALE},
-            {0.0f, 20.0f / SCALE},
-            {-25.0f / SCALE, 15.0f / SCALE},
-            {-25.0f / SCALE, 5.0f / SCALE}
-        };
-        b2Hull hull = b2ComputeHull(physicsPoints, 6);
+        // Registry guarantees <= 8 points and convexity, so this cannot fail
+        // the way a hand-authored hull can.
+        std::vector<b2Vec2> pp;
+        pp.reserve(def.physics.size());
+        for (const auto& v : def.physics)
+            pp.push_back({ v.x / SCALE, v.y / SCALE });
+
+        b2Hull hull = b2ComputeHull(pp.data(), static_cast<int32_t>(pp.size()));
         b2Polygon poly = b2MakePolygon(&hull, 0.0f);
         b2CreatePolygonShape(bid, &shapeDef, &poly);
 
         PhysicsShapeData shapeData;
         shapeData.type = PhysicsShapeData::Type::Polygon;
-        shapeData.vertices.reserve(6);
-        for (const auto& v : physicsPoints) {
-            shapeData.vertices.push_back({ v.x * SCALE, v.y * SCALE });
-        }
+        shapeData.vertices.reserve(def.physics.size());
+        for (const auto& v : def.physics)
+            shapeData.vertices.push_back({ v.x, v.y });
         shapeData.offset = { 0.f, 0.f };
         em.physicsShapes.push_back(shapeData);
 
+        // ---- Components ----
+        EnemyComponent ec;
+        ec.entityId = entityId;
+        ec.archetype = archetypeId;
+        ec.fireRate = config["fire_rate"].get_or(1.8f);
+        ec.attackRange = config["attack_range"].get_or(480.f);
+
+        const float hp = config["hp"].get_or(250.f);
+
         em.physics.push_back({ entityId, bid });
-        em.healths.push_back({ entityId, config["hp"].get_or(50.f), config["hp"].get_or(50.f) });
+        em.healths.push_back({ entityId, hp, hp });
         em.bullets.push_back({ entityId });
-        em.enemies.push_back({});
-        em.scoreRewards.push_back(config["score_reward"].get_or(100));
+        em.enemies.push_back(ec);
+        em.scoreRewards.push_back(config["score_reward"].get_or(500));
         em.players.push_back({});
-
         em.renders.push_back(rc);
-        em.entityIdMap[entityId] = em.transforms.size() - 1;
 
+        em.entityIdMap[entityId] = em.transforms.size() - 1;
         return entityId;
     }
 
 
 
-    uint32_t createEnemyBullet(EntityManager& em, sf::Vector2f pos, sf::Vector2f velocity, float angle, uint32_t ownerEntityId, sol::state& lua, b2WorldId worldId) {
+    uint32_t createEnemyBullet(EntityManager& em, sf::Vector2f pos, sf::Vector2f velocity, float angle, uint32_t ownerEntityId, sol::state& lua, b2WorldId worldId, const sol::table& cfg) {
         uint32_t entityId = em.nextEntityId++;
 
-        float speed = lua["enemy_config"]["bullet_speed"].get_or(550.0f);
-        float lifetime = lua["enemy_config"]["bullet_lifetime"].get_or(2.0f);
+        // Now per-archetype: was lua["enemy_config"] before
+        const float speed = cfg["bullet_speed"].get_or(550.0f);
+        const float lifetime = cfg["bullet_lifetime"].get_or(2.0f);
+        const float damage = cfg["bullet_damage"].get_or(25.0f);
 
         float rad = (angle - 90.f) * 3.14159f / 180.f;
         sf::Vector2f newVelocity = { std::cos(rad) * speed, std::sin(rad) * speed };
@@ -661,9 +676,17 @@ public:
         shapeData.offset = { 0.f, 0.f };
         em.physicsShapes.push_back(shapeData);
 
-
         em.physics.push_back({ entityId, bid });
-        em.bullets.push_back({ entityId, lifetime, false, true, true, ownerEntityId, false });
+
+        BulletComponent bc;
+        bc.entityId = entityId;
+        bc.lifetime = lifetime;
+        bc.isActive = true;
+        bc.isEnemyBullet = true;
+        bc.ownerEntityId = ownerEntityId;
+        bc.damage = damage;
+        em.bullets.push_back(bc);
+
         em.healths.push_back({ entityId });
         em.scoreRewards.push_back({});
         em.enemies.push_back({});

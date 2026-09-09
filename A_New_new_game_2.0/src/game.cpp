@@ -140,6 +140,11 @@ int main() {
                     lua.script_file("scripts/player.lua");
                     lua.script_file("scripts/asteroids.lua");
                     lua.script_file("scripts/enemy.lua");
+
+                    // Rebuild the archetype cache against the NEW tables.
+                    // Without this, enemy.lua edits silently do nothing.
+                    manager.reloadEnemyRegistry();
+
                     std::cout << "Scripts reloaded!" << std::endl;
                 }
                 catch (const std::exception& e) {

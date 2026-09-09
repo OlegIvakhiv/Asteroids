@@ -27,6 +27,7 @@
 #include "ISystem.hpp"
 #include "core/EntityManager.hpp"
 #include "core/EntityFactory.hpp"
+#include "core/EnemyArchetypes.hpp"        // added for archetype registry
 #include <cfloat>
 #include <cmath>
 #include <vector>
@@ -40,6 +41,7 @@ public:
         m_worldId = ctx.worldId;
         m_playerEntityId = ctx.playerEntityId;
         m_lua = ctx.lua;
+        m_registry = ctx.enemyRegistry;    // store registry pointer
     }
 
     void update(float dt) override {
@@ -55,7 +57,11 @@ public:
             m_em->healths[playerIdx].invulTimer -= dt;
         if (m_em->healths[playerIdx].cheapInvulTimer > 0)
             m_em->healths[playerIdx].cheapInvulTimer -= dt;
-
+        if (m_em->players[playerIdx].perfectParryFlash > 0.f) {
+            m_em->players[playerIdx].perfectParryFlash -= dt;
+            if (m_em->players[playerIdx].perfectParryFlash <= 0.f)
+                m_em->players[playerIdx].perfectParryChain = 0;
+        }
         // ---- Shared parry-success reaction ----
         auto onParrySuccess = [&](sf::Vector2f contactPos) {
             // This flag was never being set before 1.3, so the whiff penalty
@@ -71,7 +77,7 @@ public:
                 vcfg("parry_trauma", 0.75f),
                 vcfg("parry_flash_alpha", 170.f));
         };
-
+        //onParrySuccess(...)
         // ====================================================================
         // 2. PROCESS BOX2D CONTACT EVENTS
         // ====================================================================
@@ -129,6 +135,16 @@ public:
                         blt.markedForDestroy = true;
                     }
                     else if (targetType == BodyType::Enemy) {
+                        // ---- RAM IMMUNITY: charging enemies ignore all damage ----
+                        if (isRamInvulnerable(targetIdx)) {
+                            // Sparks off the prow. The player must SEE that the
+                            // shot connected and did nothing, or they will read
+                            // it as a miss and keep shooting.
+                            m_em->spawnImpact(hitPos, sf::Color(255, 230, 160), hitVel);
+                            blt.markedForDestroy = true;
+                            continue;
+                        }
+
                         m_em->healths[targetIdx].currentHp -= dmg;
                         applyKnockback(targetIdx, hitVel, blt.knockback);
                         m_em->enemies[targetIdx].hitFlashTimer = 0.18f;
@@ -218,6 +234,16 @@ public:
 
                     // --- PARRY ENEMY ---
                     else if (otherType == BodyType::Enemy) {
+                        // ---- RAM IMMUNITY: charging enemies cannot be parried ----
+                        if (isRamInvulnerable(otherIdx)) {
+                            // Parry whiffs against a charge. Loud, so it reads
+                            // as "wrong tool" rather than "the parry is buggy".
+                            m_em->spawnExplosion(otherPos, sf::Color(255, 120, 60), 14, 2.4f);
+                            m_em->spawnShockRing(otherPos, 14.f, 120.f, 0.25f,
+                                sf::Color(255, 120, 60), 3.f, 180.f);
+                            continue;
+                        }
+
                         sf::Vector2f away = otherPos - playerPos;
                         float len = std::sqrt(away.x * away.x + away.y * away.y);
                         if (len > 0.01f) away /= len;
@@ -225,8 +251,17 @@ public:
                         float stunDuration = (*m_lua)["parry_stun_duration"].get_or(1.5f);
                         float reflectDamage = (*m_lua)["parry_reflect_damage"].get_or(50.f);
 
+                        // ---- Stun resistance, separate from stagger resistance ----
+                        float stunResist = 0.f;
+                        if (m_registry) {
+                            stunResist = std::clamp(
+                                m_registry->resolve(m_em->enemies[otherIdx].archetype)
+                                .config["stun_resist"].get_or(0.f), 0.f, 1.f);
+                        }
+
                         m_em->healths[otherIdx].currentHp -= reflectDamage;
-                        m_em->healths[otherIdx].stunTimer = stunDuration;
+                        m_em->healths[otherIdx].stunTimer =
+                            stunDuration * (1.f - stunResist);
 
                         // ---- FULL STAGGER, not just a shove ----
                         // A melee parry is the highest-risk thing the player
@@ -238,6 +273,9 @@ public:
                         m_em->spawnExplosion(otherPos, sf::Color(0, 255, 200), 22, 3.0f);
 
                         onParrySuccess((playerPos + otherPos) * 0.5f);
+                        // ---- Perfect parry on enemy ----
+                        if (isPerfectParry(playerIdx))
+                            onPerfectParry(playerIdx, (playerPos + otherPos) * 0.5f);
                         continue;
                     }
 
@@ -299,6 +337,9 @@ public:
 
                             m_em->spawnExplosion(otherPos, sf::Color(0, 255, 200), 10, 1.5f);
                             onParrySuccess(otherPos);
+                            // ---- Perfect parry on bullet ----
+                            if (isPerfectParry(playerIdx))
+                                onPerfectParry(playerIdx, otherPos);
                             continue;
                         }
                     }
@@ -434,57 +475,54 @@ public:
                         }
                         // ---- KINETIC WEAPON (parry-launched OR rift-hijacked) ----
                         else if (astHp.isKineticWeapon || astHp.wasParryLaunched) {
+                            // ---- RAM IMMUNITY: charging enemies ignore kinetic damage ----
+                            if (!isRamInvulnerable(enIdx)) {
+                                // Damage scales with SIZE and IMPACT SPEED.
+                                const float base = wcfg("kinetic_base_damage", 170.f);
+                                const float speedF = std::clamp(relSpd / 22.f, 0.40f, 1.35f);
 
-                            // Damage scales with SIZE and IMPACT SPEED.
-                            //
-                            // Size matters because the player chooses which rock
-                            // to hijack — that choice should be meaningful. A
-                            // LARGE rock is a committed setup and one-shots; a
-                            // chip is an opportunistic poke.
-                            //
-                            // Speed is clamped so a glancing bump still hurts
-                            // (0.4 floor) and a freak high-speed collision can't
-                            // scale to absurdity (1.35 ceiling).
-                            const float base = wcfg("kinetic_base_damage", 170.f);
-                            const float speedF = std::clamp(relSpd / 22.f, 0.40f, 1.35f);
+                                float tierMult;
+                                switch (astHp.asteroidTier) {
+                                case 2:  tierMult = wcfg("kinetic_tier_large", 1.50f); break;
+                                case 3:  tierMult = wcfg("kinetic_tier_magma", 2.00f); break;
+                                case 1:  tierMult = wcfg("kinetic_tier_medium", 0.78f); break;
+                                default: tierMult = wcfg("kinetic_tier_small", 0.38f); break;
+                                }
 
-                            float tierMult;
-                            switch (astHp.asteroidTier) {
-                            case 2:  tierMult = wcfg("kinetic_tier_large", 1.50f); break;
-                            case 3:  tierMult = wcfg("kinetic_tier_magma", 2.00f); break;
-                            case 1:  tierMult = wcfg("kinetic_tier_medium", 0.78f); break;
-                            default: tierMult = wcfg("kinetic_tier_small", 0.38f); break;
+                                const float dmg = base * tierMult * speedF;
+                                m_em->healths[enIdx].currentHp -= dmg;
+                                m_em->enemies[enIdx].hitFlashTimer = 0.22f;
+
+                                // ---- Knockback + stagger ----
+                                sf::Vector2f push = enPos - astPos;
+                                const float pl = std::sqrt(push.x * push.x + push.y * push.y);
+                                if (pl > 0.01f) {
+                                    push /= pl;
+                                    const float k = wcfg("kinetic_knockback", 950.f) * tierMult;
+                                    b2Body_ApplyLinearImpulseToCenter(m_em->physics[enIdx].bodyId,
+                                        { push.x * k / SCALE, push.y * k / SCALE }, true);
+                                }
+                                staggerEnemy(enIdx, push,
+                                    wcfg("kinetic_knockback", 950.f) * 0.8f,
+                                    std::clamp(tierMult, 0.f, 1.f));
+
+                                // The rock is SPENT.
+                                astHp.currentHp = -1.f;
+
+                                // Feedback scaled to the size of the hit.
+                                m_em->addTrauma(0.25f + 0.30f * tierMult);
+                                m_em->requestHitstop(0.03f, 0.12f + 0.06f * tierMult, 0.38f);
+                                m_em->spawnShockRing(astPos, 15.f, 120.f + 110.f * tierMult,
+                                    0.40f, sf::Color(0, 255, 200), 6.f, 245.f);
+                                m_em->spawnExplosion(astPos, sf::Color(0, 255, 200),
+                                    20 + static_cast<int>(18 * tierMult), 3.5f);
                             }
-
-                            const float dmg = base * tierMult * speedF;
-                            m_em->healths[enIdx].currentHp -= dmg;
-                            m_em->enemies[enIdx].hitFlashTimer = 0.22f;
-
-                            // ---- Knockback + stagger ----
-                            sf::Vector2f push = enPos - astPos;
-                            const float pl = std::sqrt(push.x * push.x + push.y * push.y);
-                            if (pl > 0.01f) {
-                                push /= pl;
-                                const float k = wcfg("kinetic_knockback", 950.f) * tierMult;
-                                b2Body_ApplyLinearImpulseToCenter(m_em->physics[enIdx].bodyId,
-                                    { push.x * k / SCALE, push.y * k / SCALE }, true);
+                            else {
+                                // Charging enemy: the rock shatters harmlessly.
+                                astHp.currentHp = -1.f;
+                                m_em->spawnImpact(astPos, sf::Color(200, 200, 200),
+                                    sf::Vector2f(vA2.x * SCALE, vA2.y * SCALE) * 0.5f);
                             }
-                            staggerEnemy(enIdx, push,
-                                wcfg("kinetic_knockback", 950.f) * 0.8f,
-                                std::clamp(tierMult, 0.f, 1.f));
-
-                            // ---- The rock is SPENT ----
-                            // It was a projectile. Letting it bounce off and
-                            // remain a live hazard undercuts the whole play.
-                            astHp.currentHp = -1.f;
-
-                            // Feedback scaled to the size of the hit.
-                            m_em->addTrauma(0.25f + 0.30f * tierMult);
-                            m_em->requestHitstop(0.03f, 0.12f + 0.06f * tierMult, 0.38f);
-                            m_em->spawnShockRing(astPos, 15.f, 120.f + 110.f * tierMult,
-                                0.40f, sf::Color(0, 255, 200), 6.f, 245.f);
-                            m_em->spawnExplosion(astPos, sf::Color(0, 255, 200),
-                                20 + static_cast<int>(18 * tierMult), 3.5f);
                         }
                         // ---- Ordinary accidental collision ----
                         else if (relSpd > 8.f) {
@@ -494,16 +532,18 @@ public:
                             m_em->spawnImpact(midPos, sf::Color(180, 120, 60),
                                 sf::Vector2f(vA2.x * SCALE * 0.3f, vA2.y * SCALE * 0.3f));
                         }
-                    
+
                         // ---- Heavy rock impact staggers the pirate ----
                         // Same threshold the player uses, so the rule is
                         // symmetric and the player can predict it.
                         if (relSpd > vcfg("stagger_speed_threshold", 20.f)) {
-                            sf::Vector2f away = m_em->transforms[enIdx].position
-                                - m_em->transforms[astIdx].position;
-                            staggerEnemy(enIdx, away,
-                                vcfg("stagger_knockback", 900.f) * 0.8f, 0.9f);
-                            m_em->enemies[enIdx].hitFlashTimer = 0.2f;
+                            if (!isRamInvulnerable(enIdx)) {
+                                sf::Vector2f away = m_em->transforms[enIdx].position
+                                    - m_em->transforms[astIdx].position;
+                                staggerEnemy(enIdx, away,
+                                    vcfg("stagger_knockback", 900.f) * 0.8f, 0.9f);
+                                m_em->enemies[enIdx].hitFlashTimer = 0.2f;
+                            }
                         }
                     }
                 }
@@ -635,6 +675,7 @@ private:
     b2WorldId m_worldId;
     uint32_t m_playerEntityId = 0;
     sol::state* m_lua = nullptr;
+    const enemyarch::EnemyRegistry* m_registry = nullptr;   // added for archetype access
 
     /// Push a target along the projectile's travel direction.
     void applyKnockback(size_t targetIdx, sf::Vector2f bulletVel, float knockback) {
@@ -702,36 +743,126 @@ private:
     }
 
     /**
- * @brief Knock an enemy out of control (mirrors EntityManager::staggerPlayer)
- * @param idx        Enemy index
- * @param knockDir   Direction to be thrown (need not be normalised)
- * @param knockSpeed Pixels/sec
- * @param severity   0..1, scales duration and spin
+     * @brief Is this enemy currently untouchable?
+     *
+     * THE RAM CONTRACT, in one place so it cannot drift between call sites:
+     * during Charge the unit takes zero damage from any source, cannot be
+     * staggered, cannot be stunned, and cannot be parried.
+     *
+     * This is a hard rule rather than a big number, because "very tanky during
+     * the charge" and "you cannot stop the charge" teach different lessons. The
+     * first invites the player to try trading; the second teaches them to move.
+     * Only the second is readable at a glance, and the recovery window is where
+     * the damage they wanted to deal is meant to go.
+     */
+    bool isRamInvulnerable(size_t idx) const {
+        return idx < m_em->enemies.size() &&
+            m_em->enemies[idx].ramState == RamState::Charge;
+    }
+
+
+    /**
+ * @brief Was this parry connect within the perfect timing slice?
  *
- * Uses SetLinearVelocity rather than an impulse, for the same reason the
- * player's stagger does: a stagger should OVERRIDE momentum. An impulse gets
- * mostly cancelled when the target was already charging in, which is exactly
- * the moment a stagger needs to land hardest.
- *
- * Early-returns if already staggering. Without that guard, a pirate caught in
- * a magma cluster chains into a lockout it never escapes — the same problem
- * the player's version has.
+ * parryTimer counts DOWN from parry_window, so a HIGH remaining value means
+ * little time has elapsed since the press -- the player reacted to the
+ * incoming attack rather than pressing early and waiting for it.
  */
+    bool isPerfectParry(size_t playerIdx) const {
+        const float window = (*m_lua)["parry_window"].get_or(0.3f);
+        const float frac = (*m_lua)["parry_perfect_fraction"].get_or(0.45f);
+        return m_em->players[playerIdx].parryTimer >= window * (1.f - frac);
+    }
+
+    /**
+     * @brief Cancel parry recovery and grant brief i-frames.
+     *
+     * Called only from the BULLET and SHIP parry branches -- never asteroids.
+     *
+     * Two separate effects, solving two separate problems:
+     *   - Cancelling the animation lockout and cooldown fixes "I parried and
+     *     then stood there spinning while the fight moved on."
+     *   - The i-frames fix "I parried one bullet and the next one hit me
+     *     anyway." Cancelling recovery alone does NOT fix that: the second
+     *     shot was already in flight when the first connected, so there is no
+     *     amount of reaction speed that covers it.
+     *
+     * Chained perfects get progressively fewer i-frames so a parry-lock cannot
+     * be held forever against sustained fire.
+     */
+    void onPerfectParry(size_t playerIdx, sf::Vector2f at) {
+        auto& ps = m_em->players[playerIdx];
+        auto& hp = m_em->healths[playerIdx];
+
+        ps.parryAnimTimer = 0.f;
+        ps.parryWhiffRecovery = false;
+        ps.parryWhiffTimer = 0.f;
+        ps.parryCooldown = (*m_lua)["parry_perfect_cooldown"].get_or(0.12f);
+
+        const float base = (*m_lua)["parry_perfect_iframes"].get_or(0.22f);
+        const float falloff = (*m_lua)["parry_perfect_chain_falloff"].get_or(0.75f);
+        const float grant = base * std::pow(falloff,
+            static_cast<float>(ps.perfectParryChain));
+
+        hp.invulTimer = std::max(hp.invulTimer, grant);
+        ps.perfectParryChain++;
+        ps.perfectParryFlash = 0.30f;
+
+        m_em->spawnScreenFlash(sf::Color(190, 255, 235), 0.16f, 70.f);
+        m_em->spawnShockRing(at, 10.f, 165.f, 0.30f,
+            sf::Color(140, 255, 225), 4.f, 300.f);
+    }
+
+
+    /**
+     * @brief Knock an enemy out of control (mirrors EntityManager::staggerPlayer)
+     *
+     * Now scaled by the archetype's `stagger_resist`. Before this, a melee
+     * parry threw a 2600 HP cruiser across the arena exactly as far as it threw
+     * a Wardog, which made "heavy ship" a claim the game never backed up.
+     *
+     * Resistance scales duration, spin AND knockback speed together. Scaling
+     * only the knockback would give a cruiser that stays put but still spins
+     * like a dropped coin -- worse than either extreme, because the visual and
+     * the physics would be telling the player different stories.
+     *
+     * At resist >= 0.995 the stagger is refused outright and downgraded to a
+     * hit flash. That is deliberately reachable: some units should read as
+     * genuinely immovable rather than merely stubborn.
+     */
     void staggerEnemy(size_t idx, sf::Vector2f knockDir, float knockSpeed, float severity) {
         if (idx >= m_em->enemies.size()) return;
         auto& ec = m_em->enemies[idx];
         if (ec.staggerTimer > 0.f) return;
 
+        // A charging ship cannot be staggered. See the ram contract below.
+        if (ec.ramState == RamState::Charge) return;
+
+        float resist = 0.f;
+        if (m_registry) {
+            resist = std::clamp(
+                m_registry->resolve(ec.archetype).config["stagger_resist"].get_or(0.f),
+                0.f, 1.f);
+        }
+        const float k = 1.f - resist;
+
+        if (k < 0.005f) {
+            // Immovable: acknowledge the hit, refuse the ragdoll.
+            ec.hitFlashTimer = std::max(ec.hitFlashTimer, 0.18f);
+            m_em->spawnShockRing(m_em->transforms[idx].position,
+                10.f, 90.f, 0.22f, sf::Color(255, 200, 120), 3.f, 140.f);
+            return;
+        }
+
         severity = std::clamp(severity, 0.f, 1.f);
 
-        ec.staggerDuration = wcfg("enemy_stagger_tumble", 0.85f) * (0.6f + severity * 0.7f);
+        ec.staggerDuration = wcfg("enemy_stagger_tumble", 0.85f) * (0.6f + severity * 0.7f) * k;
         ec.staggerTimer = ec.staggerDuration;
-        ec.staggerRecoverDuration = wcfg("enemy_stagger_recover", 0.5f);
+        ec.staggerRecoverDuration = wcfg("enemy_stagger_recover", 0.5f) * k;
         ec.staggerRecoverTimer = 0.f;
         ec.staggerSpinSpeed = ((rand() % 2) ? 1.f : -1.f) *
-            wcfg("enemy_stagger_spin", 540.f) * (0.6f + severity * 0.8f);
+            wcfg("enemy_stagger_spin", 540.f) * (0.6f + severity * 0.8f) * k;
 
-        // Cancel competing states.
         ec.telegraphActive = false;
         ec.telegraphTimer = 0.f;
         ec.stormActive = false;
@@ -741,12 +872,12 @@ private:
         if (len > 0.001f) {
             knockDir /= len;
             b2Body_SetLinearVelocity(m_em->physics[idx].bodyId,
-                { knockDir.x * knockSpeed / SCALE, knockDir.y * knockSpeed / SCALE });
+                { knockDir.x * knockSpeed * k / SCALE,
+                  knockDir.y * knockSpeed * k / SCALE });
         }
 
         const sf::Vector2f p = m_em->transforms[idx].position;
         m_em->spawnShockRing(p, 12.f, 150.f, 0.32f, sf::Color(255, 170, 60), 4.f, 220.f);
         m_em->spawnExplosion(p, sf::Color(255, 160, 80), 16, 3.f);
     }
-
 };

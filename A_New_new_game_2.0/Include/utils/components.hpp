@@ -132,6 +132,28 @@ struct PlayerComponent {
     float        enginePower = 150.f;   ///< InputSystem should read THIS, not Lua
     sf::Vector2f gunMounts[4];          ///< Local pixels, where shots originate
     int          gunMountCount = 0;
+
+    // ---- Overheat vent QTE ----
+    bool  qteActive = false;
+    float qtePos = 0.f;            // 0..1 marker position along the bar
+    float qteDir = 1.f;
+    float qteSpeed = 1.30f;        // Sweeps per second
+    float qteGoodCenter = 0.5f;    // Re-randomised every attempt
+    float qteGoodHalf = 0.105f;    // Blue zone half-width
+    float qtePerfectHalf = 0.028f; // Yellow zone half-width
+    float qteTimeout = 0.f;
+    int   qteSweeps = 0;
+    int   qteResult = 0;           // 0 none, 1 perfect, 2 good, 3 miss
+    float qteResultFlash = 0.f;    // Drives the HUD verdict readout
+    int   qteStreak = 0;           // Consecutive perfects -> faster marker
+
+    // ---- Overdrive (the perfect-vent reward) ----
+    float overdriveTimer = 0.f;    // Heat cannot rise while > 0
+
+    // ---- Perfect parry ----
+    float perfectParryFlash = 0.f;
+    int   perfectParryChain = 0;   // Consecutive perfects, for feedback scaling
+
 };
 
 // ============================================================================
@@ -315,8 +337,25 @@ enum class AlertIcon : uint8_t {
     Lost         // Grey — lost track of the player
 };
 
+// A committed line charge. Distinct from a Maneuver because it overrides the
+// entire movement/damage pipeline rather than being one option the maneuver
+// picker can choose.
+enum class RamState : uint8_t {
+    None = 0,
+    Windup,     // Glow builds, hull aligns. The read.
+    Charge,     // Invulnerable, unparryable, clears asteroids.
+    Recover     // Vulnerable. Longer than the charge, on purpose.
+};
+
 struct EnemyComponent {
     uint32_t entityId = 0;
+
+    // ---- Identity ----
+    // Index into EnemyRegistry::all(), assigned at creation and never changed.
+    // Everything that needs to know WHAT this unit is -- AI behaviour, colour,
+    // hull, spawn accounting -- resolves through this. 0xFF means unassigned,
+    // which should never survive createEnemy.
+    uint8_t archetype = 0xFF;
 
     enum State { IDLE, CHASE, AVOID } state = IDLE;  // Legacy, unused — see EnemyState
     float detectionRadius = 600.f;
@@ -357,6 +396,36 @@ struct EnemyComponent {
     float stormRecoverTimer = 0.f;      // Dizzy afterward, vulnerable, can't shoot
     float stormFireTimer = 0.f;
     float stormSpin = 0.f;              // deg/sec, ramps up then down
+
+    // ---- Turret (independent of hull facing) ----
+    // World-space, NOT relative to the hull. A turret that stored a local
+    // angle would swing whenever the ship turned, which is exactly the
+    // coupling this whole feature exists to remove.
+    float   turretAngle = 0.f;
+    float   turretCooldown = 0.f;
+    float   turretTelegraphTimer = 0.f;
+    float   turretTelegraphDuration = 0.f;
+    bool    turretTelegraphActive = false;
+    uint8_t turretMode = 0;              // 0 = aimed, 1 = burst
+    int     turretBurstLeft = 0;
+    float   turretBurstTimer = 0.f;
+    float   turretBurstBaseAngle = 0.f;  // Fan centre, locked at wind-up end
+    float   turretMuzzleFlash = 0.f;
+
+    // ---- Ram charge ----
+    RamState     ramState = RamState::None;
+    float        ramTimer = 0.f;
+    float        ramDuration = 0.f;
+    float        ramCooldown = 0.f;
+    sf::Vector2f ramDir;
+    float        ramGlow = 0.f;          // 0..1, drives the wind-up tell
+
+    // ---- Ram trail ----
+    static constexpr int RAM_TRAIL_MAX = 16;
+    sf::Vector2f ramTrail[RAM_TRAIL_MAX];
+    int   ramTrailCount = 0;      // Valid samples, newest at index 0
+    float ramTrailTimer = 0.f;    // Sample cadence
+    float ramTrailFade = 0.f;    // 1 while charging, decays to 0 after
 
     // ---- Visual feedback ----
     float hitFlashTimer = 0.f;          // White flash when damaged
@@ -472,4 +541,3 @@ struct AIState {
     float dodgePunishCooldown = 0.f;    // Stops one bullet chaining into repeat staggers
     float threatSeenTimer = 0.f;        // >0 = a real threat is inbound, suppresses idle jukes
 };
-
