@@ -28,8 +28,10 @@
  *   A convex-hull argument is NOT sufficient — ~14% of generated polygons are
  *   non-convex at high jaggedness.
  *
+ * CHANGED in 1.7 — archetype scars, hull thruster flame, bash crescent tell.
+ *
  * @author Oleg Ivakhiv
- * @version 1.6
+ * @version 1.7
  */
 
 #pragma once
@@ -289,6 +291,32 @@ public:
                     outlineColor = sf::Color(255, 200, 80, 240);
                 }
 
+                // ---- Bash: the parry colour, on the hull itself ----
+                // Evaluated last so it always wins. A bash must never be
+                // mistaken for anything else, least of all the ram.
+                float bashU = -1.f;   // <0 = no bash tell this frame
+                sf::Color bashCol(90, 255, 230);
+                if (ec.bashState == BashState::Windup || ec.bashState == BashState::Lunge) {
+                    bashU = (ec.bashState == BashState::Lunge) ? 1.f
+                        : std::clamp(1.f - ec.bashTimer / std::max(0.01f, ec.bashDuration), 0.f, 1.f);
+
+                    sol::object bc = adef.config["bash_tell_color"];
+                    if (bc.valid() && bc.is<sol::table>()) {
+                        sol::table t = bc.as<sol::table>();
+                        bashCol = sf::Color(
+                            static_cast<uint8_t>(std::clamp(t["r"].get_or(90.f), 0.f, 255.f)),
+                            static_cast<uint8_t>(std::clamp(t["g"].get_or(255.f), 0.f, 255.f)),
+                            static_cast<uint8_t>(std::clamp(t["b"].get_or(230.f), 0.f, 255.f)));
+                    }
+                    const float w = bashU * bashU;
+                    outlineWidth = 1.8f + 4.5f * w;
+                    outlineColor = sf::Color(
+                        static_cast<uint8_t>(bashCol.r + (255 - bashCol.r) * w * 0.6f),
+                        static_cast<uint8_t>(bashCol.g + (255 - bashCol.g) * w * 0.6f),
+                        static_cast<uint8_t>(bashCol.b + (255 - bashCol.b) * w * 0.6f),
+                        static_cast<uint8_t>(170 + 85 * bashU));
+                }
+
                 // ====================================================================
                 // 3. DRAW THE SHIP with animation offsets
                 //    Same pivot maths as the player.
@@ -309,12 +337,25 @@ public:
                 sf::RenderStates states;
                 states.transform = xf;
 
+                // ---- Thruster flame (under the hull, so its root is hidden) ----
+                if (adef.exhaust.glow > 0.f) drawThrusterFlame(i, ec, adef, states);
+
                 // ---- Fill ----
                 if (!adef.visualTris.empty()) {
                     sf::VertexArray body(sf::PrimitiveType::Triangles, adef.visualTris.size());
                     for (size_t k = 0; k < adef.visualTris.size(); ++k)
                         body[k] = sf::Vertex{ adef.visualTris[k], fill };
                     m_window->draw(body, states);
+                }
+
+                // ---- Scars (in the hull's frame: they bank and squash with it) ----
+                if (!adef.decalSegs.empty()) {
+                    const sf::Color scar(
+                        static_cast<uint8_t>(fill.r * 0.42f),
+                        static_cast<uint8_t>(fill.g * 0.42f),
+                        static_cast<uint8_t>(fill.b * 0.42f), 235);
+                    drawSegments(adef.decalSegs, adef.config["scar_width"].get_or(1.6f),
+                        scar, states);
                 }
 
                 // ---- Outline ----
@@ -460,6 +501,17 @@ public:
                 }
 
                 // ====================================================================
+                // 3e. BASH CRESCENT (windup + lunge)
+                // ====================================================================
+                // Short and CURVED where the ram's tell is long and STRAIGHT;
+                // cyan where the ram's is amber; hugging the prow where the
+                // ram's reaches across the arena. Three independent channels
+                // saying the same thing, so one lost in a busy frame still
+                // leaves two.
+                if (bashU >= 0.f) drawBashCrescent(tf, adef, bashU, bashCol,
+                    ec.bashState == BashState::Lunge);
+
+                // ====================================================================
                 // 4. TELEGRAPH AIM LINE
                 // ====================================================================
                 if (ec.telegraphActive && ec.telegraphDuration > 0.f) {
@@ -542,6 +594,123 @@ public:
     }
 
 private:
+    // ========================================================================
+    // ENEMY DETAIL: scars, flame, bash tell
+    // ========================================================================
+
+    /// Flat segment pairs as thin quads. sf::Lines is always 1px and vanishes
+    /// under camera zoom-out; these scale with the hull.
+    void drawSegments(const std::vector<sf::Vector2f>& segs, float width,
+        sf::Color col, const sf::RenderStates& states) {
+        const size_t n = segs.size() / 2;
+        if (n == 0) return;
+        sf::VertexArray va(sf::PrimitiveType::Triangles, n * 6);
+        const float h = width * 0.5f;
+        for (size_t k = 0; k < n; ++k) {
+            const sf::Vector2f a = segs[k * 2], b = segs[k * 2 + 1];
+            sf::Vector2f d = b - a;
+            const float l = std::sqrt(d.x * d.x + d.y * d.y);
+            if (l < 1e-4f) continue;
+            const sf::Vector2f p(-d.y / l * h, d.x / l * h);
+            va[k * 6 + 0] = sf::Vertex{ a - p, col };
+            va[k * 6 + 1] = sf::Vertex{ a + p, col };
+            va[k * 6 + 2] = sf::Vertex{ b + p, col };
+            va[k * 6 + 3] = sf::Vertex{ a - p, col };
+            va[k * 6 + 4] = sf::Vertex{ b + p, col };
+            va[k * 6 + 5] = sf::Vertex{ b - p, col };
+        }
+        m_window->draw(va, states);
+    }
+
+    /**
+     * @brief Hull-mounted exhaust flame, length driven by speed and intent.
+     *
+     * The roster wants the Berserker's threat telegraphed through MOTION more
+     * than gunfire. This is the channel: the flame roars through an attack
+     * run, goes white through a charge or lunge, and gutters to almost
+     * nothing while a bash coils -- a ship that suddenly goes quiet at close
+     * range is about to swing.
+     */
+    void drawThrusterFlame(size_t i, const EnemyComponent& ec,
+        const enemyarch::ArchetypeDef& adef, const sf::RenderStates& states) {
+        const b2Vec2 v = b2Body_GetLinearVelocity(m_em->physics[i].bodyId);
+        const float speed = std::sqrt(v.x * v.x + v.y * v.y) * SCALE;
+        const float s = std::clamp(speed / 520.f, 0.f, 1.f);
+
+        float intent = 1.f;
+        bool whiteHot = false;
+        if (ec.ramState == RamState::Charge || ec.bashState == BashState::Lunge) {
+            intent = 1.7f; whiteHot = true;
+        }
+        else if (ec.bashState == BashState::Windup || ec.ramState == RamState::Windup) {
+            intent = 0.25f;
+        }
+
+        const float g = adef.exhaust.glow;
+        const sf::Color outer = whiteHot ? sf::Color(255, 235, 190, 210) : sf::Color(255, 150, 60, 175);
+        const sf::Color inner = whiteHot ? sf::Color(255, 255, 255, 240) : sf::Color(255, 230, 160, 220);
+        const sf::Color clear(255, 120, 40, 0);
+
+        sf::VertexArray va(sf::PrimitiveType::Triangles, adef.thrusters.size() * 6);
+        size_t k = 0;
+        for (size_t n = 0; n < adef.thrusters.size(); ++n) {
+            const sf::Vector2f o = adef.thrusters[n];
+            const float flick = 0.82f + 0.18f * std::sin(m_enemyAnimTime * 43.f
+                + static_cast<float>(n) * 2.1f + static_cast<float>(i));
+            const float len = g * (5.f + 17.f * s) * intent * flick;
+            const float w = g * 3.0f * (0.75f + 0.45f * s);
+
+            va[k++] = sf::Vertex{ { o.x - w, o.y }, outer };
+            va[k++] = sf::Vertex{ { o.x + w, o.y }, outer };
+            va[k++] = sf::Vertex{ { o.x, o.y + len }, clear };
+
+            va[k++] = sf::Vertex{ { o.x - w * 0.45f, o.y }, inner };
+            va[k++] = sf::Vertex{ { o.x + w * 0.45f, o.y }, inner };
+            va[k++] = sf::Vertex{ { o.x, o.y + len * 0.55f }, clear };
+        }
+        m_window->draw(va, states);
+    }
+
+    /**
+     * @brief The "parry this" read.
+     *
+     * A thick arc hugging the prow, spanning the strike arc (bash_arc_cos),
+     * creeping outward and brightening as the coil completes, then snapping
+     * to full white-cyan for the lunge itself.
+     */
+    void drawBashCrescent(const TransformComponent& tf, const enemyarch::ArchetypeDef& adef,
+        float u, sf::Color col, bool lunging) {
+        const float arcCos = std::clamp(adef.config["bash_arc_cos"].get_or(0.30f), -0.9f, 0.95f);
+        const float half = std::min(std::acos(arcCos), 1.25f);   // cap ~72 deg
+        const float facing = (tf.rotation - 90.f) * 3.14159f / 180.f;
+
+        const float e = u * u * (3.f - 2.f * u);
+        const float r0 = adef.radius * 0.95f + 6.f + 16.f * e;
+        const float thick = 2.5f + 7.f * e + (lunging ? 3.f : 0.f);
+
+        const float wmix = lunging ? 0.75f : 0.35f * e;
+        const sf::Color c(
+            static_cast<uint8_t>(col.r + (255 - col.r) * wmix),
+            static_cast<uint8_t>(col.g + (255 - col.g) * wmix),
+            static_cast<uint8_t>(col.b + (255 - col.b) * wmix),
+            static_cast<uint8_t>(lunging ? 250 : 70 + 170 * e));
+        const sf::Color edge(c.r, c.g, c.b, 0);
+
+        constexpr int SEG = 16;
+        sf::VertexArray arc(sf::PrimitiveType::TriangleStrip, (SEG + 1) * 2);
+        for (int k = 0; k <= SEG; ++k) {
+            const float t = static_cast<float>(k) / SEG;
+            const float a = facing - half + 2.f * half * t;
+            // Taper at the tips so it reads as a blade, not a band.
+            const float taper = std::sin(t * 3.14159f);
+            const sf::Vector2f dir(std::cos(a), std::sin(a));
+            arc[k * 2] = sf::Vertex{ tf.position + dir * r0, c };
+            arc[k * 2 + 1] = sf::Vertex{ tf.position + dir * (r0 + thick * taper),
+                                         (taper > 0.2f) ? c : edge };
+        }
+        m_window->draw(arc);
+    }
+
     // ========================================================================
     // SURFACE DETAIL CACHE
     // ========================================================================

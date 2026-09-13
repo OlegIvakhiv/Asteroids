@@ -31,7 +31,7 @@
 -- Plain data after load means what you read here is what the engine sees.
 --
 -- @author Oleg Ivakhiv
--- @version 2.1
+-- @version 2.2 -- Berserker; bash, ram chains, melee profile, scars, exhaust
 -- ============================================================================
 
 
@@ -75,6 +75,15 @@ enemy_defaults = {
     -- Used only when personality_variance is false. 0 = timid, 1 = reckless.
     fixed_aggression      = 0.8,
 
+    -- "standard": the Raider's picker (strafe / reposition / fall back).
+    -- "melee":    closes or lunges, never strafes, never retreats, never
+    --             flinches away from a hit. See the Berserker.
+    -- (Naval behaviour is still selected by facing_mode = "velocity".)
+    maneuver_profile     = "standard",
+    preferred_range      = 0.0,      -- >0 overrides the stand-off range derived
+                                     -- from attack_range. A melee unit shoots
+                                     -- from 400 but wants to live at 80.
+
     -- Hull facing. "target" points the nose at the player in COMBAT.
     -- "velocity" points the nose along the direction of travel and NEVER at
     -- the player -- naval broadside behaviour. See the Barge.
@@ -87,6 +96,12 @@ enemy_defaults = {
     bullet_lifetime      = 2.0,
     bullet_damage        = 25.0,     -- Per projectile. Was BulletComponent's
                                      -- hardcoded default; now per unit.
+    bullet_iframes       = 0.8,      -- Player i-frames when one of OUR rounds
+                                     -- lands. 0.8 was DamageSystem's hardcode.
+                                     -- A fast spray needs this short, or it
+                                     -- can only ever land one round in three
+                                     -- -- and each graze shields the player
+                                     -- from that same unit's melee.
     fire_rate            = 1.8,
     attack_range         = 480.0,
     aim_spread           = 18.0,
@@ -196,8 +211,68 @@ enemy_defaults = {
     ram_surprise_bonus    = 2.0,     -- Trigger chance multiplier while the
                                      -- player has not confirmed contact yet
 
+    -- Added in 2.2. Every default reproduces the Barge's old behaviour.
+    -- Integers stay integers: sol2 will not read 2.0 as an int.
+    ram_max_trigger       = 1.0e9,   -- Far trigger fires only BELOW this. With
+                                     -- near = 0 it becomes a mid-range band.
+    ram_trigger_chance    = 0.9,     -- Roll when the range test passes...
+    ram_reroll_delay      = 2.0,     -- ...and wait this long if it fails.
+    ram_chain_min         = 1,       -- Charges per commit. A chain that
+    ram_chain_max         = 1,       -- CONNECTS stops early (DamageSystem).
+    ram_chain_windup      = 0.35,    -- Re-aim windup between links
+    ram_windup_turn       = 6.0,     -- Hull turn rate during windup (1/s)
+    ram_clear_reach       = 78.0,    -- Asteroid clearing radius while charging
+    ram_iframes           = 1.0,     -- Player i-frames after a charge lands
+    ram_knockback         = 1100.0,  -- px/s, mostly sideways out of the lane
+    hit_confirm_cooldown  = 0.0,     -- After ANY melee connect (bash or ram),
+                                     -- neither attack may start for this long.
+                                     -- The anti-stunlock rule. See Berserker.
+
+    -- ===== BASH (parriable melee) =====
+    -- Windup -> lunge -> recover. The one attack in the roster you are
+    -- MEANT to parry. The tell is drawn in the parry's own cyan, as a short
+    -- crescent at the prow -- the ram's tell is amber and a long straight
+    -- lane. The two must never be confusable at speed.
+    bash_enabled          = false,
+    bash_trigger_range    = 150.0,   -- Centre-to-centre distance to start
+    bash_windup           = 0.38,    -- The read. parry_window is 0.3, so this
+                                     -- leaves reaction time before it matters.
+    bash_turn_rate        = 12.0,    -- Tracks through the windup, locks at lunge
+    bash_coil_speed       = 70.0,    -- Eases BACKWARDS while winding up
+    bash_lunge_time       = 0.16,
+    bash_lunge_speed      = 950.0,   -- ~150px of lunge
+    bash_reach            = 90.0,    -- Strike lands inside this...
+    bash_arc_cos          = 0.30,    -- ...and inside this arc (~72 deg each side)
+    bash_recoil           = 160.0,   -- Bounce off the impact
+    bash_recover          = 0.35,    -- After a connect (or a parry-stun)
+    bash_whiff_recover    = 0.60,    -- After a miss. Getting out of reach pays.
+    bash_cooldown         = 1.1,
+    bash_hit_cooldown     = 2.0,     -- After a LANDED bash. Anti-stunlock.
+    bash_damage           = 30.0,
+    bash_iframes          = 0.5,
+    bash_knockback        = 950.0,
+    bash_tell_color       = { r = 90, g = 255, b = 230 },
+
     -- ===== PERSONALITY ROLL =====
     personality_variance  = true,
+
+    -- ===== EXHAUST =====
+    -- Numeric defaults match the old hardcoded exhaust exactly. There is
+    -- deliberately NO thruster_color here: its absence is what keeps the old
+    -- red-orange jitter, and derive() would otherwise copy it onto every unit.
+    -- `thrusters = { {x,y}, ... }` sets nozzles; unset = one at (0, 22).
+    thruster_rate         = 0.5,     -- Per nozzle per frame. >1 = several.
+    thruster_speed        = 80.0,
+    thruster_size         = 2.0,
+    thruster_life         = 0.10,
+    thruster_glow         = 0.0,     -- Hull flame length. 0 = none (old look).
+                                     -- >0 also makes the exhaust react to
+                                     -- charge / lunge / coil.
+
+    -- ===== DEATH =====
+    death_style           = "standard",   -- "visceral": hull splits into shards
+    death_shards          = 7,
+    death_trauma          = 0.38,         -- visceral only
 
     -- ===== SPAWN DIRECTOR =====
     faction               = "RAKSHARI",
@@ -456,7 +531,12 @@ enemy_archetypes.BARGE = derive {
     ram_charge_duration    = 1.3,
     ram_recover            = 2.0,
     ram_cooldown           = 15.0,
-    ram_damage             = 110.0,
+    ram_damage             = 40.0,   -- WAS 110, but that number was never read:
+                                     -- DamageSystem applied a flat 15 on any
+                                     -- contact. Wired for real in 1.4, 110
+                                     -- would one-shot a stock hull (~100 HP).
+                                     -- 40 + the stagger is a real punishment
+                                     -- without being a coin-flip death.
     ram_far_trigger        = 720.0,
     ram_near_trigger       = 230.0,
     ram_surprise_bonus     = 2.2,
@@ -470,11 +550,168 @@ enemy_archetypes.BARGE = derive {
 }
 
 
+-- ----------------------------------------------------------------------------
+-- BERSERKER -- close-range pressure check. Punishes kiting everything.
+--
+-- The whole unit is one question asked at speed: "which tool?"
+--
+--   BASH    point-blank, CYAN crescent at the prow, hull coils back.
+--           PARRY IT. Parried, it is stunned and thrown -- the reward.
+--   CHARGE  mid-range, AMBER glow + long lane line, hull goes white-hot.
+--           DO NOT PARRY IT. It is the Barge's ram contract: untouchable
+--           while charging, and a parry whiffs AND you still eat the hit.
+--           Chains 2-3 times, re-aiming each link. A link that CONNECTS
+--           ends the chain -- then a 1.2s recover. That is the punish window.
+--
+-- Between attacks it sprays: cheap, fast, short i-frames. It punishes
+-- standing off and breaking line of sight late, not standing close.
+--
+-- hit_confirm_cooldown 1.8 + bash_hit_cooldown 2.2: once it lands anything,
+-- it cannot start another attack until the player has had real control back.
+-- Without that, bash -> tumble -> bash is a loop with no input that answers it.
+--
+-- Hitbox: the mandible gap is filled in by convexity, so the raw ratio is
+-- ~1.58. hitbox_scale 0.9 brings it to ~1.28. Shots "between the horns"
+-- still land -- that reads as hitting its face, which is fine for a unit you
+-- are shooting head-on as it comes.
+-- ----------------------------------------------------------------------------
+enemy_archetypes.BERSERKER = derive {
+    display = "Berserker",
+    faction = "RAKSHARI",
+
+    hull = {
+        {   0, -35 }, {   5, -20 }, {  18, -40 },           -- nose, starboard mandible
+        {  16, -10 }, {  28,   0 }, {  18,  10 },           -- wing
+        {  12,   5 }, {   0,  25 },                         -- engine notch, tail
+        { -12,   5 }, { -18,  10 }, { -28,   0 },           -- port wing
+        { -16, -10 }, { -18, -40 }, {  -5, -20 },           -- port mandible
+    },
+    turrets = {},
+
+    -- Scars. Polylines in hull space, every point verified inside the
+    -- silhouette with >=1.2px clearance. Badge of status per the roster.
+    scars = {
+        { {   9, -8 }, {  15, -3 }, {  22, 1 } },           -- long gouge, starboard wing
+        { {  -5, -13 }, { -10, -6 } },                      -- claw rake, three lines
+        { {  -3,  -9 }, {  -8, -2 } },
+        { {  -1,  -5 }, {  -6,  2 } },
+        { { 0.3, -26 }, { -0.8, -22.5 }, { 0.6, -19 } },    -- cracked nose
+        { { -15, -3 }, { -22, 1.5 } },                      -- port wing slash
+    },
+    scar_width = 1.6,
+
+    -- Twin engines. Sunk ~2.5px INSIDE the hull, with ~5px of plating aft of
+    -- each before the silhouette opens: the flame root is hidden and the
+    -- flame emerges through the tail notch rather than starting in space.
+    thrusters = { { 9, 5 }, { -9, 5 } },
+
+    scale                = 1.0,
+    hitbox_scale         = 0.9,
+
+    -- ===== MASS AND TOUGHNESS =====
+    -- ~9kg against the Raider's ~5 and the Barge's ~93: the midpoint.
+    density              = 5.0,
+    hp                   = 400.0,
+    score_reward         = 900,
+    stagger_resist       = 0.25,   -- Harder to knock around than a Raider...
+    stun_resist          = 0.10,   -- ...but a parried bash still SHUTS IT DOWN.
+                                   -- Keep this low: the stun is the reward.
+
+    -- ===== MOVEMENT =====
+    engine_power         = 420.0,  -- ~1.2x Raider acceleration at ~1.7x the mass
+    max_speed            = 24.0,   -- ATTACK_RUN ~520 px/s, APPROACH ~330
+    rotation_speed       = 6.0,
+    angulardrag_factor   = 3.0,
+    maneuver_profile     = "melee",
+    preferred_range      = 80.0,
+    personality_variance = false,  -- Raiders alone get the personality roll
+    fixed_aggression     = 0.95,
+
+    -- ===== PERCEPTION: commits fast, gives up late =====
+    suspicion_rate       = 1.8,
+    suspicion_combat     = 0.35,
+    combat_lose_time     = 6.0,
+    combat_lose_distance = 1300.0,
+
+    -- ===== SPRAY (hull gun) =====
+    fire_rate            = 0.24,
+    telegraph_time       = 0.0,    -- Minimal telegraph: volume is the threat
+    aim_spread           = 11.0,
+    attack_range         = 400.0,
+    bullet_speed         = 620.0,
+    bullet_lifetime      = 0.9,    -- ~560px: close-mid only
+    bullet_damage        = 5.0,
+    bullet_iframes       = 0.15,
+
+    storm_enabled        = false,  -- The storm is a Raider/Maniac move
+    chaos_dodge_chance   = 0.12,   -- No retreat instinct...
+    bullet_dodge_chance  = 0.25,   -- ...and it would rather tank it
+
+    -- ===== BASH =====
+    bash_enabled         = true,
+    bash_trigger_range   = 150.0,
+    bash_windup          = 0.38,
+    bash_lunge_speed     = 950.0,
+    bash_lunge_time      = 0.16,
+    bash_reach           = 95.0,
+    bash_damage          = 32.0,
+    bash_knockback       = 950.0,
+    bash_cooldown        = 1.1,
+    bash_hit_cooldown    = 2.2,
+
+    -- ===== RAM CHAIN =====
+    ram_enabled          = true,
+    ram_windup           = 0.60,   -- Opener: moderate
+    ram_chain_windup     = 0.36,   -- Each re-aim: short, still announced
+    ram_windup_turn      = 12.0,
+    ram_charge_speed     = 1250.0,
+    ram_charge_duration  = 0.42,   -- ~525px per link
+    ram_recover          = 1.2,    -- The punish window after the chain
+    ram_cooldown         = 5.5,
+    ram_damage           = 26.0,
+    ram_iframes          = 0.9,
+    ram_knockback        = 1000.0,
+    ram_near_trigger     = 0.0,    -- Close range belongs to the bash
+    ram_far_trigger      = 240.0,  -- Charges across the 240..720 band
+    ram_max_trigger      = 720.0,
+    ram_trigger_chance   = 0.55,   -- ...or keeps closing to bash instead
+    ram_reroll_delay     = 0.8,
+    ram_surprise_bonus   = 1.3,
+    ram_chain_min        = 2,
+    ram_chain_max        = 3,
+    ram_clear_reach      = 55.0,
+    hit_confirm_cooldown = 1.8,
+
+    -- ===== LOOK =====
+    -- Brighter and hotter than a Raider: its threat reads through motion.
+    thruster_rate        = 1.4,
+    thruster_speed       = 150.0,
+    thruster_size        = 3.0,
+    thruster_life        = 0.14,
+    thruster_color       = { r = 255, g = 190, b = 110, a = 230 },
+    thruster_glow        = 1.0,
+
+    death_style          = "visceral",
+    death_shards         = 7,
+    death_trauma         = 0.38,
+
+    -- Bloodseeker aura: receives it at full value (roster default). Nothing
+    -- to wire until the Bloodseeker exists.
+
+    -- ===== SPAWN =====
+    spawn_weight         = 100.0,
+    max_active           = 3,
+    threat_cost          = 1,      -- Three of them fill the 12 budget
+
+    color = { r = 200, g = 70, b = 55 },
+}
+
+
 -- ============================================================================
 -- ARCHETYPE ORDER -- APPEND ONLY
 -- ============================================================================
 
-archetype_order = { "WARDOG", "RAIDER", "BARGE" }
+archetype_order = { "WARDOG", "RAIDER", "BARGE", "BERSERKER" }
 
 
 -- ============================================================================

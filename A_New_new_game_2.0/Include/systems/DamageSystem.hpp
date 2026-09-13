@@ -18,8 +18,34 @@
  * real damage number and a stun, so a parry-into-reflect is a genuine punish
  * rather than a slightly-better basic shot.
  *
+ * CHANGED in 1.4 — MELEE CONTRACTS (Berserker)
+ *
+ *  - BASH STRIKES. AISystem raises EnemyComponent::bashStrikePending on the
+ *    frame a lunge reaches the player; resolveBashStrikes() runs FIRST each
+ *    frame and routes a parrying player into parryEnemy() -- the very same
+ *    function a contact parry uses -- so "what a parried ship does" has one
+ *    definition. Contact events from a bash-committed enemy are ignored: the
+ *    strike owns the outcome, and the hull scraping you is not a second hit.
+ *
+ *  - RAM DAMAGE WAS NEVER APPLIED. `ram_damage` has sat in enemy.lua since
+ *    the Barge shipped, but nothing read it: a charge landed as ordinary
+ *    collision damage, a flat 15. applyRamHit() now reads it.
+ *
+ *  - PARRYING A RAM MADE YOU IMMUNE. The "parry whiffs against a charge"
+ *    branch did `continue`, which skipped the collision damage below it. The
+ *    whiff FX played and the player took nothing -- so the one tool the ram
+ *    contract says does NOT work was the safest answer to it. The whiff now
+ *    falls through into the hit. For the Berserker this is load-bearing: its
+ *    entire skill test is "parry the bash, dodge the charge", and that test
+ *    does not exist if parry beats both.
+ *
+ *  - PER-BULLET I-FRAMES (BulletComponent::playerIframes).
+ *
+ *  - PER-ARCHETYPE DEATH (`death_style = "visceral"`): the hull splits into
+ *    its own triangles.
+ *
  * @author Oleg Ivakhiv
- * @version 1.3 (per-projectile damage)
+ * @version 1.4 (melee contracts)
  */
 
 #pragma once
@@ -32,6 +58,7 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <string>
 
 class DamageSystem : public ISystem {
 public:
@@ -62,22 +89,12 @@ public:
             if (m_em->players[playerIdx].perfectParryFlash <= 0.f)
                 m_em->players[playerIdx].perfectParryChain = 0;
         }
-        // ---- Shared parry-success reaction ----
-        auto onParrySuccess = [&](sf::Vector2f contactPos) {
-            // This flag was never being set before 1.3, so the whiff penalty
-            // fired on every parry including the ones that connected.
-            m_em->players[playerIdx].parryHitSomething = true;
-            m_em->players[playerIdx].parryFlashTimer = 0.25f;
-
-            m_em->triggerParrySuccess(
-                contactPos,
-                vcfg("parry_hitstop_freeze", 0.06f),
-                vcfg("parry_hitstop_slomo", 0.35f),
-                vcfg("parry_hitstop_min_scale", 0.25f),
-                vcfg("parry_trauma", 0.75f),
-                vcfg("parry_flash_alpha", 170.f));
-        };
-        //onParrySuccess(...)
+        // ====================================================================
+        // 1b. BASH STRIKES raised by AISystem last frame
+        // ====================================================================
+        // Before contacts, so a lunge that also produced a begin-touch this
+        // frame is already settled when that contact is looked at.
+        resolveBashStrikes(playerIdx);
         // ====================================================================
         // 2. PROCESS BOX2D CONTACT EVENTS
         // ====================================================================
@@ -200,6 +217,25 @@ public:
 
                 bool isParryActive = m_em->players[playerIdx].parryTimer > 0;
 
+                // ---- ENEMY MID-COMMIT: the attack owns the outcome ----
+                if (otherType == BodyType::Enemy && otherIdx != (size_t)-1) {
+                    if (isRamInvulnerable(otherIdx)) {
+                        if (isParryActive) {
+                            // Parry whiffs against a charge. Loud, so it reads
+                            // as "wrong tool" rather than "the parry is buggy"
+                            // -- and then the charge lands anyway. That second
+                            // half was missing: this used to `continue` here.
+                            const sf::Vector2f op = m_em->transforms[otherIdx].position;
+                            m_em->spawnExplosion(op, sf::Color(255, 120, 60), 14, 2.4f);
+                            m_em->spawnShockRing(op, 14.f, 120.f, 0.25f,
+                                sf::Color(255, 120, 60), 3.f, 180.f);
+                        }
+                        applyRamHit(playerIdx, otherIdx);
+                        continue;
+                    }
+                    if (isBashCommitted(otherIdx)) continue;   // resolveBashStrikes owns it
+                }
+
                 // ---- PARRY ACTIVE ----
                 if (isParryActive && otherIdx != (size_t)-1) {
                     sf::Vector2f playerPos = m_em->transforms[playerIdx].position;
@@ -228,54 +264,14 @@ public:
                             m_em->healths[otherIdx].wasParryLaunched = true;
                             m_em->healths[otherIdx].isHoming = true;
                         }
-                        onParrySuccess((playerPos + otherPos) * 0.5f);
+                        onParrySuccess(playerIdx, (playerPos + otherPos) * 0.5f);
                         continue;
                     }
 
                     // --- PARRY ENEMY ---
+                    // (A ram in Charge never reaches here -- handled above.)
                     else if (otherType == BodyType::Enemy) {
-                        // ---- RAM IMMUNITY: charging enemies cannot be parried ----
-                        if (isRamInvulnerable(otherIdx)) {
-                            // Parry whiffs against a charge. Loud, so it reads
-                            // as "wrong tool" rather than "the parry is buggy".
-                            m_em->spawnExplosion(otherPos, sf::Color(255, 120, 60), 14, 2.4f);
-                            m_em->spawnShockRing(otherPos, 14.f, 120.f, 0.25f,
-                                sf::Color(255, 120, 60), 3.f, 180.f);
-                            continue;
-                        }
-
-                        sf::Vector2f away = otherPos - playerPos;
-                        float len = std::sqrt(away.x * away.x + away.y * away.y);
-                        if (len > 0.01f) away /= len;
-
-                        float stunDuration = (*m_lua)["parry_stun_duration"].get_or(1.5f);
-                        float reflectDamage = (*m_lua)["parry_reflect_damage"].get_or(50.f);
-
-                        // ---- Stun resistance, separate from stagger resistance ----
-                        float stunResist = 0.f;
-                        if (m_registry) {
-                            stunResist = std::clamp(
-                                m_registry->resolve(m_em->enemies[otherIdx].archetype)
-                                .config["stun_resist"].get_or(0.f), 0.f, 1.f);
-                        }
-
-                        m_em->healths[otherIdx].currentHp -= reflectDamage;
-                        m_em->healths[otherIdx].stunTimer =
-                            stunDuration * (1.f - stunResist);
-
-                        // ---- FULL STAGGER, not just a shove ----
-                        // A melee parry is the highest-risk thing the player
-                        // can do, so it gets the loudest reaction available.
-                        staggerEnemy(otherIdx, away,
-                            wcfg("parry_melee_knockback", 1100.f), 1.0f);
-
-                        m_em->enemies[otherIdx].hitFlashTimer = 0.22f;
-                        m_em->spawnExplosion(otherPos, sf::Color(0, 255, 200), 22, 3.0f);
-
-                        onParrySuccess((playerPos + otherPos) * 0.5f);
-                        // ---- Perfect parry on enemy ----
-                        if (isPerfectParry(playerIdx))
-                            onPerfectParry(playerIdx, (playerPos + otherPos) * 0.5f);
+                        parryEnemy(playerIdx, otherIdx);
                         continue;
                     }
 
@@ -336,7 +332,7 @@ public:
                             }
 
                             m_em->spawnExplosion(otherPos, sf::Color(0, 255, 200), 10, 1.5f);
-                            onParrySuccess(otherPos);
+                            onParrySuccess(playerIdx, otherPos);
                             // ---- Perfect parry on bullet ----
                             if (isPerfectParry(playerIdx))
                                 onPerfectParry(playerIdx, otherPos);
@@ -394,7 +390,7 @@ public:
 
                         if (hitType == BodyType::Player && m_em->healths[playerIdx].invulTimer <= 0) {
                             m_em->healths[playerIdx].currentHp -= blt.damage;
-                            m_em->healths[playerIdx].invulTimer = 0.8f;
+                            m_em->healths[playerIdx].invulTimer = blt.playerIframes;
                             m_em->spawnExplosion(hitPos, sf::Color(255, 100, 0), 8, 2.f);
                             m_em->spawnImpact(hitPos, sf::Color(255, 140, 0), hitVel);
                         }
@@ -649,11 +645,7 @@ public:
                 }
                 else if (type == BodyType::Enemy) {
                     m_em->totalScore += m_em->scoreRewards[i];
-                    m_em->spawnExplosion(deathPos, sf::Color::Red, 35, 5.0f);
-                    m_em->spawnExplosion(deathPos, sf::Color::Yellow, 15, 2.5f);
-                    m_em->spawnShockRing(deathPos, 15.f, 190.f, 0.40f,
-                        sf::Color(255, 90, 40), 5.f, 230.f);
-                    m_em->addTrauma(0.30f);
+                    spawnEnemyDeath(i, deathPos);
                 }
             }
             else if (type == BodyType::Bullet &&
@@ -758,6 +750,294 @@ private:
     bool isRamInvulnerable(size_t idx) const {
         return idx < m_em->enemies.size() &&
             m_em->enemies[idx].ramState == RamState::Charge;
+    }
+
+    /// Mid-lunge, or recoiling from a strike that already resolved. Contact
+    /// begin-events from this ship are ignored -- the strike was the hit.
+    bool isBashCommitted(size_t idx) const {
+        if (idx >= m_em->enemies.size()) return false;
+        const auto& ec = m_em->enemies[idx];
+        return ec.bashState == BashState::Lunge ||
+            (ec.bashState == BashState::Recover && ec.bashConnected);
+    }
+
+    /// Per-archetype float, with a fallback if the registry is missing.
+    float acfg(size_t idx, const char* key, float def) const {
+        if (!m_registry || idx >= m_em->enemies.size()) return def;
+        return m_registry->resolve(m_em->enemies[idx].archetype).config[key].get_or(def);
+    }
+
+    // ========================================================================
+    // PARRY
+    // ========================================================================
+
+    /// Shared parry-success reaction (was a lambda inside update()).
+    void onParrySuccess(size_t playerIdx, sf::Vector2f contactPos) {
+        // This flag was never being set before 1.3, so the whiff penalty
+        // fired on every parry including the ones that connected.
+        m_em->players[playerIdx].parryHitSomething = true;
+        m_em->players[playerIdx].parryFlashTimer = 0.25f;
+
+        m_em->triggerParrySuccess(
+            contactPos,
+            vcfg("parry_hitstop_freeze", 0.06f),
+            vcfg("parry_hitstop_slomo", 0.35f),
+            vcfg("parry_hitstop_min_scale", 0.25f),
+            vcfg("parry_trauma", 0.75f),
+            vcfg("parry_flash_alpha", 170.f));
+    }
+
+    /**
+     * @brief A parrying player meets an enemy hull -- by contact OR by bash.
+     *
+     * Moved out of the contact loop verbatim so the bash can call it. If the
+     * two paths each had their own copy, the first tuning pass on one would
+     * quietly make "parry a Berserker's bash" and "parry a Berserker you
+     * bumped into" feel different for no reason the player could see.
+     */
+    void parryEnemy(size_t playerIdx, size_t otherIdx) {
+        const sf::Vector2f playerPos = m_em->transforms[playerIdx].position;
+        const sf::Vector2f otherPos = m_em->transforms[otherIdx].position;
+
+        sf::Vector2f away = otherPos - playerPos;
+        float len = std::sqrt(away.x * away.x + away.y * away.y);
+        if (len > 0.01f) away /= len;
+
+        float stunDuration = (*m_lua)["parry_stun_duration"].get_or(1.5f);
+        float reflectDamage = (*m_lua)["parry_reflect_damage"].get_or(50.f);
+
+        // ---- Stun resistance, separate from stagger resistance ----
+        const float stunResist = std::clamp(acfg(otherIdx, "stun_resist", 0.f), 0.f, 1.f);
+
+        m_em->healths[otherIdx].currentHp -= reflectDamage;
+        m_em->healths[otherIdx].stunTimer = stunDuration * (1.f - stunResist);
+
+        // ---- FULL STAGGER, not just a shove ----
+        // A melee parry is the highest-risk thing the player can do, so it
+        // gets the loudest reaction available.
+        staggerEnemy(otherIdx, away, wcfg("parry_melee_knockback", 1100.f), 1.0f);
+
+        m_em->enemies[otherIdx].hitFlashTimer = 0.22f;
+        m_em->spawnExplosion(otherPos, sf::Color(0, 255, 200), 22, 3.0f);
+
+        const sf::Vector2f mid = (playerPos + otherPos) * 0.5f;
+        onParrySuccess(playerIdx, mid);
+        if (isPerfectParry(playerIdx))
+            onPerfectParry(playerIdx, mid);
+    }
+
+    // ========================================================================
+    // MELEE HITS
+    // ========================================================================
+
+    /**
+     * @brief Settle every bash that reached the player last frame.
+     *
+     * Parrying -> parryEnemy(): the Berserker is stunned and thrown, the
+     * player gets the full parry reaction. Not parrying -> a heavy hit and a
+     * stagger along the lunge.
+     *
+     * HIT-CONFIRM COOLDOWNS. A landed bash throws the player into a ~1.65s
+     * tumble+recover. Without a lockout the Berserker is back in range and
+     * winding up again before control returns -- bash, tumble, bash, tumble,
+     * with no input that answers it. bash_hit_cooldown and
+     * hit_confirm_cooldown (for the ram) guarantee a window of real control
+     * after every connect. Applied even if i-frames ate the damage, so that
+     * rule never depends on what else just happened.
+     */
+    void resolveBashStrikes(size_t playerIdx) {
+        for (size_t i = 0; i < m_em->enemies.size(); ++i) {
+            auto& ec = m_em->enemies[i];
+            if (!ec.bashStrikePending) continue;
+            ec.bashStrikePending = false;
+            if (i == playerIdx) continue;
+            if (m_em->healths[i].currentHp <= 0.f) continue;   // died mid-swing
+
+            // ---- PARRIED: the reward ----
+            if (m_em->players[playerIdx].parryTimer > 0.f) {
+                parryEnemy(playerIdx, i);
+                continue;
+            }
+
+            ec.bashCooldown = std::max(ec.bashCooldown, acfg(i, "bash_hit_cooldown", 2.0f));
+            ec.ramCooldown = std::max(ec.ramCooldown, acfg(i, "hit_confirm_cooldown", 0.f));
+
+            const sf::Vector2f ePos = m_em->transforms[i].position;
+            const sf::Vector2f pPos = m_em->transforms[playerIdx].position;
+            const sf::Vector2f contact = ePos + (pPos - ePos) * 0.6f;
+
+            auto& php = m_em->healths[playerIdx];
+            if (php.invulTimer > 0.f) {
+                // Landed on i-frames. Show it connected with nothing.
+                m_em->spawnImpact(contact, sf::Color(255, 230, 190), ec.bashDir * -300.f);
+                continue;
+            }
+
+            php.currentHp -= acfg(i, "bash_damage", 30.f);
+            php.invulTimer = acfg(i, "bash_iframes", 0.5f);
+
+            m_em->staggerPlayer(playerIdx, ec.bashDir,
+                acfg(i, "bash_knockback", 950.f),
+                vcfg("stagger_tumble_duration", 1.1f),
+                vcfg("stagger_recover_duration", 0.55f),
+                vcfg("stagger_spin_speed", 620.f));
+
+            // staggerPlayer already brings the shake, flash and hitstop. This
+            // is just the crack at the point of contact.
+            m_em->spawnShockRing(contact, 6.f, 85.f, 0.18f,
+                sf::Color(255, 235, 200), 5.f, 255.f);
+            m_em->spawnImpact(contact, sf::Color(255, 200, 140), ec.bashDir * -500.f);
+        }
+    }
+
+    /**
+     * @brief A charging ship reached the player.
+     *
+     * Reads `ram_damage` -- which, until 1.4, nothing did. The throw is mostly
+     * SIDEWAYS out of the lane: straight along it would leave the player
+     * sitting in the path of the next link of a chain.
+     */
+    void applyRamHit(size_t playerIdx, size_t enIdx) {
+        auto& ec = m_em->enemies[enIdx];
+
+        // A chain that lands, stops. See AISystem 2.1, note 11.
+        ec.ramChainLeft = 0;
+        ec.bashCooldown = std::max(ec.bashCooldown, acfg(enIdx, "hit_confirm_cooldown", 0.f));
+
+        auto& php = m_em->healths[playerIdx];
+        if (php.invulTimer > 0.f) return;
+
+        php.currentHp -= acfg(enIdx, "ram_damage", 95.f);
+        php.invulTimer = acfg(enIdx, "ram_iframes", 1.0f);
+
+        const sf::Vector2f pPos = m_em->transforms[playerIdx].position;
+        const sf::Vector2f ePos = m_em->transforms[enIdx].position;
+        const sf::Vector2f lane = ec.ramDir;
+
+        sf::Vector2f away = pPos - ePos;
+        const float along = away.x * lane.x + away.y * lane.y;
+        sf::Vector2f side = away - lane * along;
+        float sl = std::sqrt(side.x * side.x + side.y * side.y);
+        if (sl < 0.5f) {   // dead centre: pick a side
+            side = ((rand() % 2) ? 1.f : -1.f) * sf::Vector2f(-lane.y, lane.x);
+            sl = 1.f;
+        }
+        side /= sl;
+
+        m_em->staggerPlayer(playerIdx, lane * 0.55f + side * 0.85f,
+            acfg(enIdx, "ram_knockback", 1100.f),
+            vcfg("stagger_tumble_duration", 1.1f),
+            vcfg("stagger_recover_duration", 0.55f),
+            vcfg("stagger_spin_speed", 620.f));
+
+        m_em->spawnExplosion((pPos + ePos) * 0.5f, sf::Color(255, 190, 110), 18, 3.5f);
+    }
+
+    // ========================================================================
+    // ENEMY DEATH
+    // ========================================================================
+
+    void spawnEnemyDeath(size_t i, sf::Vector2f deathPos) {
+        if (m_registry) {
+            const enemyarch::ArchetypeDef& adef = m_registry->resolve(m_em->enemies[i].archetype);
+            if (adef.config["death_style"].get_or<std::string>("standard") == "visceral") {
+                spawnVisceralDeath(i, deathPos, adef);
+                return;
+            }
+        }
+
+        // ---- Standard: unchanged from 1.3 ----
+        m_em->spawnExplosion(deathPos, sf::Color::Red, 35, 5.0f);
+        m_em->spawnExplosion(deathPos, sf::Color::Yellow, 15, 2.5f);
+        m_em->spawnShockRing(deathPos, 15.f, 190.f, 0.40f,
+            sf::Color(255, 90, 40), 5.f, 230.f);
+        m_em->addTrauma(0.30f);
+    }
+
+    /**
+     * @brief Close-range, dirty, and it comes apart.
+     *
+     * Where the standard death is a round blast, this one is TIGHT (small
+     * fast ring, not a big slow one), carries the ship's MOMENTUM (a
+     * Berserker is almost always dying at speed, pointed at you), and breaks
+     * the hull into its own triangles -- the silhouette the player has been
+     * reading all fight is what flies apart. No new art, no new system: the
+     * shards are visualTris fed to the existing DebrisSystem.
+     */
+    void spawnVisceralDeath(size_t i, sf::Vector2f pos, const enemyarch::ArchetypeDef& adef) {
+        const auto& tf = m_em->transforms[i];
+
+        sf::Vector2f shipVel(0.f, 0.f);
+        if (b2Body_IsValid(m_em->physics[i].bodyId)) {
+            const b2Vec2 v = b2Body_GetLinearVelocity(m_em->physics[i].bodyId);
+            shipVel = { v.x * SCALE, v.y * SCALE };
+        }
+        const float rr = tf.rotation * 3.14159f / 180.f;
+        const float cs = std::cos(rr), sn = std::sin(rr);
+
+        // 1. The frame the hull splits: one fat, very short white core.
+        m_em->particles.push_back({ m_em->nextEntityId++, pos, shipVel * 0.3f,
+            sf::Color(255, 245, 225, 255), 0.10f, 0.10f, 34.f });
+
+        // 2. Tight, fast pressure ring. Small radius on purpose -- this is a
+        //    point-blank death, not an area event like the magma rock.
+        m_em->spawnShockRing(pos, 10.f, 125.f, 0.22f, sf::Color(255, 120, 60), 7.f, 255.f);
+
+        // 3. Dense, dirty sparks thrown WITH the ship's momentum.
+        for (int k = 0; k < 28; ++k) {
+            const float a = (rand() % 360) * 3.14159f / 180.f;
+            const float sp = 180.f + rand() % 340;
+            const float life = 0.25f + (rand() % 30) / 100.f;
+            m_em->particles.push_back({ m_em->nextEntityId++, pos,
+                sf::Vector2f(std::cos(a), std::sin(a)) * sp + shipVel * 0.5f,
+                sf::Color(255, static_cast<uint8_t>(110 + rand() % 120), 50, 235),
+                life, life, 2.f + rand() % 4 });
+        }
+
+        // 4. The hull, in pieces.
+        const size_t triCount = adef.visualTris.size() / 3;
+        const int maxShards = adef.config["death_shards"].get_or(7);
+        if (triCount > 0 && maxShards > 0) {
+            const size_t step = std::max<size_t>(1, triCount / static_cast<size_t>(maxShards));
+            const sf::Color shard(
+                static_cast<uint8_t>(adef.color.r * 0.8f),
+                static_cast<uint8_t>(adef.color.g * 0.8f),
+                static_cast<uint8_t>(adef.color.b * 0.8f), 255);
+
+            int made = 0;
+            for (size_t t = 0; t < triCount && made < maxShards; t += step, ++made) {
+                const sf::Vector2f a = adef.visualTris[t * 3];
+                const sf::Vector2f b = adef.visualTris[t * 3 + 1];
+                const sf::Vector2f c = adef.visualTris[t * 3 + 2];
+                const sf::Vector2f cc = (a + b + c) / 3.f;
+                const sf::Vector2f pts[3] = { a - cc, b - cc, c - cc };
+
+                const sf::Vector2f wc(cc.x * cs - cc.y * sn, cc.x * sn + cc.y * cs);
+                sf::Vector2f out = wc;
+                const float ol = std::sqrt(out.x * out.x + out.y * out.y);
+                if (ol > 0.5f) out /= ol;
+                else {
+                    const float ra = (rand() % 360) * 3.14159f / 180.f;
+                    out = { std::cos(ra), std::sin(ra) };
+                }
+
+                m_em->spawnDebris(pos + wc,
+                    out * (140.f + rand() % 220) + shipVel * 0.6f,
+                    ((rand() % 2) ? 1.f : -1.f) * (180.f + rand() % 360),
+                    pts, 3, shard, 0.9f + (rand() % 50) / 100.f);
+            }
+        }
+
+        // 5. A little smoke that stays behind while the rest flies on.
+        for (int k = 0; k < 6; ++k) {
+            const float a = (rand() % 360) * 3.14159f / 180.f;
+            m_em->particles.push_back({ m_em->nextEntityId++, pos,
+                sf::Vector2f(std::cos(a), std::sin(a)) * (20.f + rand() % 40),
+                sf::Color(70, 55, 50, 170), 0.9f, 0.9f, 7.f + rand() % 5 });
+        }
+
+        m_em->addTrauma(adef.config["death_trauma"].get_or(0.38f));
+        m_em->requestHitstop(0.02f, 0.07f, 0.45f);
     }
 
 
@@ -867,6 +1147,8 @@ private:
         ec.telegraphTimer = 0.f;
         ec.stormActive = false;
         ec.stormTimer = 0.f;
+        ec.bashState = BashState::None;      // A tumbling ship is not mid-swing
+        ec.bashStrikePending = false;
 
         float len = std::sqrt(knockDir.x * knockDir.x + knockDir.y * knockDir.y);
         if (len > 0.001f) {

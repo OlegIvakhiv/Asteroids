@@ -47,11 +47,30 @@
  * 9. BROADSIDE FACING: naval units keep their broadside to the player and
  *    let their turrets track, rather than turning nose‑on.
  *
+ * ============================================================================
+ * VERSION 2.1 — BERSERKER SUPPORT
+ * ============================================================================
+ *
+ * 10. BASH: windup -> lunge -> recover. The roster's one PARRIABLE attack.
+ *     The strike resolves on proximity at the lunge, not on a Box2D contact
+ *     begin -- a Berserker already grinding against your hull would never
+ *     generate a fresh begin-touch, so a contact-driven bash would silently
+ *     stop working exactly when it is most in your face. This system raises
+ *     EnemyComponent::bashStrikePending; DamageSystem decides parry vs. hit.
+ *
+ * 11. RAM CHAINS: ram_chain_min/max queue extra charges, each with its own
+ *     short re-aim windup. A charge that CONNECTS ends the chain (DamageSystem
+ *     zeroes ramChainLeft) -- chaining into a tumbling player is a stunlock,
+ *     not a pattern. Defaults are 1/1, so the Barge is unchanged.
+ *
+ * 12. MANOEUVRE PROFILES: `maneuver_profile = "melee"` never strafes, never
+ *     falls back, and never flinches away from a hit. It closes or it lunges.
+ *
  * State split: this system owns AIState (decisions). Presentation and impact
  * state live on EnemyComponent so DamageSystem and RenderSystem can reach them.
  *
  * @author Oleg Ivakhiv
- * @version 2.0
+ * @version 2.1
  */
 
 #pragma once
@@ -147,6 +166,8 @@ public:
                 health.stunTimer -= dt;
                 ec.telegraphActive = false;
                 ec.telegraphTimer = 0.f;
+                ec.bashState = BashState::None;     // Stun breaks any melee commit
+                ec.bashStrikePending = false;
                 const float w = 0.06f * std::sin(health.stunTimer * 40.f);
                 tf.visualScale.x *= 1.f + w;
                 tf.visualScale.y *= 1.f - w;
@@ -183,6 +204,12 @@ public:
                 updateBulletStorm(dt, i, tf, ec, ai, bodyId, config);
                 continue;
             }
+
+            // ================================================================
+            // BASH — owns movement, rotation and guns while active
+            // ================================================================
+            if (updateBash(dt, tf, ec, ai, bodyId, config, adef,
+                distToPlayer, toPlayerN)) continue;
 
             // triggerDodgeBurst needs the body
             m_dodgeBodyId = bodyId;
@@ -279,6 +306,12 @@ private:
 
             ai.preferredRange = band * (naval ? 0.62f : 0.70f);
             ai.aggression = config["fixed_aggression"].get_or(0.8f);
+
+            // Explicit override. A melee unit's gun range says nothing about
+            // where it wants to BE -- the Berserker shoots from 400 but wants
+            // to live at 80.
+            const float pref = config["preferred_range"].get_or(0.f);
+            if (pref > 0.f) ai.preferredRange = pref;
         }
         else {
             ai.preferredRange = 220.f + frac(0) * 220.f;
@@ -295,6 +328,7 @@ private:
         if (ec.alertIconTimer > 0.f) ec.alertIconTimer = std::max(0.f, ec.alertIconTimer - dt);
         if (ec.hitFlashTimer > 0.f) ec.hitFlashTimer = std::max(0.f, ec.hitFlashTimer - dt);
         if (ec.dodgeFlashTimer > 0.f) ec.dodgeFlashTimer = std::max(0.f, ec.dodgeFlashTimer - dt);
+        if (ec.bashCooldown > 0.f) ec.bashCooldown = std::max(0.f, ec.bashCooldown - dt);
 
         // Trail outlives the charge by design; this must keep running in every
         // state or the wake freezes on screen when the ram ends.
@@ -428,7 +462,9 @@ private:
         ai.maneuverTimer = 0.f;
 
         if (s == EnemyState::COMBAT) {
-            ai.maneuver = Maneuver::FALLBACK;
+            // Startle-back on first contact is right for a pirate who values
+            // his hull. A Berserker's first reaction to seeing you is to come.
+            ai.maneuver = isMelee(config) ? Maneuver::ATTACK_RUN : Maneuver::FALLBACK;
             ai.maneuverTimer = 0.25f + (rand() % 20) / 100.f;
         }
     }
@@ -556,6 +592,30 @@ private:
             return;
         }
 
+        // ---- Melee units: close, or close faster. Nothing else. ----
+        // No STRAFE (that is a Raider holding a band), no FALLBACK (no retreat
+        // instinct), no hit-flinch. Inside striking distance it only APPROACHes:
+        // the perp term in APPROACH makes it circle tight at your throat, and
+        // the BASH state owns the actual hit. ATTACK_RUN at point-blank would
+        // just body-slam for generic contact damage with no tell -- exactly
+        // the untelegraphed hurt this unit exists to avoid.
+        if (isMelee(config)) {
+            const int r = rand() % 100;
+            const float close = config["bash_trigger_range"].get_or(150.f) * 1.6f;
+
+            if (dist > close) {
+                ai.maneuver = (r < 40 + static_cast<int>(ai.aggression * 45.f))
+                    ? Maneuver::ATTACK_RUN : Maneuver::APPROACH;
+                ai.maneuverTimer = 0.45f + (rand() % 45) / 100.f;
+            }
+            else {
+                ai.maneuver = Maneuver::APPROACH;
+                ai.maneuverTimer = 0.30f + (rand() % 30) / 100.f;
+            }
+            if (rand() % 100 < 25) ai.strafeDir = -ai.strafeDir;
+            return;
+        }
+
         const float band = ai.preferredRange;
         const int roll = rand() % 100;
 
@@ -600,17 +660,27 @@ private:
             if (!config["ram_enabled"].get_or(false)) return false;
             if (ec.ramCooldown > 0.f) return false;
             if (ai.currentState != EnemyState::COMBAT) return false;
+            if (ec.bashState != BashState::None) return false;   // one commit at a time
 
+            // Barge: fires when you are too close OR too far.
+            // Berserker: near = 0 (the bash owns close range) and a max, so it
+            // charges across the MID band -- "long-mid range" per the roster.
             const float farT = config["ram_far_trigger"].get_or(700.f);
             const float nearT = config["ram_near_trigger"].get_or(210.f);
-            if (dist < nearT || dist > farT) {
-                float chance = 0.9f;
+            const float maxT = config["ram_max_trigger"].get_or(1.0e9f);
+            if (dist < nearT || (dist > farT && dist < maxT)) {
+                float chance = config["ram_trigger_chance"].get_or(0.9f);
                 if (ec.timesHit == 0)
                     chance *= config["ram_surprise_bonus"].get_or(2.0f);
                 if ((rand() % 100) / 100.f > std::min(1.f, chance)) {
-                    ec.ramCooldown = 2.0f;
+                    ec.ramCooldown = config["ram_reroll_delay"].get_or(2.0f);
                     return false;
                 }
+
+                // Chain length rolled once, up front. Default 1/1 == no chain.
+                const int cMin = std::max(1, config["ram_chain_min"].get_or(1));
+                const int cMax = std::max(cMin, config["ram_chain_max"].get_or(1));
+                ec.ramChainLeft = (cMin + rand() % (cMax - cMin + 1)) - 1;
 
                 ec.ramState = RamState::Windup;
                 ec.ramDuration = config["ram_windup"].get_or(0.85f);
@@ -618,6 +688,8 @@ private:
                 ec.ramGlow = 0.f;
                 ec.turretTelegraphActive = false;
                 ec.turretBurstLeft = 0;
+                ec.telegraphActive = false;
+                ec.telegraphTimer = 0.f;
             }
             return false;
         }
@@ -632,7 +704,9 @@ private:
             float d = target - tf.rotation;
             while (d > 180.f) d -= 360.f;
             while (d < -180.f) d += 360.f;
-            tf.rotation += d * 6.0f * dt;
+            // 6.0 is the Barge's ponderous swing. A chain re-aim has ~0.35s to
+            // come round after overshooting, so the Berserker needs more.
+            tf.rotation += d * config["ram_windup_turn"].get_or(6.0f) * dt;
             b2Body_SetTransform(bodyId, b2Body_GetPosition(bodyId),
                 b2MakeRot(tf.rotation * 3.14159f / 180.f));
 
@@ -693,10 +767,23 @@ private:
             }
 
             if (ec.ramTimer <= 0.f) {
-                ec.ramState = RamState::Recover;
-                ec.ramDuration = config["ram_recover"].get_or(1.9f);
-                ec.ramTimer = ec.ramDuration;
-                ec.ramCooldown = config["ram_cooldown"].get_or(15.f);
+                if (ec.ramChainLeft > 0 && ai.currentState == EnemyState::COMBAT) {
+                    // Next link: re-aim at where the player is NOW. Shorter
+                    // windup than the opener, but the same glow and lane --
+                    // every link is still announced.
+                    --ec.ramChainLeft;
+                    ec.ramState = RamState::Windup;
+                    ec.ramDuration = config["ram_chain_windup"].get_or(0.35f);
+                    ec.ramTimer = ec.ramDuration;
+                    ec.ramGlow = 0.f;
+                }
+                else {
+                    ec.ramChainLeft = 0;
+                    ec.ramState = RamState::Recover;
+                    ec.ramDuration = config["ram_recover"].get_or(1.9f);
+                    ec.ramTimer = ec.ramDuration;
+                    ec.ramCooldown = config["ram_cooldown"].get_or(15.f);
+                }
             }
             return true;
         }
@@ -722,8 +809,8 @@ private:
     }
 
     void clearAsteroidsInPath(size_t self, sf::Vector2f pos, sol::table& config) {
-        const float reach = 78.f;
-        (void)config; // ram_damage is used by DamageSystem's collision path
+        // 78 was sized for the Barge's beam. Per-unit now.
+        const float reach = config["ram_clear_reach"].get_or(78.f);
 
         for (size_t j = 0; j < m_em->physics.size(); ++j) {
             if (j == self) continue;
@@ -760,6 +847,195 @@ private:
         b2Body_SetTransform(bodyId, b2Body_GetPosition(bodyId),
             b2MakeRot(tf.rotation * 3.14159f / 180.f));
         b2Body_SetAngularVelocity(bodyId, 0.f);
+    }
+
+    // ========================================================================
+    // BASH — the parriable melee lunge
+    // ========================================================================
+    //
+    // Windup -> Lunge -> Recover. The inverse of the ram in every respect the
+    // player can see:
+    //
+    //                 RAM (dodge it)            BASH (parry it)
+    //   range         long-mid, lane line       point-blank, crescent at prow
+    //   tell colour   amber                     cyan -- the parry's own colour
+    //   body          locks, glows white-hot    coils BACK, then snaps forward
+    //   parry         whiffs, you eat it        stuns + staggers the Berserker
+    //
+    // Aim tracks through the windup and locks at lunge start. That is honest:
+    // what you see at the last frame of the coil is the lane it strikes down.
+    // Stepping out of reach during the lunge makes it whiff -- parry is the
+    // reward answer, not the only one.
+    //
+    // Returns true while it owns the ship this frame.
+    bool updateBash(float dt, TransformComponent& tf, EnemyComponent& ec, AIState& ai,
+        b2BodyId bodyId, sol::table& config, const enemyarch::ArchetypeDef& adef,
+        float dist, sf::Vector2f toPlayerN)
+    {
+        switch (ec.bashState) {
+
+        case BashState::None: {
+            if (!config["bash_enabled"].get_or(false)) return false;
+            if (ec.bashCooldown > 0.f) return false;
+            if (ai.currentState != EnemyState::COMBAT) return false;
+            if (ec.ramState != RamState::None) return false;
+            if (dist > config["bash_trigger_range"].get_or(150.f)) return false;
+
+            ec.bashState = BashState::Windup;
+            ec.bashDuration = config["bash_windup"].get_or(0.38f);
+            ec.bashTimer = ec.bashDuration;
+            ec.bashDir = toPlayerN;
+            ec.bashConnected = false;
+            ec.bashStrikePending = false;
+
+            // Drop anything that would compete for the ship or the read.
+            ec.telegraphActive = false;
+            ec.telegraphTimer = 0.f;
+            ai.dodgeBurstTimer = 0.f;
+            ai.flinchTimer = 0.f;
+            return true;
+        }
+
+        case BashState::Windup: {
+            ec.bashTimer -= dt;
+            const float u = std::clamp(1.f - ec.bashTimer / std::max(0.01f, ec.bashDuration), 0.f, 1.f);
+
+            ec.bashDir = toPlayerN;
+            turnToward(tf, bodyId, toPlayerN, config["bash_turn_rate"].get_or(12.f), dt);
+
+            // Coil: bleed off approach speed and ease BACKWARDS. Anticipation
+            // is the oldest melee tell there is -- a fist goes back before it
+            // goes forward.
+            {
+                const float coil = config["bash_coil_speed"].get_or(70.f) * std::sin(u * 1.5708f);
+                const float k = 1.f - std::exp(-12.f * dt);
+                const b2Vec2 v = b2Body_GetLinearVelocity(bodyId);
+                const b2Vec2 target = { -toPlayerN.x * coil / SCALE, -toPlayerN.y * coil / SCALE };
+                b2Body_SetLinearVelocity(bodyId, { v.x + (target.x - v.x) * k,
+                                                   v.y + (target.y - v.y) * k });
+                b2Body_SetAngularVelocity(bodyId, 0.f);
+            }
+
+            // Squash toward the tail: the hull visibly loads up.
+            const float e = u * u * (3.f - 2.f * u);
+            tf.visualPivot = { 0.f, adef.radius * 0.45f };
+            tf.visualScale.y *= 1.f - 0.17f * e;
+            tf.visualScale.x *= 1.f + 0.08f * e;
+
+            // Late sparks off the prow, in the tell colour.
+            if (u > 0.45f && (rand() % 100) < 40) {
+                const float r = tf.rotation * 3.14159f / 180.f;
+                const sf::Vector2f fwd(std::sin(r), -std::cos(r));
+                const sf::Vector2f rgt(std::cos(r), std::sin(r));
+                const float side = ((rand() % 200) - 100) / 100.f;
+                const sf::Vector2f at = tf.position + fwd * (adef.radius * 0.85f)
+                    + rgt * (side * adef.radius * 0.45f);
+                m_em->particles.push_back({
+                    m_em->nextEntityId++, at,
+                    fwd * (60.f + rand() % 80) + rgt * (side * 50.f),
+                    sf::Color(140, 255, 235, 230),
+                    0.18f, 0.20f, 2.f + rand() % 2 });
+            }
+
+            if (ec.bashTimer <= 0.f) {
+                ec.bashState = BashState::Lunge;
+                ec.bashDuration = config["bash_lunge_time"].get_or(0.16f);
+                ec.bashTimer = ec.bashDuration;
+                ec.bashDir = toPlayerN;                 // LOCKED from here
+                lockHeading(tf, bodyId, ec.bashDir);
+
+                const float spd = config["bash_lunge_speed"].get_or(950.f);
+                b2Body_SetLinearVelocity(bodyId,
+                    { ec.bashDir.x * spd / SCALE, ec.bashDir.y * spd / SCALE });
+
+                m_em->spawnShockRing(tf.position - ec.bashDir * (adef.radius * 0.5f),
+                    6.f, 60.f, 0.16f, sf::Color(200, 255, 245), 3.f, 200.f);
+            }
+            return true;
+        }
+
+        case BashState::Lunge: {
+            ec.bashTimer -= dt;
+
+            lockHeading(tf, bodyId, ec.bashDir);
+            const float spd = config["bash_lunge_speed"].get_or(950.f);
+            b2Body_SetLinearVelocity(bodyId,
+                { ec.bashDir.x * spd / SCALE, ec.bashDir.y * spd / SCALE });
+
+            tf.visualPivot = { 0.f, adef.radius * 0.45f };
+            tf.visualScale.y *= 1.16f;
+            tf.visualScale.x *= 0.92f;
+
+            // ---- Strike: once, on reach, inside the lunge arc ----
+            const float reach = config["bash_reach"].get_or(90.f);
+            const float arcCos = config["bash_arc_cos"].get_or(0.30f);
+            const float facing = toPlayerN.x * ec.bashDir.x + toPlayerN.y * ec.bashDir.y;
+
+            if (!ec.bashConnected && dist <= reach && facing >= arcCos) {
+                ec.bashConnected = true;
+                ec.bashStrikePending = true;     // DamageSystem resolves next frame
+
+                // Recoil off the impact. Without it the hull keeps pushing
+                // into the player and Box2D shoves them around after the hit
+                // already threw them -- two knockbacks that disagree.
+                const float recoil = config["bash_recoil"].get_or(160.f);
+                b2Body_SetLinearVelocity(bodyId,
+                    { -ec.bashDir.x * recoil / SCALE, -ec.bashDir.y * recoil / SCALE });
+
+                ec.bashState = BashState::Recover;
+                ec.bashDuration = config["bash_recover"].get_or(0.35f);
+                ec.bashTimer = ec.bashDuration;
+                return true;
+            }
+
+            if (ec.bashTimer <= 0.f) {
+                // Whiff: longer recovery. Getting out of reach should pay.
+                ec.bashState = BashState::Recover;
+                ec.bashDuration = config["bash_whiff_recover"].get_or(0.60f);
+                ec.bashTimer = ec.bashDuration;
+            }
+            return true;
+        }
+
+        case BashState::Recover: {
+            ec.bashTimer -= dt;
+            const float u = std::clamp(ec.bashTimer / std::max(0.01f, ec.bashDuration), 0.f, 1.f);
+
+            const b2Vec2 v = b2Body_GetLinearVelocity(bodyId);
+            const float brake = std::exp(-5.f * dt);
+            b2Body_SetLinearVelocity(bodyId, { v.x * brake, v.y * brake });
+            b2Body_SetAngularVelocity(bodyId, 0.f);
+
+            tf.visualOffsetAngle += 7.f * u * std::sin(ec.bashTimer * 24.f);
+            tf.visualPivot = { 0.f, -18.f };
+
+            if (ec.bashTimer <= 0.f) {
+                ec.bashState = BashState::None;
+                // DamageSystem may already have set a LONGER cooldown on a
+                // connect; never shorten it.
+                ec.bashCooldown = std::max(ec.bashCooldown,
+                    config["bash_cooldown"].get_or(1.1f) + (rand() % 40) / 100.f);
+            }
+            return true;
+        }
+        }
+        return false;
+    }
+
+    /// Rotate the hull toward a direction at `rate` (1/s, exponential).
+    void turnToward(TransformComponent& tf, b2BodyId bodyId, sf::Vector2f dir,
+        float rate, float dt) {
+        const float target = std::atan2(dir.y, dir.x) * 180.f / 3.14159f + 90.f;
+        float d = target - tf.rotation;
+        while (d > 180.f) d -= 360.f;
+        while (d < -180.f) d += 360.f;
+        tf.rotation += d * std::min(1.f, rate * dt);
+        b2Body_SetTransform(bodyId, b2Body_GetPosition(bodyId),
+            b2MakeRot(tf.rotation * 3.14159f / 180.f));
+    }
+
+    static bool isMelee(const sol::table& config) {
+        return config["maneuver_profile"].get_or<std::string>("standard") == "melee";
     }
 
     // ========================================================================

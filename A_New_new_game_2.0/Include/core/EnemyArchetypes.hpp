@@ -46,7 +46,7 @@
  * fan sees straight through the gap. Ear clipping produces the real polygon.
  *
  * @author Oleg Ivakhiv
- * @version 1.0
+ * @version 1.1 -- scars (decals) and per-unit exhaust
  */
 
 #pragma once
@@ -330,6 +330,31 @@ namespace enemyarch {
         std::vector<sf::Vector2f> physics;     ///< Convex, <= 8 points, for Box2D
         std::vector<sf::Vector2f> turrets;     ///< Local-space turret mount points
 
+        /// Surface decals (scars, weld seams, kill tallies) as flat SEGMENT
+        /// pairs: [a0,b0, a1,b1, ...]. Authored as polylines in Lua, flattened
+        /// here so RenderSystem never walks nested tables at draw time.
+        /// Drawn inside the hull transform, so they bank and squash with it.
+        std::vector<sf::Vector2f> decalSegs;
+
+        /// Engine nozzle mounts, local space. Empty in Lua means the legacy
+        /// single nozzle at (0, 22) -- which is exactly where EffectsSystem
+        /// used to hardcode it, so units that do not set `thrusters` are
+        /// unchanged.
+        std::vector<sf::Vector2f> thrusters;
+
+        /// Exhaust style, cached here rather than read through sol2 once per
+        /// enemy per frame. First step on the deferred "cache Lua reads into
+        /// C++" debt, limited to the new fields so nothing old moves.
+        struct Exhaust {
+            float     rate = 0.5f;        ///< Per-nozzle spawn chance per frame
+            float     speed = 80.f;       ///< Base particle speed, px/s
+            float     size = 2.f;
+            float     life = 0.10f;
+            sf::Color color{ 227, 60, 0, 180 };
+            bool      legacyColor = true; ///< Keep the old per-particle r/g jitter
+            float     glow = 0.f;         ///< Hull-mounted flame length. 0 = off.
+        } exhaust;
+
         sf::Color color{ 255, 50, 50 };
 
         // ---- Spawn director data ----
@@ -467,21 +492,44 @@ namespace enemyarch {
             return v;
         }
 
-        static std::vector<sf::Vector2f> readPoints(const sol::table& t, const char* field) {
+        /// Parse `{ {x,y}, {x=..,y=..}, ... }`. Accepts both forms so hull
+        /// points can be pasted straight from a shape editor.
+        static std::vector<sf::Vector2f> parsePointArray(const sol::table& arr) {
             std::vector<sf::Vector2f> out;
-            sol::object o = t[field];
-            if (!o.valid() || !o.is<sol::table>()) return out;
-
-            sol::table arr = o.as<sol::table>();
             for (size_t i = 1; i <= arr.size(); ++i) {
                 sol::object p = arr[i];
                 if (!p.valid() || !p.is<sol::table>()) continue;
                 sol::table pt = p.as<sol::table>();
-                // Accepts both {x=..,y=..} and {.., ..} so hull points can be
-                // pasted straight from a shape editor.
                 const float x = pt["x"].valid() ? pt["x"].get_or(0.f) : pt[1].get_or(0.f);
                 const float y = pt["y"].valid() ? pt["y"].get_or(0.f) : pt[2].get_or(0.f);
                 out.push_back({ x, y });
+            }
+            return out;
+        }
+
+        static std::vector<sf::Vector2f> readPoints(const sol::table& t, const char* field) {
+            sol::object o = t[field];
+            if (!o.valid() || !o.is<sol::table>()) return {};
+            return parsePointArray(o.as<sol::table>());
+        }
+
+        /// `field = { { {x,y}, {x,y}, ... }, { ... } }` -> flat segment pairs.
+        static std::vector<sf::Vector2f> readPolylineSegs(const sol::table& t, const char* field,
+            float scale) {
+            std::vector<sf::Vector2f> out;
+            sol::object o = t[field];
+            if (!o.valid() || !o.is<sol::table>()) return out;
+
+            sol::table lines = o.as<sol::table>();
+            for (size_t li = 1; li <= lines.size(); ++li) {
+                sol::object lo = lines[li];
+                if (!lo.valid() || !lo.is<sol::table>()) continue;
+
+                const std::vector<sf::Vector2f> pts = parsePointArray(lo.as<sol::table>());
+                for (size_t k = 0; k + 1 < pts.size(); ++k) {
+                    out.push_back(pts[k] * scale);
+                    out.push_back(pts[k + 1] * scale);
+                }
             }
             return out;
         }
@@ -537,6 +585,31 @@ namespace enemyarch {
             d.turrets = readPoints(t, "turrets");
             for (auto& v : d.turrets) { v.x *= scale; v.y *= scale; }
 
+            // ---- Decals ----
+            d.decalSegs = readPolylineSegs(t, "scars", scale);
+
+            // ---- Exhaust ----
+            d.thrusters = readPoints(t, "thrusters");
+            if (d.thrusters.empty()) d.thrusters.push_back({ 0.f, 22.f });
+            else for (auto& v : d.thrusters) { v.x *= scale; v.y *= scale; }
+
+            d.exhaust.rate = t["thruster_rate"].get_or(0.5f);
+            d.exhaust.speed = t["thruster_speed"].get_or(80.f);
+            d.exhaust.size = t["thruster_size"].get_or(2.f);
+            d.exhaust.life = t["thruster_life"].get_or(0.10f);
+            d.exhaust.glow = t["thruster_glow"].get_or(0.f);
+
+            sol::object tc = t["thruster_color"];
+            if (tc.valid() && tc.is<sol::table>()) {
+                sol::table ct = tc.as<sol::table>();
+                d.exhaust.color = sf::Color(
+                    static_cast<uint8_t>(std::clamp(ct["r"].get_or(255.f), 0.f, 255.f)),
+                    static_cast<uint8_t>(std::clamp(ct["g"].get_or(120.f), 0.f, 255.f)),
+                    static_cast<uint8_t>(std::clamp(ct["b"].get_or(40.f), 0.f, 255.f)),
+                    static_cast<uint8_t>(std::clamp(ct["a"].get_or(200.f), 0.f, 255.f)));
+                d.exhaust.legacyColor = false;
+            }
+
             float r2 = 0.f;
             for (const auto& v : d.visual) r2 = std::max(r2, v.x * v.x + v.y * v.y);
             d.radius = std::sqrt(r2);
@@ -556,6 +629,8 @@ namespace enemyarch {
                 << "  physics=" << d.physics.size() << "pts"
                 << "  hitbox/silhouette=" << ratio
                 << "  turrets=" << d.turrets.size()
+                << "  scars=" << (d.decalSegs.size() / 2)
+                << "  nozzles=" << d.thrusters.size()
                 << "  r=" << d.radius << "\n";
 
             return d;

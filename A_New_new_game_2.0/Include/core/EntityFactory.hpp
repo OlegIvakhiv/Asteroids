@@ -685,6 +685,7 @@ public:
         bc.isEnemyBullet = true;
         bc.ownerEntityId = ownerEntityId;
         bc.damage = damage;
+        bc.playerIframes = cfg["bullet_iframes"].get_or(0.8f);   // 0.8 == old hardcode
         em.bullets.push_back(bc);
 
         em.healths.push_back({ entityId });

@@ -1,4 +1,4 @@
-/**
+ï»¿/**
  * @file EffectsSystem.hpp
  * @brief Visual effects system for thrusters, dash bursts, and parry sparks
  *
@@ -12,7 +12,7 @@
  * rendered by the ParticleSystem.
  *
  * @author Oleg Ivakhiv
- * @version 1.1 (refactored)
+ * @version 1.2 (per-archetype exhaust)
  */
 
 #pragma once
@@ -20,14 +20,16 @@
 #include "ISystem.hpp"
 #include "core/EntityManager.hpp"
 #include "utils/GameConfig.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <vector>
 
  /**
   * @class EffectsSystem
   * @brief Spawns visual particle effects for ships and actions
   *
-  * This system does not render particles directly – it only creates
+  * This system does not render particles directly ï¿½ it only creates
   * new particle entries in the EntityManager. The actual rendering
   * is handled by ParticleSystem.
   *
@@ -49,6 +51,7 @@ public:
     void init(const SystemContext& ctx) override {
         m_em = ctx.em;
         m_playerEntityId = ctx.playerEntityId;
+        m_registry = ctx.enemyRegistry;
         m_lastDashCooldown = 0.f;
     }
 
@@ -182,36 +185,81 @@ public:
             }
 
             // ---- ENEMY THRUSTER ----
+            // Nozzles and style come from the archetype (cached at load, no
+            // Lua per frame). A unit that sets none of the thruster_* fields
+            // gets exactly the old behaviour: one nozzle 22px aft, 50% per
+            // frame, red-orange jitter.
             else if (ud->type == BodyType::Enemy) {
                 if (speed < 0.5f) continue;  // not moving, no exhaust
 
                 auto& tf = m_em->transforms[i];
+                const auto& ec = m_em->enemies[i];
                 float rot = tf.rotation * 3.14159f / 180.f;
                 sf::Vector2f forward(std::sin(rot), -std::cos(rot));
+                sf::Vector2f right(std::cos(rot), std::sin(rot));
 
-                // Single rear exhaust point
-                sf::Vector2f nozzle = tf.position - forward * 22.f;
+                static const std::vector<sf::Vector2f> kLegacyNozzle{ { 0.f, 22.f } };
+                static const enemyarch::ArchetypeDef::Exhaust kLegacyStyle{};
 
-                if (rand() % 2 == 0) {  // 50% chance per frame — subtle
-                    float spread = ((rand() % 50) - 25) * 3.14159f / 180.f;
-                    sf::Vector2f dir = -forward;
-                    sf::Vector2f pVel = {
-                        (dir.x * std::cos(spread) - dir.y * std::sin(spread)) * (80.f + rand() % 60),
-                        (dir.x * std::sin(spread) + dir.y * std::cos(spread)) * (80.f + rand() % 60)
-                    };
+                const enemyarch::ArchetypeDef* adef =
+                    m_registry ? &m_registry->resolve(ec.archetype) : nullptr;
+                const auto& nozzles = adef ? adef->thrusters : kLegacyNozzle;
+                const auto& ex = adef ? adef->exhaust : kLegacyStyle;
 
-                    // Red-orange exhaust to match enemy color
-                    int rVar = 200 + rand() % 55;
-                    int gVar = 40 + rand() % 40;
-                    m_em->particles.push_back({
-                        m_em->nextEntityId++,
-                        nozzle,
-                        pVel,
-                        sf::Color(rVar, gVar, 0, 180),
-                        0.1f + (rand() % 8) / 100.f,
-                        0.15f,
-                        2.f + (rand() % 2)
-                        });
+                // Units that opt into a hull flame (glow > 0) also get their
+                // exhaust driven by what they are DOING: roaring through a
+                // charge or lunge, choked off while a bash coils. For those
+                // units the engine is part of the telegraph.
+                float boost = 1.f;
+                if (ex.glow > 0.f) {
+                    if (ec.ramState == RamState::Charge || ec.bashState == BashState::Lunge)
+                        boost = 2.4f;
+                    else if (ec.bashState == BashState::Windup)
+                        boost = 0.3f;
+                }
+
+                for (const auto& local : nozzles) {
+                    const sf::Vector2f nozzle = tf.position + right * local.x - forward * local.y;
+
+                    for (float want = ex.rate * boost; want > 0.f; want -= 1.f) {
+                        if (want < 1.f && (rand() % 1000) >= static_cast<int>(want * 1000.f))
+                            break;
+
+                        float spread = ((rand() % 50) - 25) * 3.14159f / 180.f;
+                        sf::Vector2f dir = -forward;
+                        const float sp = ex.speed + rand() % std::max(1, static_cast<int>(ex.speed * 0.75f));
+                        sf::Vector2f pVel = {
+                            (dir.x * std::cos(spread) - dir.y * std::sin(spread)) * sp,
+                            (dir.x * std::sin(spread) + dir.y * std::cos(spread)) * sp
+                        };
+
+                        sf::Color col;
+                        float maxLife;
+                        const float life = ex.life + (rand() % 8) / 100.f;
+                        if (ex.legacyColor) {
+                            // Red-orange exhaust to match enemy color
+                            col = sf::Color(200 + rand() % 55, 40 + rand() % 40, 0, 180);
+                            maxLife = 0.15f;   // the old constant; keeps the old fade
+                        }
+                        else {
+                            const int j = (rand() % 40) - 20;
+                            col = sf::Color(ex.color.r,
+                                static_cast<uint8_t>(std::clamp(ex.color.g + j, 0, 255)),
+                                static_cast<uint8_t>(std::clamp(ex.color.b + j, 0, 255)),
+                                ex.color.a);
+                            maxLife = life;
+                        }
+
+                        m_em->particles.push_back({
+                            m_em->nextEntityId++,
+                            nozzle,
+                            pVel,
+                            col,
+                            life,
+                            maxLife,
+                            ex.size + (rand() % 2)
+                            });
+                    }
                 }
             }
         }
@@ -221,6 +269,7 @@ private:
     // ---- System dependencies (set via init) ----
     EntityManager* m_em = nullptr;
     uint32_t m_playerEntityId = 0;
+    const enemyarch::EnemyRegistry* m_registry = nullptr;
 
     // ---- Persistent state for dash detection ----
     float m_lastDashCooldown = 0.f;   ///< Previous frame's dash cooldown value

@@ -179,6 +179,12 @@ struct BulletComponent {
     float knockback = 0.f;
     float stunOnHit = 0.f;
 
+    // i-frames granted to the PLAYER when an enemy round lands. Per bullet so a
+    // high-rate spray can use short ones: at a flat 0.8s, a unit firing every
+    // 0.25s can land at most one round in three, and -- worse -- each graze
+    // hands the player 0.8s of immunity against that same unit's melee.
+    float playerIframes = 0.8f;
+
     // ---- Homing (used by reflected shots) ----
     uint32_t homingTargetEntityId = 0;  // 0 = flies straight, no target
     float    homingTurnRate = 0.f;      // Degrees/sec of steering
@@ -347,6 +353,18 @@ enum class RamState : uint8_t {
     Recover     // Vulnerable. Longer than the charge, on purpose.
 };
 
+// A committed melee lunge. Deliberately the mirror image of RamState: same
+// three beats, opposite contract. The ram cannot be parried and must be
+// dodged; the bash is the one attack in the roster that is MEANT to be
+// parried. Keeping them as separate machines (rather than a flag on the ram)
+// is what lets the two tells never share a frame of visuals.
+enum class BashState : uint8_t {
+    None = 0,
+    Windup,     // Coil back, cyan crescent grows. The read: "parry this".
+    Lunge,      // Short burst forward. Strike resolves on reach, once.
+    Recover     // Short. Longer if it whiffed.
+};
+
 struct EnemyComponent {
     uint32_t entityId = 0;
 
@@ -419,13 +437,29 @@ struct EnemyComponent {
     float        ramCooldown = 0.f;
     sf::Vector2f ramDir;
     float        ramGlow = 0.f;          // 0..1, drives the wind-up tell
+    int          ramChainLeft = 0;       // Extra charges queued after this one.
+    // Zeroed by DamageSystem when a charge
+    // connects: a chain that lands stops.
 
-    // ---- Ram trail ----
+// ---- Ram trail ----
     static constexpr int RAM_TRAIL_MAX = 16;
     sf::Vector2f ramTrail[RAM_TRAIL_MAX];
     int   ramTrailCount = 0;      // Valid samples, newest at index 0
     float ramTrailTimer = 0.f;    // Sample cadence
     float ramTrailFade = 0.f;    // 1 while charging, decays to 0 after
+
+    // ---- Bash (parriable melee) ----
+    // AISystem runs the state machine and raises bashStrikePending on the one
+    // frame the lunge reaches the player. DamageSystem consumes it next frame
+    // and decides parry vs. hit using the SAME code path as a contact parry,
+    // so there is exactly one definition of "what a parried ship does".
+    BashState    bashState = BashState::None;
+    float        bashTimer = 0.f;
+    float        bashDuration = 0.f;
+    float        bashCooldown = 0.f;
+    sf::Vector2f bashDir;                 // Locked at lunge start
+    bool         bashStrikePending = false;
+    bool         bashConnected = false;   // Strike resolved this lunge (hit OR parried)
 
     // ---- Visual feedback ----
     float hitFlashTimer = 0.f;          // White flash when damaged
