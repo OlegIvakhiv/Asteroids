@@ -66,6 +66,23 @@
  * 12. MANOEUVRE PROFILES: `maneuver_profile = "melee"` never strafes, never
  *     falls back, and never flinches away from a hit. It closes or it lunges.
  *
+ * 13. WOLF CIRCLE (Maneuver::CIRCLE). A melee unit runs straight in until it
+ *     reaches melee_circle_range, then switches to a hard tangential orbit
+ *     with a steady inward bite -- it keeps closing, but on a spiral instead
+ *     of a line. The orbit direction is chosen to CUT THE PLAYER OFF (it
+ *     matches the player's lateral drift), so it reads as picking a side
+ *     rather than as a coin flip.
+ *
+ * 14. ATTACK EXCLUSIVITY. Two fixes for melee units firing and swinging at
+ *     once, which asked the player to dodge a bullet and parry a lunge in the
+ *     same beat:
+ *       - `hold_fire_range`: inside it the gun is dead. One threat at a time.
+ *       - `melee_shot_clear`: no melee commit until this long after the last
+ *         round was fired, so rounds already in flight have resolved.
+ *
+ * 15. BURST FIRE (`burst_count` / `burst_pause`): a series, then a real pause
+ *     with a visible sway. Both default to off.
+ *
  * State split: this system owns AIState (decisions). Presentation and impact
  * state live on EnemyComponent so DamageSystem and RenderSystem can reach them.
  *
@@ -106,6 +123,7 @@ public:
         const sf::Vector2f playerPos = m_em->transforms[playerIdx].position;
         const b2Vec2 pvb = b2Body_GetLinearVelocity(m_em->physics[playerIdx].bodyId);
         const sf::Vector2f playerVel(pvb.x * SCALE, pvb.y * SCALE);
+        m_playerVel = playerVel;   // pickManeuver needs it to choose a side
 
         updateHomingAsteroids(dt);
 
@@ -270,7 +288,15 @@ public:
             updateShooting(dt, i, tf, ec, ai, entityId, playerPos, playerVel,
                 distToPlayer, config);
 
-            opportunisticAsteroidShot(dt, i, tf, ec, entityId, bodyId, config);
+            // Hold fire covers this too. A rock cleared out of the way at
+            // point-blank still puts a bullet on screen next to a bash tell,
+            // and the player cannot tell from the muzzle flash who it was
+            // aimed at.
+            {
+                const float hf = config["hold_fire_range"].get_or(0.f);
+                if (!(hf > 0.f && distToPlayer < hf))
+                    opportunisticAsteroidShot(dt, i, tf, ec, entityId, bodyId, config);
+            }
 
             // ================================================================
             // ROTATION + IDLE ANIMATION
@@ -329,6 +355,8 @@ private:
         if (ec.hitFlashTimer > 0.f) ec.hitFlashTimer = std::max(0.f, ec.hitFlashTimer - dt);
         if (ec.dodgeFlashTimer > 0.f) ec.dodgeFlashTimer = std::max(0.f, ec.dodgeFlashTimer - dt);
         if (ec.bashCooldown > 0.f) ec.bashCooldown = std::max(0.f, ec.bashCooldown - dt);
+        if (ec.shotPauseTimer > 0.f) ec.shotPauseTimer = std::max(0.f, ec.shotPauseTimer - dt);
+        if (ec.shotClearTimer > 0.f) ec.shotClearTimer = std::max(0.f, ec.shotClearTimer - dt);
 
         // Trail outlives the charge by design; this must keep running in every
         // state or the wake freezes on screen when the ram ends.
@@ -526,7 +554,7 @@ private:
         ai.maneuverTimer -= 0.15f;
 
         if (ai.maneuverTimer <= 0.f) {
-            pickManeuver(ai, ec, dist, config);
+            pickManeuver(ai, ec, dist, toPlayerN, config);
         }
 
         const sf::Vector2f perp(-toPlayerN.y, toPlayerN.x);
@@ -570,6 +598,17 @@ private:
             return dir * (maxSpeed * 11.f);
         }
 
+        case Maneuver::CIRCLE: {
+            // Tangential first, with a constant inward bite so the orbit is a
+            // spiral rather than a stable ring. A pure circle would hold
+            // range forever -- this one always ends at bash distance.
+            const float inward = config["melee_circle_inward"].get_or(0.26f);
+            sf::Vector2f dir = perp * ai.strafeDir + toPlayerN * inward + noise * 0.5f;
+            const float l = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+            if (l > 0.01f) dir /= l;
+            return dir * (maxSpeed * (11.f + ai.aggression * 7.f));
+        }
+
         case Maneuver::STRAFE:
         default: {
             const float err = (dist - band) / std::max(1.f, band);
@@ -583,7 +622,8 @@ private:
         }
     }
 
-    void pickManeuver(AIState& ai, EnemyComponent& ec, float dist, sol::table& config) {
+    void pickManeuver(AIState& ai, EnemyComponent& ec, float dist,
+        sf::Vector2f toPlayerN, sol::table& config) {
         // ---- Naval units: hold the circle, no lunges or retreats ----
         if (config["facing_mode"].get_or<std::string>("target") == "velocity") {
             ai.maneuver = (rand() % 100 < 80) ? Maneuver::STRAFE : Maneuver::REPOSITION;
@@ -592,27 +632,52 @@ private:
             return;
         }
 
-        // ---- Melee units: close, or close faster. Nothing else. ----
+        // ---- Melee units: run it down, then circle it. ----
+        //
+        //   beyond melee_circle_range : straight in (ATTACK_RUN / APPROACH)
+        //   inside it                 : CIRCLE, with occasional hard APPROACH
+        //
         // No STRAFE (that is a Raider holding a band), no FALLBACK (no retreat
-        // instinct), no hit-flinch. Inside striking distance it only APPROACHes:
-        // the perp term in APPROACH makes it circle tight at your throat, and
-        // the BASH state owns the actual hit. ATTACK_RUN at point-blank would
-        // just body-slam for generic contact damage with no tell -- exactly
-        // the untelegraphed hurt this unit exists to avoid.
+        // instinct), no hit-flinch. The BASH state owns the actual strike;
+        // ATTACK_RUN at point-blank would just body-slam for generic contact
+        // damage with no tell -- exactly the untelegraphed hurt this unit
+        // exists to avoid.
         if (isMelee(config)) {
+            const float circleR = config["melee_circle_range"].get_or(320.f);
             const int r = rand() % 100;
-            const float close = config["bash_trigger_range"].get_or(150.f) * 1.6f;
 
-            if (dist > close) {
-                ai.maneuver = (r < 40 + static_cast<int>(ai.aggression * 45.f))
+            if (dist > circleR) {
+                ai.maneuver = (r < 45 + static_cast<int>(ai.aggression * 45.f))
                     ? Maneuver::ATTACK_RUN : Maneuver::APPROACH;
                 ai.maneuverTimer = 0.45f + (rand() % 45) / 100.f;
+
+                // Coming out of a straight run, pick the side to swing around
+                // from. Matching the player's lateral drift means cutting them
+                // off rather than chasing their tail -- the wolf move. Below
+                // the threshold (player barely moving sideways) it stays
+                // random, so two of them do not always pick the same side.
+                if (ai.maneuver == Maneuver::ATTACK_RUN) {
+                    const float lat = toPlayerN.x * m_playerVel.y -
+                        toPlayerN.y * m_playerVel.x;
+                    if (std::fabs(lat) > config["melee_cutoff_speed"].get_or(90.f))
+                        ai.strafeDir = (lat > 0.f) ? 1.f : -1.f;
+                    else if (rand() % 100 < 30)
+                        ai.strafeDir = -ai.strafeDir;
+                }
             }
             else {
-                ai.maneuver = Maneuver::APPROACH;
-                ai.maneuverTimer = 0.30f + (rand() % 30) / 100.f;
+                // Inside the ring. Mostly orbit; sometimes dive straight in so
+                // the circling never settles into a readable metronome.
+                ai.maneuver = (r < 72) ? Maneuver::CIRCLE : Maneuver::APPROACH;
+                ai.maneuverTimer = (ai.maneuver == Maneuver::CIRCLE)
+                    ? 0.6f + (rand() % 60) / 100.f
+                    : 0.3f + (rand() % 25) / 100.f;
+
+                // Reversing mid-orbit is the tell that keeps it from being a
+                // fixed carousel, but do it rarely: too often and the spiral
+                // never converges on bash range.
+                if (rand() % 100 < 14) ai.strafeDir = -ai.strafeDir;
             }
-            if (rand() % 100 < 25) ai.strafeDir = -ai.strafeDir;
             return;
         }
 
@@ -661,6 +726,7 @@ private:
             if (ec.ramCooldown > 0.f) return false;
             if (ai.currentState != EnemyState::COMBAT) return false;
             if (ec.bashState != BashState::None) return false;   // one commit at a time
+            if (ec.shotClearTimer > 0.f) return false;           // see updateBash
 
             // Barge: fires when you are too close OR too far.
             // Berserker: near = 0 (the bash owns close range) and a max, so it
@@ -880,6 +946,9 @@ private:
             if (ai.currentState != EnemyState::COMBAT) return false;
             if (ec.ramState != RamState::None) return false;
             if (dist > config["bash_trigger_range"].get_or(150.f)) return false;
+            // Own rounds still in the air: wait. A lunge arriving alongside
+            // its own bullets asks for a dodge and a parry in the same beat.
+            if (ec.shotClearTimer > 0.f) return false;
 
             ec.bashState = BashState::Windup;
             ec.bashDuration = config["bash_windup"].get_or(0.38f);
@@ -1305,17 +1374,41 @@ private:
         const float fireRate = config["fire_rate"].get_or(1.8f);
         const float telegraph = config["telegraph_time"].get_or(0.32f);
 
+        // ---- HOLD FIRE ----
+        // Inside this radius the gun is simply off. A melee unit that keeps
+        // spraying while it closes forces the player to dodge a bullet and
+        // parry a lunge on the same beat, and neither read survives that.
+        // One threat at a time is the whole point of the unit.
+        const float holdFire = config["hold_fire_range"].get_or(0.f);
+        if (holdFire > 0.f && dist < holdFire) {
+            ec.telegraphActive = false;
+            ec.telegraphTimer = 0.f;
+            ec.shotsInBurst = 0;
+            return;
+        }
+
         if (ec.telegraphActive) {
             ec.telegraphTimer -= dt;
             if (ec.telegraphTimer <= 0.f) {
                 ec.telegraphActive = false;
                 fireShot(i, tf, ec, entityId, ec.telegraphDir, config);
                 ec.fireTimer = fireRate + ((rand() % 40) - 20) / 100.f;
+                ec.shotClearTimer = config["melee_shot_clear"].get_or(0.f);
+
+                // ---- BURST ----
+                const int burst = config["burst_count"].get_or(0);
+                if (burst > 0 && ++ec.shotsInBurst >= burst) {
+                    ec.shotsInBurst = 0;
+                    ec.shotPauseTimer = config["burst_pause"].get_or(1.0f)
+                        * (0.85f + (rand() % 30) / 100.f);
+                    ec.fireTimer = ec.shotPauseTimer;
+                }
             }
             return;
         }
 
         if (ec.fireTimer > 0.f || dist > attackRange) return;
+        if (ec.shotPauseTimer > 0.f) return;
 
         const float bulletSpeed = config["bullet_speed"].get_or(550.f);
         const float travelTime = dist / bulletSpeed;
@@ -1680,6 +1773,13 @@ private:
             tf.visualPivot = { 0.f, -18.f };
         }
 
+        // Burst pause: a visible breather, so the gap in the fire reads as the
+        // unit recovering rather than as the AI losing interest.
+        if (ec.shotPauseTimer > 0.f) {
+            tf.visualOffsetAngle += 5.f * std::sin(ec.shotPauseTimer * 13.f);
+            tf.visualPivot = { 0.f, pivotY };
+        }
+
         // Telegraph
         if (ec.telegraphActive && ec.telegraphDuration > 0.f) {
             const float u = 1.f - (ec.telegraphTimer / ec.telegraphDuration);
@@ -1805,5 +1905,6 @@ private:
     const enemyarch::EnemyRegistry* m_registry = nullptr;
 
     float m_noiseTime = 0.f;
+    sf::Vector2f m_playerVel;            ///< This frame's player velocity, px/s
     std::unordered_map<uint32_t, AIState> m_aiCache;
 };

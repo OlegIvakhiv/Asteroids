@@ -31,7 +31,8 @@
 -- Plain data after load means what you read here is what the engine sees.
 --
 -- @author Oleg Ivakhiv
--- @version 2.2 -- Berserker; bash, ram chains, melee profile, scars, exhaust
+-- @version 2.3 -- Berserker pass 2: wolf circling, attack exclusivity,
+--                 burst fire, bigger hull
 -- ============================================================================
 
 
@@ -84,6 +85,17 @@ enemy_defaults = {
                                      -- from attack_range. A melee unit shoots
                                      -- from 400 but wants to live at 80.
 
+    -- ===== MELEE PROFILE (ignored unless maneuver_profile = "melee") =====
+    melee_circle_range   = 320.0,    -- Beyond this it runs straight in. Inside,
+                                     -- it orbits -- still closing, but on a
+                                     -- spiral instead of a line.
+    melee_circle_inward  = 0.26,     -- Inward bite per unit of tangential
+                                     -- travel. 0 would orbit forever; this
+                                     -- guarantees the spiral reaches bash range.
+    melee_cutoff_speed   = 90.0,     -- Player lateral speed above which the
+                                     -- orbit direction is chosen to CUT THEM
+                                     -- OFF rather than rolled at random.
+
     -- Hull facing. "target" points the nose at the player in COMBAT.
     -- "velocity" points the nose along the direction of travel and NEVER at
     -- the player -- naval broadside behaviour. See the Barge.
@@ -104,6 +116,16 @@ enemy_defaults = {
                                      -- from that same unit's melee.
     fire_rate            = 1.8,
     attack_range         = 480.0,
+    hold_fire_range      = 0.0,      -- >0: the gun is dead inside this radius.
+                                     -- One threat at a time -- a unit that
+                                     -- sprays while it closes makes the player
+                                     -- dodge a bullet and parry a lunge on the
+                                     -- same beat, and neither read survives it.
+    burst_count          = 0,        -- >0: fire this many, then pause. Fire
+    burst_pause          = 1.0,      -- with no rhythm has no gap to move into.
+    melee_shot_clear     = 0.0,      -- No bash or ram until this long after the
+                                     -- last round left the barrel, so rounds
+                                     -- already in flight have resolved first.
     aim_spread           = 18.0,
     telegraph_time       = 0.30,
 
@@ -605,25 +627,43 @@ enemy_archetypes.BERSERKER = derive {
     -- flame emerges through the tail notch rather than starting in space.
     thrusters = { { 9, 5 }, { -9, 5 } },
 
-    scale                = 1.0,
+    scale                = 1.18,   -- +18%. At 1.0 it read as a Raider from
+                                   -- across the arena; radius 44 -> 52 against
+                                   -- the Raider's 29, so the silhouette is
+                                   -- unmistakable before the tells start.
     hitbox_scale         = 0.9,
 
     -- ===== MASS AND TOUGHNESS =====
     -- ~9kg against the Raider's ~5 and the Barge's ~93: the midpoint.
+    -- Area grew ~39% with the scale, so mass goes 7.2kg -> 12.6kg at this
+    -- density. Engine power below is raised to pay for it: the steering
+    -- controller is mass-dependent, so a bigger hull on the old 420 would
+    -- have accelerated ~40% worse -- the opposite of what this pass wants.
     density              = 5.0,
-    hp                   = 400.0,
+    hp                   = 440.0,  -- Bigger target, slightly more to chew
     score_reward         = 900,
     stagger_resist       = 0.25,   -- Harder to knock around than a Raider...
     stun_resist          = 0.10,   -- ...but a parried bash still SHUTS IT DOWN.
                                    -- Keep this low: the stun is the reward.
 
     -- ===== MOVEMENT =====
-    engine_power         = 420.0,  -- ~1.2x Raider acceleration at ~1.7x the mass
-    max_speed            = 24.0,   -- ATTACK_RUN ~520 px/s, APPROACH ~330
-    rotation_speed       = 6.0,
-    angulardrag_factor   = 3.0,
-    maneuver_profile     = "melee",
-    preferred_range      = 80.0,
+    engine_power         = 700.0,  -- Pays for the mass AND the speed bump
+    max_speed            = 30.0,   -- ATTACK_RUN ~650 px/s, CIRCLE ~500.
+                                   -- A walking player cannot open the gap;
+                                   -- sprinting still can, which is the answer.
+    rotation_speed        = 7.0,
+    lineardrag_factor     = 0.85,  -- Less drag fighting the chase
+    angulardrag_factor    = 3.0,
+    maneuver_profile      = "melee",
+    preferred_range       = 80.0,
+
+    -- ===== WOLF CIRCLE =====
+    melee_circle_range   = 330.0,  -- Same radius as hold_fire_range on purpose:
+                                   -- the gun goes quiet at the exact moment
+                                   -- the orbit starts, so "it stopped shooting
+                                   -- and started circling" is one event.
+    melee_circle_inward  = 0.24,
+    melee_cutoff_speed   = 90.0,
     personality_variance = false,  -- Raiders alone get the personality roll
     fixed_aggression     = 0.95,
 
@@ -637,23 +677,38 @@ enemy_archetypes.BERSERKER = derive {
     fire_rate            = 0.24,
     telegraph_time       = 0.0,    -- Minimal telegraph: volume is the threat
     aim_spread           = 11.0,
-    attack_range         = 400.0,
+    attack_range         = 520.0,  -- Sprays across the 330..520 band while it
+                                   -- closes, and nowhere else.
     bullet_speed         = 620.0,
-    bullet_lifetime      = 0.9,    -- ~560px: close-mid only
+    bullet_lifetime      = 1.0,    -- ~620px
     bullet_damage        = 5.0,
     bullet_iframes       = 0.15,
+
+    -- Five rounds (~1.2s), then a real breather with a visible sway. This is
+    -- the "recovery after a series" -- continuous fire has no rhythm to learn.
+    burst_count          = 5,
+    burst_pause          = 1.05,
+
+    -- Gun off inside the orbit, and no melee commit until 0.55s after the last
+    -- round -- long enough for a shot fired at the hold-fire boundary (330px
+    -- at 620px/s = 0.53s) to have landed or missed before the lunge starts.
+    hold_fire_range      = 330.0,
+    melee_shot_clear     = 0.55,
 
     storm_enabled        = false,  -- The storm is a Raider/Maniac move
     chaos_dodge_chance   = 0.12,   -- No retreat instinct...
     bullet_dodge_chance  = 0.25,   -- ...and it would rather tank it
 
     -- ===== BASH =====
+    -- Triggers further out than the default 150 so the windup starts BEFORE
+    -- the player is already inside the hull, and the lunge is lengthened to
+    -- match (1150 * 0.19 = ~220px of travel) or it would whiff every time.
     bash_enabled         = true,
-    bash_trigger_range   = 150.0,
-    bash_windup          = 0.38,
-    bash_lunge_speed     = 950.0,
-    bash_lunge_time      = 0.16,
-    bash_reach           = 95.0,
+    bash_trigger_range   = 210.0,
+    bash_windup          = 0.40,
+    bash_lunge_speed     = 1150.0,
+    bash_lunge_time      = 0.19,
+    bash_reach           = 105.0,
     bash_damage          = 32.0,
     bash_knockback       = 950.0,
     bash_cooldown        = 1.1,
@@ -699,9 +754,9 @@ enemy_archetypes.BERSERKER = derive {
     -- to wire until the Bloodseeker exists.
 
     -- ===== SPAWN =====
-    spawn_weight         = 100.0,
+    spawn_weight         = 50.0,
     max_active           = 3,
-    threat_cost          = 1,      -- Three of them fill the 12 budget
+    threat_cost          = 4,      -- Three of them fill the 12 budget
 
     color = { r = 200, g = 70, b = 55 },
 }

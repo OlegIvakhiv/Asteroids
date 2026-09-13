@@ -332,7 +332,8 @@ enum class Maneuver {
     STRAFE,      // Hold range, slide sideways
     FALLBACK,    // Back off (usually after being hit)
     ATTACK_RUN,  // Fast committed pass straight at the player
-    REPOSITION   // Break off toward a random offset point
+    REPOSITION,  // Break off toward a random offset point
+    CIRCLE       // Wolf orbit: hard tangential with a steady inward bite
 };
 
 // Which icon pops above an enemy's head on a state change.
@@ -393,6 +394,17 @@ struct EnemyComponent {
     bool  telegraphActive = false;
     sf::Vector2f telegraphDir;          // Aim is locked at wind-up start, NOT at fire
     float asteroidShotTimer = 0.f;      // Separate cooldown for shooting rocks out of the way
+
+    // ---- Burst fire ----
+    // A unit with `burst_count` fires that many rounds, then takes a real
+    // pause. Without it a low fire_rate reads as a hose: continuous fire has
+    // no rhythm to learn and no gap to move into.
+    int   shotsInBurst = 0;
+    float shotPauseTimer = 0.f;         // >0 = between bursts (drives a visible sway)
+    float shotClearTimer = 0.f;         // Time since the last round left the barrel.
+    // Melee units will not commit until it
+    // expires, so a bash never lands on top
+    // of their own bullets.
     int   timesHit = 0;                 // Lifetime hit count (drives instant-aggro on 2nd hit)
 
     // ---- State indicator ("!" / "?") ----
