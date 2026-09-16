@@ -46,7 +46,14 @@ enum CollisionCategory {
     CATEGORY_ASTEROID = 0x0002,   ///< Asteroid obstacles
     CATEGORY_BULLET = 0x0004,   ///< Player projectiles
     CATEGORY_ENEMY = 0x0008,    ///< Enemy ships
-    CATEGORY_ENEMY_BULLET = 0x0010    // enemy bullets — separate so they don't hit each other
+    CATEGORY_ENEMY_BULLET = 0x0010,   // enemy bullets — separate so they don't hit each other
+
+    /// Rockets and mines. Ordinary enemy rounds pass through other enemies on
+    /// purpose (a squad would otherwise shred itself in a crossfire), but the
+    /// Maniac's ordnance is supposed to be a hazard to EVERYONE -- that is the
+    /// entire reason to redirect it. Giving it its own bit turns friendly fire
+    /// on for these two without changing how any other projectile behaves.
+    CATEGORY_ORDNANCE = 0x0020
 };
 
 /**

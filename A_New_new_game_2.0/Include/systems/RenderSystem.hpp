@@ -31,7 +31,7 @@
  * CHANGED in 1.7 — archetype scars, hull thruster flame, bash crescent tell.
  *
  * @author Oleg Ivakhiv
- * @version 1.7
+ * @version 1.8 -- frenzy corona and colour override
  */
 
 #pragma once
@@ -294,6 +294,37 @@ public:
                 // ---- Bash: the parry colour, on the hull itself ----
                 // Evaluated last so it always wins. A bash must never be
                 // mistaken for anything else, least of all the ram.
+                // ====================================================================
+                // FRENZY COLOUR (Maniac) — overrides the state colour entirely
+                // ====================================================================
+                // He is no longer in a combat state worth reading; he is a
+                // fuse. Ignite BLINKS (square wave, accelerating). Charge and
+                // Thrown PULSE (smooth, regular). Two beats for two meanings --
+                // "something broke" versus "this is counting down" -- carried
+                // on colour as well as on shape, so neither read depends on
+                // the other surviving a busy frame.
+                if (ec.frenzy > 0.f) {
+                    // One read, one channel: a red pulse that says "low HP and
+                    // committed". The earlier version strobed on one frequency
+                    // during Ignite and pulsed on another during Charge, which
+                    // just looked broken -- two beats competing to mean the
+                    // same thing.
+                    const float p = 0.45f + 0.55f *
+                        (0.5f + 0.5f * std::sin(m_enemyAnimTime * 11.f));
+                    const float w = std::clamp(ec.frenzy, 0.f, 1.f);
+                    const sf::Color hot(
+                        static_cast<uint8_t>(180 + 75 * p),
+                        static_cast<uint8_t>(20 + 30 * p),
+                        static_cast<uint8_t>(20 + 20 * p));
+                    fill = sf::Color(
+                        static_cast<uint8_t>(fill.r + (hot.r - fill.r) * w),
+                        static_cast<uint8_t>(fill.g + (hot.g - fill.g) * w),
+                        static_cast<uint8_t>(fill.b + (hot.b - fill.b) * w));
+                    outlineWidth = std::max(outlineWidth, 1.8f + 2.6f * w * p);
+                    outlineColor = sf::Color(255, 90, 60,
+                        static_cast<uint8_t>(140 + 100 * w * p));
+                }
+
                 float bashU = -1.f;   // <0 = no bash tell this frame
                 sf::Color bashCol(90, 255, 230);
                 if (ec.bashState == BashState::Windup || ec.bashState == BashState::Lunge) {
@@ -501,6 +532,11 @@ public:
                 }
 
                 // ====================================================================
+                // 3d-bis. FRENZY CORONA
+                // ====================================================================
+                if (ec.frenzy > 0.f) drawFrenzyCorona(tf, ec, adef);
+
+                // ====================================================================
                 // 3e. BASH CRESCENT (windup + lunge)
                 // ====================================================================
                 // Short and CURVED where the ram's tell is long and STRAIGHT;
@@ -610,8 +646,14 @@ private:
             const sf::Vector2f a = segs[k * 2], b = segs[k * 2 + 1];
             sf::Vector2f d = b - a;
             const float l = std::sqrt(d.x * d.x + d.y * d.y);
-            if (l < 1e-4f) continue;
-            const sf::Vector2f p(-d.y / l * h, d.x / l * h);
+
+            // A degenerate segment must still WRITE its six vertices. Skipping
+            // leaves them default-constructed at (0,0), which draws a sliver
+            // from the world origin to this hull -- a map-long streak from one
+            // bad data point.
+            const sf::Vector2f p = (l < 1e-4f)
+                ? sf::Vector2f(0.f, 0.f)
+                : sf::Vector2f(-d.y / l * h, d.x / l * h);
             va[k * 6 + 0] = sf::Vertex{ a - p, col };
             va[k * 6 + 1] = sf::Vertex{ a + p, col };
             va[k * 6 + 2] = sf::Vertex{ b + p, col };
@@ -639,7 +681,16 @@ private:
 
         float intent = 1.f;
         bool whiteHot = false;
-        if (ec.ramState == RamState::Charge || ec.bashState == BashState::Lunge) {
+        if (ec.frenzyState == FrenzyState::Charge ||
+            ec.frenzyState == FrenzyState::Thrown) {
+            // Wide open, pulsing with the heartbeat.
+            intent = 2.4f + 0.7f * std::sin(m_enemyAnimTime * 11.f);
+            whiteHot = true;
+        }
+        else if (ec.frenzyState == FrenzyState::Ignite) {
+            intent = 1.f + 1.8f * ec.frenzy; whiteHot = true;
+        }
+        else if (ec.ramState == RamState::Charge || ec.bashState == BashState::Lunge) {
             intent = 1.7f; whiteHot = true;
         }
         else if (ec.bashState == BashState::Windup || ec.ramState == RamState::Windup) {
@@ -669,6 +720,44 @@ private:
             va[k++] = sf::Vertex{ { o.x, o.y + len * 0.55f }, clear };
         }
         m_window->draw(va, states);
+    }
+
+    /**
+     * @brief Ragged corona around an ignited Maniac.
+     *
+     * Deliberately NOT a clean ring like the shock rings or the bash crescent:
+     * those mean "a system fired". This one is irregular and jittery per
+     * spoke, so it reads as the ship coming apart rather than as an attack
+     * being announced.
+     */
+    void drawFrenzyCorona(const TransformComponent& tf, const EnemyComponent& ec,
+        const enemyarch::ArchetypeDef& adef) {
+        const float w = std::clamp(ec.frenzy, 0.f, 1.f);
+        constexpr int SPOKES = 14;
+
+        sf::VertexArray va(sf::PrimitiveType::Triangles, SPOKES * 3);
+        for (int k = 0; k < SPOKES; ++k) {
+            const float base = (k / static_cast<float>(SPOKES)) * 6.28318f;
+            const float wob = std::sin(m_enemyAnimTime * (23.f + k * 3.1f) + k);
+            const float r0 = adef.radius * 0.92f;
+            const float r1 = r0 + (5.f + 9.f * w) * (0.55f + 0.45f * wob);
+            const float half = 0.11f + 0.05f * w;
+
+            const sf::Vector2f a(tf.position.x + std::cos(base - half) * r0,
+                tf.position.y + std::sin(base - half) * r0);
+            const sf::Vector2f b(tf.position.x + std::cos(base + half) * r0,
+                tf.position.y + std::sin(base + half) * r0);
+            const sf::Vector2f tip(tf.position.x + std::cos(base) * r1,
+                tf.position.y + std::sin(base) * r1);
+
+            const sf::Color hot(255, static_cast<uint8_t>(60 + 40 * wob), 45,
+                static_cast<uint8_t>(150 * w));
+            const sf::Color out(255, 50, 30, 0);
+            va[k * 3 + 0] = sf::Vertex{ a, hot };
+            va[k * 3 + 1] = sf::Vertex{ b, hot };
+            va[k * 3 + 2] = sf::Vertex{ tip, out };
+        }
+        m_window->draw(va);
     }
 
     /**

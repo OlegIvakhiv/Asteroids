@@ -31,8 +31,7 @@
 -- Plain data after load means what you read here is what the engine sees.
 --
 -- @author Oleg Ivakhiv
--- @version 2.3 -- Berserker pass 2: wolf circling, attack exclusivity,
---                 burst fire, bigger hull
+-- @version 2.4 -- Maniac: skid rockets, suicide charge, thrown state
 -- ============================================================================
 
 
@@ -84,6 +83,9 @@ enemy_defaults = {
     preferred_range      = 0.0,      -- >0 overrides the stand-off range derived
                                      -- from attack_range. A melee unit shoots
                                      -- from 400 but wants to live at 80.
+
+    -- "erratic" is a third profile: short timers, frequent flips, no settled
+    -- band. Being hard to LEAD is that unit's defence instead of armour.
 
     -- ===== MELEE PROFILE (ignored unless maneuver_profile = "melee") =====
     melee_circle_range   = 320.0,    -- Beyond this it runs straight in. Inside,
@@ -274,6 +276,78 @@ enemy_defaults = {
     bash_iframes          = 0.5,
     bash_knockback        = 950.0,
     bash_tell_color       = { r = 90, g = 255, b = 230 },
+
+    -- ===== SKID ROCKETS =====
+    -- Not a faster bullet: it tracks hard for rocket_track_time, then the
+    -- steering collapses to rocket_skid_turn and it drifts on where it was
+    -- pointed. You cannot outrun the opening turn; you CAN step out of the
+    -- skid. A rocket that misses stays live on its fuse and detonates where
+    -- it dies -- never a silent despawn.
+    rocket_enabled        = false,
+    rocket_count_min      = 1,
+    rocket_count_max      = 2,
+    rocket_spacing        = 0.22,    -- Between rounds of one volley
+    rocket_cooldown       = 4.5,
+    rocket_min_range      = 260.0,   -- Too close to arm and turn
+    rocket_max_range      = 900.0,
+    rocket_launch_spread  = 26.0,    -- Off-axis, alternating sides, so one
+                                     -- round does not eat the other's blast
+    rocket_speed          = 430.0,   -- Slow enough to read and to parry
+    rocket_track_time     = 0.85,
+    rocket_track_turn     = 260.0,   -- deg/s while tracking: hard to escape
+    rocket_skid_turn      = 35.0,    -- deg/s after: committed, not cancelled
+    rocket_fuse           = 3.5,
+    rocket_arm_time       = 0.12,
+    rocket_impact_damage  = 6.0,     -- The blast is the threat, not the poke
+    rocket_blast_radius   = 95.0,    -- Tight. A rocket should punish standing
+                                     -- in one spot, not delete the spot: at
+                                     -- 150 there was often no clean ground
+                                     -- left to dodge to, which reads as unfair
+                                     -- rather than as pressure.
+    rocket_blast_damage   = 38.0,    -- Up slightly: less area, same bite
+    rocket_iframes        = 0.5,
+
+    -- ===== FLOATING MINES =====
+    -- Dropped behind him while moving, and in a cluster right after a volley.
+    -- Arm, then a proximity trigger starts a FUSE the player can still walk
+    -- out of: the hazard is the route it denies, not the damage. Destructible
+    -- and detonated by gunfire, which makes clearing a lane a real option --
+    -- and a mine shot next to a Rakshari still goes off on THEM.
+    mine_enabled          = false,
+    mine_interval         = 2.6,     -- Between drops, plus up to 0.9s jitter
+    mine_max_active       = 4,       -- Per unit, counted live
+    mine_min_speed        = 60.0,    -- No dropping while parked, or it lands
+                                     -- on top of him and reads as a bug
+    mine_arm_time         = 0.5,
+    mine_fuse             = 2.0,     -- Once triggered. Long enough to leave.
+    mine_trigger_radius   = 95.0,
+    mine_blast_radius     = 130.0,
+    mine_blast_damage     = 42.0,
+    mine_hp               = 12.0,    -- ~2 player rounds
+    mine_lifetime         = 22.0,    -- Eventual cleanup so a long fight does
+                                     -- not leave a permanent minefield
+
+    -- ===== MICRO-RECOVERY =====
+    -- A window after a volley where no attack may start. He still moves, so
+    -- it reads as reloading rather than as a stun -- and it is the only punish
+    -- window this unit has, since unlike the Berserker he never commits to a
+    -- long attack you can wait out.
+    micro_recover         = 0.8,
+
+    -- ===== SUICIDE CHARGE =====
+    -- One-way. No cooldown, no exit, no interrupt -- not even a stun.
+    suicide_enabled       = false,
+    suicide_hp_fraction   = 0.3,
+    suicide_ignite_time   = 0.8,     -- Colour shift + laugh. Short but LOUD:
+                                     -- miss this beat and the charge is unfair.
+    suicide_speed         = 700.0,
+    suicide_turn_rate     = 5.0,     -- Steered, not railed: sidestepping him
+                                     -- should not be the answer -- parry or
+                                     -- kill him should be.
+    suicide_max_time      = 9.0,     -- Safety valve: goes off rather than
+                                     -- charging forever
+    suicide_blast_radius  = 260.0,
+    suicide_blast_damage  = 75.0,
 
     -- ===== PERSONALITY ROLL =====
     personality_variance  = true,
@@ -762,11 +836,177 @@ enemy_archetypes.BERSERKER = derive {
 }
 
 
+-- ----------------------------------------------------------------------------
+-- MANIAC -- mobile hazard generator.
+--
+-- Where the Berserker asks "which defensive tool?", the Maniac asks "where is
+-- it safe to stand, and is it worth killing him now?".
+--
+--   SCRAPFIRE  noise and chip. Explicitly NOT the threat; it exists to make
+--              standing still unpleasant while the real kit cycles.
+--   ROCKETS    1-2 skid rockets. Track hard, then drift. PARRIABLE -- and a
+--              parried one is not deleted, it goes wild on its remaining fuse
+--              and hurts whoever it reaches. Friendly fire is on.
+--   BASH       borrowed from the Berserker at lower value. A panic tool, not
+--              an identity; short trigger range and a long cooldown.
+--   SUICIDE    below 35% HP he ignites, drops the ranged kit and comes at you.
+--              Parry it and he becomes a spinning bomb thrown along the parry.
+--              Kill him first and the blast is roughly half -- so "shoot him
+--              down early" stays the safe play and therefore a real decision.
+--
+-- No stagger or stun resistance on purpose: he is a hazard dispenser, not a
+-- brawler, and interrupting him should feel like the reward for closing.
+--
+-- Hitbox: the split jaws and the flank cavities are filled in by convexity,
+-- so the raw ratio is ~1.59. hitbox_scale 0.88 brings it to ~1.23.
+-- ----------------------------------------------------------------------------
+enemy_archetypes.MANIAC = derive {
+    display = "Maniac",
+    faction = "RAKSHARI",
+
+    hull = {
+        {   0, -22 }, {   3,  -8 },                      -- central drill spire
+        {  12, -28 }, {  16, -12 }, {   8,  -2 },         -- right jaw + cavity
+        {  26,   8 }, {  20,  22 }, {  10,  15 },         -- right outward flank
+        {   0,  24 },                                     -- rear centre
+        { -10,  15 }, { -20,  22 }, { -26,   8 },         -- left outward flank
+        {  -8,  -2 }, { -16, -12 }, { -12, -28 },         -- left jaw + cavity
+        {  -3,  -8 },
+    },
+    turrets = {},
+
+    -- Asymmetric on purpose. The hull itself is mirrored, so the "someone kept
+    -- bolting things on until it stopped being sane" read has to come from the
+    -- plating and the engine count -- five weld lines, weighted to starboard.
+    scars = {
+        { {  6,  2 }, { 14,  6 }, { 19, 12 } },
+        { {  4, -4 }, {  9,  1 } },
+        { { -14, 10 }, { -19, 15 } },
+        { { -6,  0 }, { -11,  6 }, { -9, 12 } },
+        { {  1,  6 }, {  3, 12 } },
+    },
+    scar_width = 1.9,
+
+    -- THREE engines, and the third is off-centre. An odd, unbalanced count
+    -- reads as overloaded at a glance, and the flare never looks symmetric.
+    thrusters = { { 8, 10 }, { -8, 10 }, { 16, 14 } },
+
+    -- Area 1294 vs the Berserker's 1625, so it needs a larger scale to land at
+    -- the same mass: 1.30 gives ~12.2kg against the Berserker's ~12.6. Radius
+    -- 39.6 -- between the Raider's 29 and the Berserker's 52, and stubbier
+    -- than either, so all three read apart at distance.
+    scale                = 1.30,
+    hitbox_scale         = 0.88,
+
+    density              = 5.0,
+    hp                   = 300.0,  -- Squishier than a Berserker: killing him
+                                   -- early is supposed to be viable
+    score_reward         = 850,
+    stagger_resist       = 0.0,
+    stun_resist          = 0.0,
+
+    -- ===== MOVEMENT =====
+    engine_power         = 560.0,
+    max_speed            = 26.0,
+    rotation_speed       = 7.0,
+    angulardrag_factor   = 3.0,
+    maneuver_profile     = "erratic",
+    preferred_range      = 420.0,  -- Wants to live inside rocket range
+    personality_variance = false,
+    fixed_aggression     = 0.85,
+
+    -- ===== PERCEPTION =====
+    suspicion_rate       = 1.5,
+    suspicion_combat     = 0.4,
+    combat_lose_time     = 5.0,
+    combat_lose_distance = 1400.0,
+
+    -- ===== SCRAPFIRE =====
+    fire_rate            = 0.30,
+    telegraph_time       = 0.0,
+    aim_spread           = 19.0,   -- Deliberately bad. It is pressure, not aim.
+    attack_range         = 560.0,
+    bullet_speed         = 540.0,
+    bullet_lifetime      = 1.1,
+    bullet_damage        = 4.0,
+    bullet_iframes       = 0.15,
+    burst_count          = 4,
+    burst_pause          = 0.9,
+
+    storm_enabled        = false,
+    chaos_dodge_chance   = 0.30,   -- Twitchy, and it shows
+    bullet_dodge_chance  = 0.45,
+
+    -- ===== ROCKETS =====
+    rocket_enabled       = true,
+    rocket_count_min     = 1,
+    rocket_count_max     = 2,
+    rocket_cooldown      = 4.2,
+    rocket_min_range     = 280.0,
+    rocket_max_range     = 950.0,
+    micro_recover        = 0.85,
+
+    -- ===== MINES =====
+    mine_enabled         = true,
+    mine_interval        = 2.4,
+    mine_max_active      = 4,
+    mine_trigger_radius  = 95.0,
+    mine_blast_radius    = 130.0,
+    mine_blast_damage    = 40.0,
+
+    -- ===== BASH (secondary panic tool) =====
+    bash_enabled         = true,
+    bash_trigger_range   = 120.0,
+    bash_windup          = 0.34,
+    bash_lunge_speed     = 900.0,
+    bash_lunge_time      = 0.15,
+    bash_reach           = 85.0,
+    bash_damage          = 22.0,
+    bash_knockback       = 1150.0,  -- High knockback, low damage: it is for
+                                    -- making space, not for killing
+    bash_cooldown        = 2.6,
+    bash_hit_cooldown    = 3.0,
+    hold_fire_range      = 150.0,
+    melee_shot_clear     = 0.35,
+
+    ram_enabled          = false,
+
+    -- ===== SUICIDE =====
+    suicide_enabled      = true,
+    suicide_hp_fraction  = 0.35,
+    suicide_speed        = 720.0,
+    suicide_blast_radius = 270.0,
+    suicide_blast_damage = 78.0,
+
+    -- ===== LOOK =====
+    thruster_rate        = 1.1,
+    thruster_speed       = 130.0,
+    thruster_size        = 3.0,
+    thruster_life        = 0.13,
+    thruster_color       = { r = 255, g = 175, b = 95, a = 225 },
+    thruster_glow        = 0.85,
+
+    death_style          = "visceral",
+    death_shards         = 8,
+    death_trauma         = 0.34,
+
+    -- ===== SPAWN =====
+    spawn_weight         = 45.0,
+    max_active           = 2,
+    threat_cost          = 4,
+
+    -- Standard Rakshari red. He is identified by SHAPE -- split jaws, outward
+    -- flanks, three uneven engines -- and by the frenzy shift when it matters,
+    -- not by being a different colour at rest.
+    color = { r = 200, g = 70, b = 55 },
+}
+
+
 -- ============================================================================
 -- ARCHETYPE ORDER -- APPEND ONLY
 -- ============================================================================
 
-archetype_order = { "WARDOG", "RAIDER", "BARGE", "BERSERKER" }
+archetype_order = { "WARDOG", "RAIDER", "BARGE", "BERSERKER", "MANIAC" }
 
 
 -- ============================================================================

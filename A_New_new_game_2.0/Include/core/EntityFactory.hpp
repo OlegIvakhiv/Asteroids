@@ -73,7 +73,8 @@ public:
 
         b2ShapeDef shapeDef = b2DefaultShapeDef();
         shapeDef.filter.categoryBits = CATEGORY_PLAYER;
-        shapeDef.filter.maskBits = CATEGORY_ASTEROID | CATEGORY_ENEMY | CATEGORY_ENEMY_BULLET | CATEGORY_BULLET;
+        shapeDef.filter.maskBits = CATEGORY_ASTEROID | CATEGORY_ENEMY | CATEGORY_ENEMY_BULLET
+            | CATEGORY_BULLET | CATEGORY_ORDNANCE;
         shapeDef.enableContactEvents = true;
         shapeDef.density = lua["density"].get_or(0.5f);
 
@@ -489,7 +490,8 @@ public:
 
         b2ShapeDef shapeDef = b2DefaultShapeDef();
         shapeDef.filter.categoryBits = CATEGORY_BULLET;
-        shapeDef.filter.maskBits = CATEGORY_ASTEROID | CATEGORY_ENEMY;
+        // ORDNANCE so the player can shoot rockets and mines out of the air.
+        shapeDef.filter.maskBits = CATEGORY_ASTEROID | CATEGORY_ENEMY | CATEGORY_ORDNANCE;
         shapeDef.enableContactEvents = true;
 
         b2Circle circle = { {0.0f, 0.0f}, 0.1f };
@@ -589,8 +591,12 @@ public:
 
         b2ShapeDef shapeDef = b2DefaultShapeDef();
         shapeDef.filter.categoryBits = CATEGORY_ENEMY;
+        // CATEGORY_ORDNANCE added so rockets and mines actually TOUCH enemies.
+        // Without it a parried rocket sailed straight through the squad it was
+        // aimed at: the bit has to appear on BOTH shapes' masks, and the enemy
+        // side was the half that was missing.
         shapeDef.filter.maskBits = CATEGORY_ASTEROID | CATEGORY_PLAYER |
-            CATEGORY_BULLET | CATEGORY_ENEMY;
+            CATEGORY_BULLET | CATEGORY_ENEMY | CATEGORY_ORDNANCE;
         shapeDef.enableContactEvents = true;
         shapeDef.density = config["density"].get_or(4.0f);
         shapeDef.material.restitution = 0.4f;
@@ -712,6 +718,192 @@ public:
 
 
 
+    /**
+     * @brief A Maniac skid rocket.
+     *
+     * Deliberately NOT a faster bullet. It tracks hard for `rocket_track_time`
+     * and then the steering collapses to `rocket_skid_turn` -- it keeps flying
+     * where it was pointed and drifts. That split is the whole mechanic: you
+     * cannot outrun the opening turn, you CAN step out of the skid, and a
+     * rocket that misses is still a live fuse in the arena rather than a spent
+     * one. It carries its own blast, so the hit is an area event, not a poke.
+     */
+    uint32_t createEnemyRocket(EntityManager& em, sf::Vector2f pos, float angle,
+        uint32_t ownerEntityId, uint32_t targetEntityId, b2WorldId worldId,
+        const sol::table& cfg)
+    {
+        uint32_t entityId = em.nextEntityId++;
+
+        const float speed = cfg["rocket_speed"].get_or(430.f);
+        const float rad = (angle - 90.f) * 3.14159f / 180.f;
+        const sf::Vector2f vel = { std::cos(rad) * speed, std::sin(rad) * speed };
+
+        em.transforms.push_back({ entityId, pos, vel, {0.f, 0.f}, angle });
+
+        b2BodyDef bodyDef = b2DefaultBodyDef();
+        bodyDef.type = b2_dynamicBody;
+        BodyUserData* ud = new BodyUserData{ BodyType::Bullet, entityId };
+        bodyDef.userData = ud;
+        bodyDef.position = { pos.x / SCALE, pos.y / SCALE };
+        bodyDef.linearVelocity = { vel.x / SCALE, vel.y / SCALE };
+        bodyDef.rotation = b2MakeRot(angle * 3.14159f / 180.f);
+        bodyDef.isBullet = true;
+
+        b2BodyId bid = b2CreateBody(worldId, &bodyDef);
+
+        b2ShapeDef shapeDef = b2DefaultShapeDef();
+        shapeDef.filter.categoryBits = CATEGORY_ORDNANCE;
+        shapeDef.filter.maskBits = CATEGORY_PLAYER | CATEGORY_ASTEROID
+            | CATEGORY_ENEMY | CATEGORY_BULLET;
+        shapeDef.enableContactEvents = true;
+
+        b2Circle circle = { {0.0f, 0.0f}, 0.28f };
+        b2CreateCircleShape(bid, &shapeDef, &circle);
+
+        PhysicsShapeData shapeData;
+        shapeData.type = PhysicsShapeData::Type::Circle;
+        shapeData.radius = 0.28f * SCALE;
+        shapeData.offset = { 0.f, 0.f };
+        em.physicsShapes.push_back(shapeData);
+
+        em.physics.push_back({ entityId, bid });
+
+        BulletComponent bc;
+        bc.entityId = entityId;
+        bc.lifetime = cfg["rocket_fuse"].get_or(3.5f);   // fuse, not just a despawn
+        bc.isActive = true;
+        bc.isEnemyBullet = true;
+        bc.ownerEntityId = ownerEntityId;
+        bc.damage = cfg["rocket_impact_damage"].get_or(6.f);  // the blast is the threat
+        bc.playerIframes = cfg["rocket_iframes"].get_or(0.5f);
+        bc.isRocket = true;
+        bc.trackTimer = cfg["rocket_track_time"].get_or(0.85f);
+        bc.skidTurnRate = cfg["rocket_skid_turn"].get_or(35.f);
+        bc.blastRadius = cfg["rocket_blast_radius"].get_or(150.f);
+        bc.blastDamage = cfg["rocket_blast_damage"].get_or(34.f);
+        bc.armTimer = cfg["rocket_arm_time"].get_or(0.12f);
+        bc.homingTargetEntityId = targetEntityId;
+        bc.homingTurnRate = cfg["rocket_track_turn"].get_or(260.f);
+        em.bullets.push_back(bc);
+
+        em.healths.push_back({ entityId });
+        em.scoreRewards.push_back({});
+        em.enemies.push_back({});
+        em.players.push_back({});
+
+        // Stubbier and wider than a round: at a glance the player must be able
+        // to tell "that one is worth parrying" from "that one is chip damage".
+        RenderComponent rc;
+        rc.shape.setPointCount(6);
+        rc.shape.setPoint(0, { 0.f,  -13.f });
+        rc.shape.setPoint(1, { 5.f,   -4.f });
+        rc.shape.setPoint(2, { 4.f,    7.f });
+        rc.shape.setPoint(3, { 0.f,   11.f });
+        rc.shape.setPoint(4, { -4.f,   7.f });
+        rc.shape.setPoint(5, { -5.f,  -4.f });
+        rc.shape.setFillColor(sf::Color(255, 200, 90));
+        rc.shape.setOutlineThickness(2.f);
+        rc.shape.setOutlineColor(sf::Color(255, 90, 20, 230));
+
+        em.renders.push_back(rc);
+        em.entityIdMap[entityId] = em.transforms.size() - 1;
+
+        return entityId;
+    }
+
+    /**
+     * @brief A floating mine.
+     *
+     * Drifts with whatever momentum it was dropped with, arms after
+     * `mine_arm_time`, then triggers on proximity and burns a fuse the player
+     * can still leave. Destructible: it carries real HP and lives in the
+     * ORDNANCE category, so player fire both CAN hit it and SHOULD -- shooting
+     * one detonates it early, which is a tool (clear a lane, or set off the
+     * one sitting next to a Rakshari) rather than a safe deletion.
+     *
+     * Deliberately a bullet-type entity and not an enemy: it must not count
+     * toward spawn budgets, wave-clear checks, or anything the AI reasons
+     * about. It is scenery with a timer.
+     */
+    uint32_t createMine(EntityManager& em, sf::Vector2f pos, sf::Vector2f drift,
+        uint32_t ownerEntityId, b2WorldId worldId, const sol::table& cfg)
+    {
+        uint32_t entityId = em.nextEntityId++;
+
+        em.transforms.push_back({ entityId, pos, drift, {0.f, 0.f},
+            static_cast<float>(rand() % 360) });
+
+        b2BodyDef bodyDef = b2DefaultBodyDef();
+        bodyDef.type = b2_dynamicBody;
+        BodyUserData* ud = new BodyUserData{ BodyType::Bullet, entityId };
+        bodyDef.userData = ud;
+        bodyDef.position = { pos.x / SCALE, pos.y / SCALE };
+        bodyDef.linearVelocity = { drift.x / SCALE, drift.y / SCALE };
+        bodyDef.angularVelocity = ((rand() % 2) ? 1.f : -1.f) * (0.6f + (rand() % 80) / 100.f);
+        bodyDef.linearDamping = 1.4f;   // settles into place instead of sailing off
+
+        b2BodyId bid = b2CreateBody(worldId, &bodyDef);
+
+        b2ShapeDef shapeDef = b2DefaultShapeDef();
+        shapeDef.filter.categoryBits = CATEGORY_ORDNANCE;
+        shapeDef.filter.maskBits = CATEGORY_PLAYER | CATEGORY_ASTEROID
+            | CATEGORY_ENEMY | CATEGORY_BULLET;
+        shapeDef.enableContactEvents = true;
+        shapeDef.density = 0.6f;
+
+        b2Circle circle = { {0.0f, 0.0f}, 0.40f };
+        b2CreateCircleShape(bid, &shapeDef, &circle);
+
+        PhysicsShapeData shapeData;
+        shapeData.type = PhysicsShapeData::Type::Circle;
+        shapeData.radius = 0.40f * SCALE;
+        shapeData.offset = { 0.f, 0.f };
+        em.physicsShapes.push_back(shapeData);
+
+        em.physics.push_back({ entityId, bid });
+
+        BulletComponent bc;
+        bc.entityId = entityId;
+        bc.lifetime = cfg["mine_lifetime"].get_or(22.f);   // eventual cleanup
+        bc.isActive = true;
+        bc.isEnemyBullet = true;
+        bc.ownerEntityId = ownerEntityId;
+        bc.damage = 0.f;                                   // the blast is all of it
+        bc.isMine = true;
+        bc.armTimer = cfg["mine_arm_time"].get_or(0.5f);
+        bc.mineTrigger = cfg["mine_trigger_radius"].get_or(95.f);
+        bc.mineFuseTime = cfg["mine_fuse"].get_or(2.0f);
+        bc.blastRadius = cfg["mine_blast_radius"].get_or(130.f);
+        bc.blastDamage = cfg["mine_blast_damage"].get_or(42.f);
+        em.bullets.push_back(bc);
+
+        HealthComponent hc;
+        hc.entityId = entityId;
+        hc.maxHp = cfg["mine_hp"].get_or(12.f);
+        hc.currentHp = hc.maxHp;
+        em.healths.push_back(hc);
+
+        em.scoreRewards.push_back({});
+        em.enemies.push_back({});
+        em.players.push_back({});
+
+        // Squat hexagon with spikes -- not a ship shape, not a bullet shape.
+        RenderComponent rc;
+        rc.shape.setPointCount(6);
+        for (int k = 0; k < 6; ++k) {
+            const float a = k * 3.14159f / 3.f;
+            rc.shape.setPoint(k, { std::cos(a) * 9.f, std::sin(a) * 9.f });
+        }
+        rc.shape.setFillColor(sf::Color(70, 60, 58));
+        rc.shape.setOutlineThickness(2.2f);
+        rc.shape.setOutlineColor(sf::Color(255, 120, 40, 220));
+
+        em.renders.push_back(rc);
+        em.entityIdMap[entityId] = em.transforms.size() - 1;
+
+        return entityId;
+    }
+
     uint32_t createRiftBolt(EntityManager& em, sf::Vector2f pos, sf::Vector2f velocity, float angle, sol::state& lua, b2WorldId worldId) {
         uint32_t entityId = em.nextEntityId++;
 
@@ -736,7 +928,8 @@ public:
 
         b2ShapeDef shapeDef = b2DefaultShapeDef();
         shapeDef.filter.categoryBits = CATEGORY_BULLET;
-        shapeDef.filter.maskBits = CATEGORY_ASTEROID | CATEGORY_ENEMY;
+        // ORDNANCE so the player can shoot rockets and mines out of the air.
+        shapeDef.filter.maskBits = CATEGORY_ASTEROID | CATEGORY_ENEMY | CATEGORY_ORDNANCE;
         shapeDef.enableContactEvents = true;
 
         float hitboxRadius = lua["rift_hitbox_radius"].get_or(0.35f);

@@ -188,6 +188,46 @@ struct BulletComponent {
     // ---- Homing (used by reflected shots) ----
     uint32_t homingTargetEntityId = 0;  // 0 = flies straight, no target
     float    homingTurnRate = 0.f;      // Degrees/sec of steering
+
+    // ---- Rockets ----
+    // `lifetime` doubles as the fuse: a rocket that runs out of it detonates
+    // where it is instead of quietly vanishing, which is what makes a missed
+    // volley still worth moving away from.
+    bool  isRocket = false;
+    float trackTimer = 0.f;             // While >0 it steers hard (homingTurnRate).
+    // On expiry homingTurnRate drops to
+    // skidTurnRate and it starts to drift --
+    // committed, not cancelled.
+    float skidTurnRate = 0.f;
+    float spin = 0.f;                   // deg/s of visual roll. A parried rocket
+    // tumbles; a live one does not.
+    bool  isWild = false;               // Parried: no target, hurts everyone
+
+    // ---- Wild flight (parried rockets only) ----
+    // Two summed sine terms at incommensurate frequencies, so the path never
+    // repeats and never settles into a readable curve. A parried rocket that
+    // flew straight was just a slower player bullet; this one is a hazard
+    // with a rough heading, which is what makes aiming it a gamble worth
+    // taking rather than a free kill.
+    float wanderAmp = 0.f;              // deg/s of steering authority
+    float wanderFreq = 0.f;
+    float wanderPhase = 0.f;
+    float blastRadius = 0.f;
+    float blastDamage = 0.f;
+    float armTimer = 0.f;               // Contacts ignored this long after launch,
+    // so it does not detonate on its own hull
+
+// ---- Mines ----
+// Dropped, not fired. Arms after a moment, then a proximity trigger starts
+// a fuse the player can still walk out of -- the hazard is the ROUTE it
+// denies, not the damage, so it has to be escapable once triggered.
+    bool  isMine = false;
+    bool  mineArmed = false;
+    float mineTrigger = 0.f;            // Proximity radius once armed
+    float mineFuse = 0.f;               // >0 once triggered: counting down
+    float mineFuseTime = 2.f;           // Fuse length, carried per mine so the
+    // countdown comes from the archetype
+    // rather than from a global
 };
 
 // ============================================================================
@@ -359,6 +399,20 @@ enum class RamState : uint8_t {
 // dodged; the bash is the one attack in the roster that is MEANT to be
 // parried. Keeping them as separate machines (rather than a flag on the ram)
 // is what lets the two tells never share a frame of visuals.
+/**
+ * @brief The Maniac's low-HP override.
+ *
+ * Ignite -> Charge -> (contact) -> Thrown or gone. One-way: once a Maniac
+ * ignites there is no route back to ordinary combat, which is the point --
+ * the player's decision is made for them the moment his HP crosses the line.
+ */
+enum class FrenzyState : uint8_t {
+    None = 0,
+    Ignite,     // Colour shift + laugh. The "rules just changed" beat.
+    Charge,     // Ranged kit abandoned. Straight at the player.
+    Thrown      // Parried. No AI left: a spinning bomb with physics.
+};
+
 enum class BashState : uint8_t {
     None = 0,
     Windup,     // Coil back, cyan crescent grows. The read: "parry this".
@@ -472,6 +526,25 @@ struct EnemyComponent {
     sf::Vector2f bashDir;                 // Locked at lunge start
     bool         bashStrikePending = false;
     bool         bashConnected = false;   // Strike resolved this lunge (hit OR parried)
+
+    // ---- Frenzy (Maniac suicide charge) ----
+    FrenzyState  frenzyState = FrenzyState::None;
+    float        frenzyTimer = 0.f;
+    float        frenzy = 0.f;           // 0..1 visual ramp: colour, sparks, shake
+    sf::Vector2f frenzyDir;              // Locked when Thrown
+    bool         detonated = false;      // Blast already played; death FX must
+    // not stack a second explosion on it
+
+// ---- Micro-recovery ----
+// A short mandatory pause after a rocket volley. Not a stun -- he still
+// moves -- but no attack may start, so greed has a window to be punished in.
+    float        microRecover = 0.f;
+
+    // ---- Rockets ----
+    float        mineTimer = 0.f;        // Countdown to the next mine drop
+    float        rocketCooldown = 0.f;
+    float        rocketVolleyTimer = 0.f;   // Spacing between rounds in one volley
+    int          rocketsLeft = 0;
 
     // ---- Visual feedback ----
     float hitFlashTimer = 0.f;          // White flash when damaged

@@ -17,6 +17,8 @@
 #include "ISystem.hpp"
 #include "core/EntityManager.hpp"
 #include <SFML/Graphics.hpp>
+#include <algorithm>
+#include <cmath>
 
  /**
   * @class ParticleSystem
@@ -28,6 +30,10 @@
   */
 class ParticleSystem : public ISystem {
 public:
+    /// No legitimate particle is bigger than a ship. Anything past this is a
+    /// bug upstream, and clamping keeps it from taking the frame with it.
+    static constexpr float MAX_PARTICLE_SIZE = 48.f;
+
     /**
      * @brief Initialise the system with the global context
      * @param ctx SystemContext containing all engine dependencies
@@ -74,9 +80,13 @@ public:
                 continue;
             }
 
-            // Fade alpha based on remaining lifetime
-            float ratio = p.lifetime / p.maxLifetime;
-            p.color.a = static_cast<uint8_t>(255 * ratio);
+            // Fade alpha based on remaining lifetime.
+            // maxLifetime is guarded: a particle spawned with 0 there used to
+            // divide by zero, and the resulting inf/NaN alpha is undefined
+            // behaviour on the cast.
+            const float ratio = std::clamp(
+                p.lifetime / std::max(0.0001f, p.maxLifetime), 0.f, 1.f);
+            p.color.a = static_cast<uint8_t>(255.f * ratio);
         }
 
         // ====================================================================
@@ -103,18 +113,36 @@ public:
         for (size_t i = 0; i < m_em->particles.size(); ++i) {
             size_t idx = i * 6;
             const auto& p = m_em->particles[i];
-            float halfSize = p.size / 2.0f;
+
+            // ================================================================
+            // SANITY GUARD
+            // ================================================================
+            // Every particle shares ONE vertex array, so a single bad particle
+            // is not a local glitch: a NaN or absurd coordinate produces a
+            // triangle that smears across the whole map, and an unwritten
+            // vertex sits at world (0,0) and draws a sliver from the origin to
+            // wherever the effect was. Either one looks like "the particles
+            // stretched out". Degenerate particles are collapsed to zero-area
+            // quads at the origin instead of being skipped -- skipping would
+            // leave exactly the unwritten vertices this is guarding against.
+            const bool finite =
+                std::isfinite(p.position.x) && std::isfinite(p.position.y) &&
+                std::isfinite(p.size);
+            const float halfSize = finite
+                ? std::clamp(p.size, 0.f, MAX_PARTICLE_SIZE) * 0.5f : 0.f;
+            const sf::Vector2f c = finite ? p.position : sf::Vector2f(0.f, 0.f);
+            const sf::Color col = finite ? p.color : sf::Color(0, 0, 0, 0);
 
             // Each particle is a quad (2 triangles = 6 vertices)
             // Triangle 1: v0-v1-v2
-            va[idx + 0] = { {p.position.x - halfSize, p.position.y - halfSize}, p.color };
-            va[idx + 1] = { {p.position.x + halfSize, p.position.y - halfSize}, p.color };
-            va[idx + 2] = { {p.position.x - halfSize, p.position.y + halfSize}, p.color };
+            va[idx + 0] = { {c.x - halfSize, c.y - halfSize}, col };
+            va[idx + 1] = { {c.x + halfSize, c.y - halfSize}, col };
+            va[idx + 2] = { {c.x - halfSize, c.y + halfSize}, col };
 
             // Triangle 2: v1-v3-v2
-            va[idx + 3] = { {p.position.x + halfSize, p.position.y - halfSize}, p.color };
-            va[idx + 4] = { {p.position.x + halfSize, p.position.y + halfSize}, p.color };
-            va[idx + 5] = { {p.position.x - halfSize, p.position.y + halfSize}, p.color };
+            va[idx + 3] = { {c.x + halfSize, c.y - halfSize}, col };
+            va[idx + 4] = { {c.x + halfSize, c.y + halfSize}, col };
+            va[idx + 5] = { {c.x - halfSize, c.y + halfSize}, col };
         }
 
         m_window->draw(va);

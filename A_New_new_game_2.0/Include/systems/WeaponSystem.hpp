@@ -1,4 +1,4 @@
-/**
+ï»¿/**
  * @file WeaponSystem.hpp
  * @brief Player shooting, weapon heat, Rift Shot, and projectile steering
  *
@@ -10,8 +10,8 @@
  *    a recompile.
  *
  * TWO RESOURCES (unchanged from 1.2):
- *   ENERGY — strategic budget, shared with dash and turbo.
- *   HEAT   — tactical rhythm, weapon-only, hard-locks the gun at max.
+ *   ENERGY ï¿½ strategic budget, shared with dash and turbo.
+ *   HEAT   ï¿½ tactical rhythm, weapon-only, hard-locks the gun at max.
  *
  * @author Oleg Ivakhiv
  * @version 1.3
@@ -110,7 +110,7 @@ public:
             const float chargeTime = (*m_lua)["rift_charge_time"].get_or(0.6f);
             const float chargeT = std::clamp(playerStats.riftChargeTimer / chargeTime, 0.f, 1.f);
 
-            // Sparks converge INWARD on the nose — reads as gathering energy.
+            // Sparks converge INWARD on the nose ï¿½ reads as gathering energy.
             const int sparkCount = 1 + static_cast<int>(chargeT * 3.f);
             for (int n = 0; n < sparkCount; ++n) {
                 float rotRad = (playerTf.rotation - 90.f) * 3.14159f / 180.f;
@@ -288,6 +288,162 @@ private:
             bullet.lifetime -= dt;
 
             // ================================================================
+            // MINES: arm, then wait, then count down
+            // ================================================================
+            // The proximity trigger starts a FUSE rather than detonating, so a
+            // mine denies a route instead of punishing a single frame of
+            // contact. Once lit it cannot be un-lit -- backing off saves you
+            // from the blast, not from the mine.
+            if (bullet.isMine) {
+                if (bullet.armTimer > 0.f) {
+                    bullet.armTimer -= dt;
+                    if (bullet.armTimer <= 0.f) {
+                        bullet.mineArmed = true;
+                        m_em->spawnShockRing(m_em->transforms[i].position,
+                            4.f, 26.f, 0.24f, sf::Color(255, 140, 50), 2.f, 200.f);
+                    }
+                }
+
+                const sf::Vector2f mp = m_em->transforms[i].position;
+
+                if (bullet.mineArmed && bullet.mineFuse <= 0.f) {
+                    // Idle blink: slow, so an armed mine reads as present but
+                    // not urgent. The urgency is reserved for the fuse.
+                    if ((rand() % 100) < 7) {
+                        m_em->particles.push_back({ m_em->nextEntityId++, mp,
+                            { 0.f, 0.f }, sf::Color(255, 140, 50, 220),
+                            0.18f, 0.18f, 4.f });
+                    }
+
+                    // Triggered by the player OR by any enemy: the Maniac's own
+                    // squad walking into his minefield is the joke landing.
+                    for (size_t j = 0; j < m_em->physics.size(); ++j) {
+                        if (j == i) continue;
+                        BodyUserData* jud = b2Body_IsValid(m_em->physics[j].bodyId)
+                            ? (BodyUserData*)b2Body_GetUserData(m_em->physics[j].bodyId)
+                            : nullptr;
+                        if (!jud) continue;
+                        if (jud->type != BodyType::Player && jud->type != BodyType::Enemy) continue;
+
+                        const sf::Vector2f d = m_em->transforms[j].position - mp;
+                        if (d.x * d.x + d.y * d.y > bullet.mineTrigger * bullet.mineTrigger)
+                            continue;
+
+                        bullet.mineFuse = bullet.mineFuseTime;
+                        m_em->spawnShockRing(mp, 6.f, bullet.mineTrigger, 0.30f,
+                            sf::Color(255, 90, 40), 3.f, 230.f);
+                        break;
+                    }
+                }
+                else if (bullet.mineFuse > 0.f) {
+                    bullet.mineFuse -= dt;
+
+                    // Blink rate ramps as the fuse burns -- the countdown has
+                    // to be readable from across the arena, because the whole
+                    // point is deciding whether you can still cross.
+                    const float urgency = 1.f - std::clamp(
+                        bullet.mineFuse / std::max(0.1f, bullet.mineFuseTime), 0.f, 1.f);
+                    if ((rand() % 100) < static_cast<int>(18 + 62 * urgency)) {
+                        m_em->particles.push_back({ m_em->nextEntityId++, mp,
+                            { (float)((rand() % 120) - 60), (float)((rand() % 120) - 60) },
+                            sf::Color(255, static_cast<uint8_t>(200 - 120 * urgency), 60, 240),
+                            0.14f, 0.14f, 3.f + 2.f * urgency });
+                    }
+
+                    if (bullet.mineFuse <= 0.f) bullet.markedForDestroy = true;
+                }
+
+                m_em->transforms[i].rotation += 26.f * dt;
+                continue;   // mines do no rocket steering
+            }
+
+            // ================================================================
+            // ROCKETS: track, then skid
+            // ================================================================
+            // The tracking phase is genuinely hard to escape. When it expires
+            // the steering collapses to skidTurnRate and the rocket keeps
+            // going roughly where it was pointed -- it drifts rather than
+            // gives up, so a player who breaks the lock still has to leave the
+            // line it committed to. A rocket that misses stays live on its
+            // fuse; DamageSystem detonates it when the fuse or a contact ends
+            // it, never a silent despawn.
+            if (bullet.isRocket) {
+                if (bullet.armTimer > 0.f) bullet.armTimer -= dt;
+
+                if (bullet.trackTimer > 0.f) {
+                    bullet.trackTimer -= dt;
+                    if (bullet.trackTimer <= 0.f) {
+                        bullet.homingTurnRate = bullet.skidTurnRate;
+                        // Visible hand-off: the motor stops steering and the
+                        // rocket lights up as it starts to drift.
+                        m_em->spawnImpact(m_em->transforms[i].position,
+                            sf::Color(255, 170, 60), { 0.f, 0.f });
+                    }
+                }
+
+                const b2Vec2 rv = b2Body_GetLinearVelocity(bodyId);
+                const sf::Vector2f v(rv.x * SCALE, rv.y * SCALE);
+
+                // ---- WILD: chaotic arcs ----
+                // The heading is steered by two sines that never line up, so
+                // it carves arcs and reverses them at no fixed interval.
+                if (bullet.isWild && bullet.wanderAmp > 0.f) {
+                    bullet.wanderPhase += dt * bullet.wanderFreq;
+                    const float p = bullet.wanderPhase;
+                    const float turnDeg = (std::sin(p) + 0.62f * std::sin(p * 2.7f + 1.3f)
+                        + 0.31f * std::sin(p * 5.3f + 0.7f)) * bullet.wanderAmp * dt;
+                    const float t = turnDeg * 3.14159f / 180.f;
+                    const float c = std::cos(t), sn = std::sin(t);
+                    const b2Vec2 v0 = b2Body_GetLinearVelocity(bodyId);
+                    b2Body_SetLinearVelocity(bodyId,
+                        { v0.x * c - v0.y * sn, v0.x * sn + v0.y * c });
+                }
+
+                // A live rocket points where it flies. A parried one tumbles:
+                // the spin IS the "no longer aimed at anything" read.
+                if (bullet.spin != 0.f) {
+                    m_em->transforms[i].rotation += bullet.spin * dt;
+
+                    // Fake the second axis. The shape is flat, so squashing it
+                    // on a different phase than the roll reads as end-over-end
+                    // tumbling rather than as a sprite spinning on the spot.
+                    const float w = std::fabs(std::cos(bullet.wanderPhase * 1.7f + 0.9f));
+                    m_em->renders[i].shape.setScale({ 0.35f + 0.65f * w, 1.f });
+                }
+                else if (std::fabs(v.x) + std::fabs(v.y) > 1.f) {
+                    m_em->transforms[i].rotation =
+                        std::atan2(v.y, v.x) * 180.f / 3.14159f + 90.f;
+                }
+
+                // Exhaust. Wild rockets burn white-hot and throw more of it --
+                // at a glance you can tell which ones are now yours.
+                const int rate = bullet.isWild ? 2 : 1;
+                for (int k = 0; k < rate; ++k) {
+                    const float jx = ((rand() % 60) - 30);
+                    const float jy = ((rand() % 60) - 30);
+                    m_em->particles.push_back({
+                        m_em->nextEntityId++,
+                        m_em->transforms[i].position,
+                        { -v.x * 0.18f + jx, -v.y * 0.18f + jy },
+                        bullet.isWild ? sf::Color(255, 240, 200, 220)
+                                      : sf::Color(255, 140, 40, 200),
+                        0.20f, 0.20f,
+                        bullet.isWild ? 4.f : 3.f });
+                }
+
+                // Fuse warning: it gets visibly agitated before it goes off,
+                // so a rocket about to expire next to you is a warning and not
+                // an ambush.
+                if (bullet.lifetime < 0.6f && (rand() % 100) < 45) {
+                    m_em->particles.push_back({
+                        m_em->nextEntityId++,
+                        m_em->transforms[i].position,
+                        { (float)((rand() % 200) - 100), (float)((rand() % 200) - 100) },
+                        sf::Color(255, 90, 40, 230), 0.14f, 0.14f, 3.f });
+                }
+            }
+
+            // ================================================================
             // HOMING
             //
             // Steering by ROTATING the velocity vector, not by re-pointing it
@@ -309,7 +465,7 @@ private:
 
                     if (speed > 1.f) {
                         // Lead the target rather than chasing its current
-                        // position — pure pursuit curves in behind a moving
+                        // position ï¿½ pure pursuit curves in behind a moving
                         // enemy and often never closes.
                         const b2Vec2 tvb = b2Body_GetLinearVelocity(m_em->physics[tIdx].bodyId);
                         const sf::Vector2f tVel(tvb.x * SCALE, tvb.y * SCALE);
@@ -586,7 +742,7 @@ private:
     // HEAT
     //
     // Cooling has a GRACE DELAY. Without it, tapping at exactly the fire rate
-    // cools as fast as it heats and the overheat can never trigger — the delay
+    // cools as fast as it heats and the overheat can never trigger ï¿½ the delay
     // is what makes sustained fire different from paced fire.
     //
     // Recovery unlocks at a THRESHOLD, not zero. Waiting out a full cooldown
@@ -663,7 +819,7 @@ private:
             ps.weaponHeat = std::max(0.f, ps.weaponHeat - coolRate * (0.6f + t * 0.8f) * dt);
         }
 
-        // Ambient shimmer once genuinely hot — the telegraph.
+        // Ambient shimmer once genuinely hot ï¿½ the telegraph.
         const float heatT = ps.weaponHeat / std::max(1.f, ps.maxWeaponHeat);
         if (heatT > 0.55f && (rand() % 100) < static_cast<int>(heatT * 45.f)) {
             const float rotRad = (tf.rotation - 90.f) * 3.14159f / 180.f;

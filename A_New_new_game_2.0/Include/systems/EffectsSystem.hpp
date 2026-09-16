@@ -64,6 +64,7 @@ public:
      * - For enemies: spawns thruster particles
      */
     void update(float dt) override {
+        m_frenzyTime += dt;
         if (!m_em) return;
 
         size_t playerIdx = m_em->getEntityIndex(m_playerEntityId);
@@ -212,7 +213,15 @@ public:
                 // units the engine is part of the telegraph.
                 float boost = 1.f;
                 if (ex.glow > 0.f) {
-                    if (ec.ramState == RamState::Charge || ec.bashState == BashState::Lunge)
+                    // Frenzy outranks everything: engines wide open, pulsing
+                    // with the heartbeat. He is not managing his throttle any
+                    // more, and the exhaust is the clearest channel for that.
+                    if (ec.frenzyState == FrenzyState::Charge ||
+                        ec.frenzyState == FrenzyState::Thrown)
+                        boost = 3.0f + 1.0f * std::sin(m_frenzyTime * 11.f);
+                    else if (ec.frenzyState == FrenzyState::Ignite)
+                        boost = 1.6f + 2.2f * ec.frenzy;
+                    else if (ec.ramState == RamState::Charge || ec.bashState == BashState::Lunge)
                         boost = 2.4f;
                     else if (ec.bashState == BashState::Windup)
                         boost = 0.3f;
@@ -270,6 +279,7 @@ private:
     EntityManager* m_em = nullptr;
     uint32_t m_playerEntityId = 0;
     const enemyarch::EnemyRegistry* m_registry = nullptr;
+    float m_frenzyTime = 0.f;      ///< Drives the frenzy exhaust pulse
 
     // ---- Persistent state for dash detection ----
     float m_lastDashCooldown = 0.f;   ///< Previous frame's dash cooldown value

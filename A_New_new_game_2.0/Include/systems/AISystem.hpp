@@ -83,11 +83,33 @@
  * 15. BURST FIRE (`burst_count` / `burst_pause`): a series, then a real pause
  *     with a visible sway. Both default to off.
  *
+ * ============================================================================
+ * VERSION 2.2 -- MANIAC SUPPORT
+ * ============================================================================
+ *
+ * 16. FRENZY (FrenzyState). A low-HP, one-way override: Ignite (colour shift
+ *     + laugh, the "rules just changed" beat) -> Charge (ranged kit dropped,
+ *     straight at the player) -> resolved by DamageSystem on contact, into
+ *     Thrown if the player parried. It is checked BEFORE stun, telegraphs and
+ *     every other attack: nothing interrupts a Maniac who has decided.
+ *
+ * 17. SKID ROCKETS. AISystem only decides WHEN to fire and eats the recovery;
+ *     the flight behaviour lives in WeaponSystem and the blast in DamageSystem.
+ *
+ * 18. MICRO-RECOVERY (`micro_recover`). A short window after a volley in which
+ *     no attack may start -- he still moves, so it reads as reloading rather
+ *     than as a stun. It is the punish window the Maniac would otherwise lack,
+ *     since unlike the Berserker he never commits to a long attack.
+ *
+ * 19. `maneuver_profile = "erratic"`: short timers, frequent direction flips,
+ *     no settled strafe band. Twitchy on purpose -- he is hard to lead, and
+ *     that is his defence instead of armour.
+ *
  * State split: this system owns AIState (decisions). Presentation and impact
  * state live on EnemyComponent so DamageSystem and RenderSystem can reach them.
  *
  * @author Oleg Ivakhiv
- * @version 2.1
+ * @version 2.2
  */
 
 #pragma once
@@ -180,6 +202,16 @@ public:
                 playerPos, distToPlayer, toPlayerN)) continue;
 
             // ---- Stun (after ram, because ram cannot be stunned) ----
+            // ================================================================
+            // FRENZY -- checked before everything, including stun
+            // ================================================================
+            // A Maniac who has ignited cannot be talked out of it. Letting a
+            // stun or a telegraph interrupt this would turn the one moment the
+            // player is supposed to read as irreversible into another
+            // interruptible attack.
+            if (updateFrenzy(dt, i, tf, ec, ai, bodyId, config, toPlayerN, distToPlayer))
+                continue;
+
             if (health.stunTimer > 0.f) {
                 health.stunTimer -= dt;
                 ec.telegraphActive = false;
@@ -222,6 +254,13 @@ public:
                 updateBulletStorm(dt, i, tf, ec, ai, bodyId, config);
                 continue;
             }
+
+            // ================================================================
+            // ROCKET VOLLEY — before the bash, so a Maniac at mid range
+            // commits to the volley rather than drifting into a lunge
+            // ================================================================
+            updateRockets(dt, tf, ec, ai, entityId, config, toPlayerN, distToPlayer);
+            updateMines(dt, tf, ec, ai, entityId, config);
 
             // ================================================================
             // BASH — owns movement, rotation and guns while active
@@ -357,6 +396,8 @@ private:
         if (ec.bashCooldown > 0.f) ec.bashCooldown = std::max(0.f, ec.bashCooldown - dt);
         if (ec.shotPauseTimer > 0.f) ec.shotPauseTimer = std::max(0.f, ec.shotPauseTimer - dt);
         if (ec.shotClearTimer > 0.f) ec.shotClearTimer = std::max(0.f, ec.shotClearTimer - dt);
+        if (ec.microRecover > 0.f) ec.microRecover = std::max(0.f, ec.microRecover - dt);
+        if (ec.rocketCooldown > 0.f) ec.rocketCooldown = std::max(0.f, ec.rocketCooldown - dt);
 
         // Trail outlives the charge by design; this must keep running in every
         // state or the wake freezes on screen when the ram ends.
@@ -629,6 +670,29 @@ private:
             ai.maneuver = (rand() % 100 < 80) ? Maneuver::STRAFE : Maneuver::REPOSITION;
             ai.maneuverTimer = 1.8f + (rand() % 140) / 100.f;
             if (rand() % 100 < 12) ai.strafeDir = -ai.strafeDir;
+            return;
+        }
+
+        // ---- Erratic units: twitchy, never settled. ----
+        // Short timers and frequent flips. Being hard to LEAD is this unit's
+        // defence -- it has no armour bonus and no committed attack to hide
+        // behind, so if it moved in readable straight lines it would simply be
+        // a slower Raider with a worse gun.
+        if (config["maneuver_profile"].get_or<std::string>("standard") == "erratic") {
+            const int r = rand() % 100;
+            const float band = ai.preferredRange;
+
+            if (dist > band * 1.35f)      ai.maneuver = Maneuver::APPROACH;
+            else if (dist < band * 0.55f) ai.maneuver = Maneuver::FALLBACK;
+            else if (r < 45)              ai.maneuver = Maneuver::STRAFE;
+            else if (r < 70)              ai.maneuver = Maneuver::REPOSITION;
+            else if (r < 88)              ai.maneuver = Maneuver::APPROACH;
+            else                          ai.maneuver = Maneuver::FALLBACK;
+
+            // Half the usual dwell, so no single line of travel lasts long
+            // enough to aim at comfortably.
+            ai.maneuverTimer = 0.18f + (rand() % 30) / 100.f;
+            if (rand() % 100 < 55) ai.strafeDir = -ai.strafeDir;
             return;
         }
 
@@ -916,6 +980,275 @@ private:
     }
 
     // ========================================================================
+    // FRENZY — the Maniac's low-HP suicide override
+    // ========================================================================
+    //
+    // Returns true while it owns the ship. Everything is one-way: there is no
+    // transition back to None, and no cooldown, because the fiction and the
+    // gameplay agree that this is the last thing he does.
+    //
+    //   Ignite  brakes hard, shakes, colour ramps, sparks. Short but LOUD --
+    //           if the player misses this beat the charge is unreadable.
+    //   Charge  tracks the player loosely (not a locked lane like the Barge's
+    //           ram: he is steering himself into you, not firing himself).
+    //           DamageSystem resolves contact, and parrying flips him to Thrown.
+    //   Thrown  no AI at all. A spinning bomb on a 2s fuse; DamageSystem blows
+    //           him up on first impact or when the timer runs out.
+    bool updateFrenzy(float dt, size_t i, TransformComponent& tf, EnemyComponent& ec,
+        AIState& ai, b2BodyId bodyId, sol::table& config,
+        sf::Vector2f toPlayerN, float dist)
+    {
+        (void)dist;
+
+        // ---- Trigger ----
+        if (ec.frenzyState == FrenzyState::None) {
+            if (!config["suicide_enabled"].get_or(false)) return false;
+            if (ai.currentState != EnemyState::COMBAT) return false;
+            if (ec.microRecover > 0.f) return false;   // spec: not while recovering
+
+            const float maxHp = std::max(1.f, m_em->healths[i].maxHp);
+            const float frac = m_em->healths[i].currentHp / maxHp;
+            if (frac > config["suicide_hp_fraction"].get_or(0.3f)) return false;
+
+            ec.frenzyState = FrenzyState::Ignite;
+            ec.frenzyTimer = config["suicide_ignite_time"].get_or(0.8f);
+            ec.frenzy = 0.f;
+
+            // Drop everything he was doing. A rocket in the tube at the moment
+            // he ignites would arrive during the charge and muddy the read.
+            ec.telegraphActive = false;
+            ec.telegraphTimer = 0.f;
+            ec.rocketsLeft = 0;
+            ec.bashState = BashState::None;
+            ec.bashStrikePending = false;
+            ec.stormActive = false;
+
+            m_em->spawnShockRing(tf.position, 10.f, 150.f, 0.45f,
+                sf::Color(255, 210, 80), 5.f, 230.f);
+            m_em->addTrauma(0.22f);
+        }
+
+        switch (ec.frenzyState) {
+
+        case FrenzyState::Ignite: {
+            ec.frenzyTimer -= dt;
+            const float u = std::clamp(1.f - ec.frenzyTimer /
+                std::max(0.01f, config["suicide_ignite_time"].get_or(0.8f)), 0.f, 1.f);
+            ec.frenzy = u;
+
+            // Brake and shake. Coming to a near-stop makes the ignition read as
+            // a decision rather than as another movement state.
+            const b2Vec2 v = b2Body_GetLinearVelocity(bodyId);
+            const float brake = std::exp(-4.5f * dt);
+            b2Body_SetLinearVelocity(bodyId, { v.x * brake, v.y * brake });
+            b2Body_SetAngularVelocity(bodyId, 0.f);
+
+            tf.visualOffsetAngle += (9.f + 14.f * u) * std::sin(m_noiseTime * 61.f);
+
+            // ONE pulse, the same one the charge uses, just ramping in. The
+            // ignition and the charge are the same message -- he is low and he
+            // is coming -- so they should not look like two different events.
+            const float pulse = 1.f + 0.07f * u * std::sin(m_noiseTime * 11.f);
+            tf.visualScale.x *= pulse * (1.f + 0.06f * u);
+            tf.visualScale.y *= pulse * (1.f + 0.06f * u);
+
+            // The laugh, as sparks. No audio system to lean on, so the beat has
+            // to carry on motion and particles alone.
+            if ((rand() % 100) < 55) {
+                const float a = (rand() % 360) * 3.14159f / 180.f;
+                m_em->particles.push_back({ m_em->nextEntityId++,
+                    tf.position + sf::Vector2f(std::cos(a), std::sin(a)) * 20.f,
+                    sf::Vector2f(std::cos(a), std::sin(a)) * (90.f + rand() % 160),
+                    sf::Color(255, static_cast<uint8_t>(150 + rand() % 100), 40, 235),
+                    0.30f, 0.30f, 2.f + rand() % 3 });
+            }
+
+            if (ec.frenzyTimer <= 0.f) {
+                ec.frenzyState = FrenzyState::Charge;
+                ec.frenzyTimer = config["suicide_max_time"].get_or(9.f);
+                ec.frenzy = 1.f;
+            }
+            return true;
+        }
+
+        case FrenzyState::Charge: {
+            ec.frenzyTimer -= dt;
+            ec.frenzy = 1.f;
+
+            turnToward(tf, bodyId, toPlayerN, config["suicide_turn_rate"].get_or(5.0f), dt);
+
+            // Steered, not railed. A locked lane would make him dodgeable the
+            // same way a ram is, and the spec wants the answer to be parry or
+            // kill -- not sidestep.
+            const float spd = config["suicide_speed"].get_or(700.f);
+            const b2Vec2 v = b2Body_GetLinearVelocity(bodyId);
+            const b2Vec2 want = { toPlayerN.x * spd / SCALE, toPlayerN.y * spd / SCALE };
+            const float k = 1.f - std::exp(-6.f * dt);
+            b2Body_SetLinearVelocity(bodyId, { v.x + (want.x - v.x) * k,
+                                               v.y + (want.y - v.y) * k });
+
+            tf.visualOffsetAngle += 6.f * std::sin(m_noiseTime * 47.f);
+
+            // Heartbeat. Slower than the ignition strobe and perfectly
+            // regular, so the two beats never read as the same state: the
+            // ignition is a fault, the charge is a countdown.
+            {
+                const float beat = 1.f + 0.07f * std::sin(m_noiseTime * 11.f);
+                tf.visualScale.x *= beat;
+                tf.visualScale.y *= beat;
+            }
+
+            for (int k2 = 0; k2 < 4; ++k2) {
+                if ((rand() % 100) >= 70) continue;
+                const float a = (rand() % 360) * 3.14159f / 180.f;
+                m_em->particles.push_back({ m_em->nextEntityId++,
+                    tf.position + sf::Vector2f(std::cos(a), std::sin(a)) * 24.f,
+                    sf::Vector2f(std::cos(a), std::sin(a)) * (60.f + rand() % 120),
+                    sf::Color(255, static_cast<uint8_t>(90 + rand() % 90), 30, 220),
+                    0.22f, 0.22f, 2.f + rand() % 3 });
+            }
+
+            // Safety valve: a Maniac who somehow never reaches anyone goes off
+            // anyway rather than charging forever.
+            if (ec.frenzyTimer <= 0.f) m_em->healths[i].currentHp = 0.f;
+            return true;
+        }
+
+        case FrenzyState::Thrown: {
+            // No AI. DamageSystem owns the fuse and the blast; this branch
+            // exists only to make sure nothing else drives the body.
+            ec.frenzy = 1.f;
+            return true;
+        }
+
+        default: return false;
+        }
+    }
+
+    // ========================================================================
+    // SKID ROCKETS
+    // ========================================================================
+    //
+    // One volley of `rocket_count`, spaced by `rocket_spacing` so the two
+    // rounds arrive on different lines rather than as one wide wall, then a
+    // mandatory micro-recovery. Fired at the player's ENTITY ID, not their
+    // position: the flight code steers, and steering is the point.
+    void updateRockets(float dt, TransformComponent& tf, EnemyComponent& ec, AIState& ai,
+        uint32_t entityId, sol::table& config, sf::Vector2f toPlayerN, float dist)
+    {
+        (void)dt;
+        if (!config["rocket_enabled"].get_or(false)) return;
+        if (ai.currentState != EnemyState::COMBAT) return;
+        if (ec.frenzyState != FrenzyState::None) return;
+        if (ec.bashState != BashState::None || ec.ramState != RamState::None) return;
+
+        // ---- Mid-volley ----
+        if (ec.rocketsLeft > 0) {
+            ec.rocketVolleyTimer -= dt;
+            if (ec.rocketVolleyTimer > 0.f) return;
+
+            fireRocket(tf, ec, entityId, toPlayerN, config);
+            if (--ec.rocketsLeft > 0) {
+                ec.rocketVolleyTimer = config["rocket_spacing"].get_or(0.22f);
+            }
+            else {
+                // The punish window. Short enough not to feel like a stun,
+                // long enough that closing on him after a volley is a real
+                // option rather than a coin flip.
+                ec.microRecover = config["micro_recover"].get_or(0.8f);
+                // Mines right after the volley: the punish window is not free.
+                ec.mineTimer = std::min(ec.mineTimer, 0.05f);
+                ec.rocketCooldown = config["rocket_cooldown"].get_or(4.5f)
+                    + (rand() % 120) / 100.f;
+            }
+            return;
+        }
+
+        if (ec.microRecover > 0.f || ec.rocketCooldown > 0.f) return;
+        if (ec.telegraphActive) return;
+
+        const float minR = config["rocket_min_range"].get_or(260.f);
+        const float maxR = config["rocket_max_range"].get_or(900.f);
+        if (dist < minR || dist > maxR) return;
+
+        const int cMin = std::max(1, config["rocket_count_min"].get_or(1));
+        const int cMax = std::max(cMin, config["rocket_count_max"].get_or(2));
+        ec.rocketsLeft = cMin + rand() % (cMax - cMin + 1);
+        ec.rocketVolleyTimer = 0.f;
+    }
+
+    // ========================================================================
+    // MINES
+    // ========================================================================
+    //
+    // Dropped behind him while he moves, and in a small cluster right after a
+    // volley -- which is what makes chasing him down immediately after rockets
+    // the greedy option it is meant to be. The active cap is per unit and
+    // counted live, so a long fight cannot carpet the arena.
+    void updateMines(float dt, TransformComponent& tf, EnemyComponent& ec, AIState& ai,
+        uint32_t entityId, sol::table& config)
+    {
+        if (!config["mine_enabled"].get_or(false)) return;
+        if (ec.frenzyState != FrenzyState::None) return;   // ranged kit is gone
+        if (ai.currentState != EnemyState::COMBAT) return;
+
+        ec.mineTimer -= dt;
+        if (ec.mineTimer > 0.f) return;
+
+        // Only drop while actually moving: a mine laid by a stationary ship
+        // lands on top of him and reads as a bug rather than as a trail.
+        const b2Vec2 v = b2Body_GetLinearVelocity(m_em->physics[
+            m_em->getEntityIndex(entityId)].bodyId);
+        const sf::Vector2f vel(v.x * SCALE, v.y * SCALE);
+        const float speed = std::sqrt(vel.x * vel.x + vel.y * vel.y);
+        if (speed < config["mine_min_speed"].get_or(60.f)) return;
+
+        if (countMines(entityId) >= config["mine_max_active"].get_or(4)) {
+            ec.mineTimer = 1.0f;   // at cap: check again shortly
+            return;
+        }
+
+        // Behind him, with a little of his own momentum, so it drifts off the
+        // exact line he took -- a perfectly spaced trail looks authored.
+        const sf::Vector2f back = -vel / std::max(1.f, speed);
+        const sf::Vector2f jitter((float)((rand() % 40) - 20), (float)((rand() % 40) - 20));
+        m_ef->createMine(*m_em, tf.position + back * 30.f + jitter,
+            back * (25.f + rand() % 40) + vel * 0.15f, entityId, m_worldId, config);
+
+        ec.mineTimer = config["mine_interval"].get_or(2.6f) + (rand() % 90) / 100.f;
+    }
+
+    int countMines(uint32_t ownerId) const {
+        int n = 0;
+        for (const auto& b : m_em->bullets)
+            if (b.isMine && b.ownerEntityId == ownerId) ++n;
+        return n;
+    }
+
+    void fireRocket(TransformComponent& tf, EnemyComponent& ec, uint32_t entityId,
+        sf::Vector2f toPlayerN, sol::table& config)
+    {
+        (void)ec;
+        // Launched off-axis, alternating sides. Firing both rounds down the
+        // centreline would let one rocket eat the other's blast the moment the
+        // first one detonates.
+        const float spread = config["rocket_launch_spread"].get_or(26.f)
+            * ((rand() % 2) ? 1.f : -1.f);
+        const float r = spread * 3.14159f / 180.f;
+        const sf::Vector2f dir(toPlayerN.x * std::cos(r) - toPlayerN.y * std::sin(r),
+            toPlayerN.x * std::sin(r) + toPlayerN.y * std::cos(r));
+
+        const float angle = std::atan2(dir.y, dir.x) * 180.f / 3.14159f + 90.f;
+        const sf::Vector2f spawn = tf.position + dir * 34.f;
+
+        m_ef->createEnemyRocket(*m_em, spawn, angle, entityId,
+            m_playerEntityId, m_worldId, config);
+
+        m_em->spawnImpact(spawn, sf::Color(255, 180, 80), dir * -240.f);
+        m_em->spawnShockRing(spawn, 3.f, 26.f, 0.16f, sf::Color(255, 190, 90), 2.f, 190.f);
+    }
+
+    // ========================================================================
     // BASH — the parriable melee lunge
     // ========================================================================
     //
@@ -944,6 +1277,7 @@ private:
             if (!config["bash_enabled"].get_or(false)) return false;
             if (ec.bashCooldown > 0.f) return false;
             if (ai.currentState != EnemyState::COMBAT) return false;
+            if (ec.microRecover > 0.f) return false;
             if (ec.ramState != RamState::None) return false;
             if (dist > config["bash_trigger_range"].get_or(150.f)) return false;
             // Own rounds still in the air: wait. A lunge arriving alongside
@@ -1409,6 +1743,8 @@ private:
 
         if (ec.fireTimer > 0.f || dist > attackRange) return;
         if (ec.shotPauseTimer > 0.f) return;
+        if (ec.microRecover > 0.f) return;     // reloading, not shooting
+        if (ec.rocketsLeft > 0) return;        // mid-volley: one weapon at a time
 
         const float bulletSpeed = config["bullet_speed"].get_or(550.f);
         const float travelTime = dist / bulletSpeed;

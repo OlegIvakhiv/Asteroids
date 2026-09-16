@@ -44,8 +44,24 @@
  *  - PER-ARCHETYPE DEATH (`death_style = "visceral"`): the hull splits into
  *    its own triangles.
  *
+ * CHANGED in 1.5 -- MANIAC
+ *
+ *  - detonate(): one AoE helper for rockets, thrown Maniacs and suicide
+ *    blasts. Friendly fire is ON in all three cases, which is the entire
+ *    reason to redirect any of them.
+ *
+ *  - Rockets never despawn quietly: fuse end or contact both route through
+ *    the blast. Parrying one does not destroy it -- it keeps the entity and
+ *    goes wild, spinning off in the parried direction on the fuse it has
+ *    left, now dangerous to the squad that fired it.
+ *
+ *  - Suicide contact: parried -> FrenzyState::Thrown (a spinning bomb with
+ *    the player credited for wherever it lands); not parried -> full blast on
+ *    the player. Killed mid-charge -> a smaller blast, so shooting him down
+ *    early stays the safe answer and therefore a real choice.
+ *
  * @author Oleg Ivakhiv
- * @version 1.4 (melee contracts)
+ * @version 1.5 (maniac)
  */
 
 #pragma once
@@ -95,6 +111,11 @@ public:
         // Before contacts, so a lunge that also produced a begin-touch this
         // frame is already settled when that contact is looked at.
         resolveBashStrikes(playerIdx);
+
+        // ====================================================================
+        // 1c. THROWN MANIACS — fuse and impact
+        // ====================================================================
+        updateThrown(dt);
         // ====================================================================
         // 2. PROCESS BOX2D CONTACT EVENTS
         // ====================================================================
@@ -111,6 +132,65 @@ public:
 
             BodyType typeA = udA ? udA->type : BodyType::Asteroid;
             BodyType typeB = udB ? udB->type : BodyType::Asteroid;
+
+            // ================================================================
+            // 2a-pre. ORDNANCE vs ANYTHING
+            // ================================================================
+            // Rockets and mines resolve here rather than in the player-centric
+            // block below, because most of their interesting contacts do not
+            // involve the player at all: a parried rocket meeting a Raider, a
+            // Rakshari drifting into his own squadmate's minefield. Handling
+            // them only where the player was one of the two bodies is exactly
+            // why parried rockets appeared to pass through enemies.
+            {
+                size_t ordIdx = (size_t)-1, otherIdx2 = (size_t)-1;
+                BodyType otherType2 = BodyType::Asteroid;
+
+                for (int pass = 0; pass < 2; ++pass) {
+                    BodyUserData* ud = pass ? udB : udA;
+                    BodyType t = pass ? typeB : typeA;
+                    if (t != BodyType::Bullet || !ud) continue;
+                    const size_t idx = m_em->getEntityIndex(ud->entityId);
+                    if (idx == (size_t)-1) continue;
+                    if (!m_em->bullets[idx].isRocket && !m_em->bullets[idx].isMine) continue;
+
+                    BodyUserData* oud = pass ? udA : udB;
+                    ordIdx = idx;
+                    otherIdx2 = oud ? m_em->getEntityIndex(oud->entityId) : (size_t)-1;
+                    otherType2 = pass ? typeA : typeB;
+                    break;
+                }
+
+                if (ordIdx != (size_t)-1) {
+                    auto& ord = m_em->bullets[ordIdx];
+
+                    // Its own launcher, or not armed yet: pass through.
+                    const bool ownerHit = (otherIdx2 != (size_t)-1) &&
+                        (m_em->transforms[otherIdx2].entityId == ord.ownerEntityId);
+
+                    if (ord.armTimer > 0.f || ownerHit) continue;
+
+                    // A player round meeting ordnance is a SHOOT-DOWN, handled
+                    // as damage in 2a so a tough mine takes more than one hit.
+                    if (otherType2 == BodyType::Bullet) {
+                        // ordnance vs ordnance: let the blast chain handle it
+                        continue;
+                    }
+
+                    // The player's own parry beats the blast -- checked before
+                    // detonation, or the correct answer to a rocket would be to
+                    // never let it touch you.
+                    const bool isPlayerHit = (otherIdx2 == playerIdx);
+                    if (isPlayerHit && ord.isRocket &&
+                        m_em->players[playerIdx].parryTimer > 0.f) {
+                        parryRocket(playerIdx, ordIdx);
+                        continue;
+                    }
+
+                    ord.markedForDestroy = true;
+                    continue;
+                }
+            }
 
             // ================================================================
             // 2a. BULLET vs TARGET  (damage read from the projectile)
@@ -144,7 +224,21 @@ public:
                     // ---- THE FIX: damage comes from the projectile ----
                     const float dmg = blt.damage * blt.damageMultiplier;
 
-                    if (targetType == BodyType::Asteroid) {
+                    if (targetType == BodyType::Bullet) {
+                        // Shooting ordnance out of the air. It takes real
+                        // damage rather than popping on any hit, so clearing a
+                        // minefield costs ammo and heat -- and a mine shot next
+                        // to a Rakshari still detonates on THEM.
+                        auto& tgt = m_em->bullets[targetIdx];
+                        if (tgt.isMine || tgt.isRocket) {
+                            m_em->healths[targetIdx].currentHp -= dmg;
+                            m_em->spawnImpact(hitPos, sf::Color(255, 170, 70), hitVel);
+                            if (m_em->healths[targetIdx].currentHp <= 0.f)
+                                tgt.markedForDestroy = true;
+                            blt.markedForDestroy = true;
+                        }
+                    }
+                    else if (targetType == BodyType::Asteroid) {
                         m_em->healths[targetIdx].currentHp -= dmg;
                         applyKnockback(targetIdx, hitVel, blt.knockback);
                         m_em->spawnImpact(hitPos, sf::Color(180, 180, 180), hitVel);
@@ -217,8 +311,33 @@ public:
 
                 bool isParryActive = m_em->players[playerIdx].parryTimer > 0;
 
+                // ---- ROCKETS ----
+                // Any contact ends the flight; the blast is applied on
+                // destruction so there is exactly one code path into it.
+                if (otherType == BodyType::Bullet && otherIdx != (size_t)-1 &&
+                    m_em->bullets[otherIdx].isRocket) {
+                    if (m_em->bullets[otherIdx].armTimer <= 0.f) {
+                        // A parry beats the blast, so check it before arming
+                        // the detonation -- otherwise the correct answer to a
+                        // rocket would be to never touch it.
+                        if (m_em->players[playerIdx].parryTimer > 0.f) {
+                            parryRocket(playerIdx, otherIdx);
+                            continue;
+                        }
+                        m_em->bullets[otherIdx].markedForDestroy = true;
+                    }
+                    continue;
+                }
+
                 // ---- ENEMY MID-COMMIT: the attack owns the outcome ----
                 if (otherType == BodyType::Enemy && otherIdx != (size_t)-1) {
+                    // Suicide charge: parry flips him into a thrown bomb,
+                    // anything else eats the full blast.
+                    if (m_em->enemies[otherIdx].frenzyState == FrenzyState::Charge ||
+                        m_em->enemies[otherIdx].frenzyState == FrenzyState::Thrown) {
+                        resolveFrenzyContact(playerIdx, otherIdx);
+                        continue;
+                    }
                     if (isRamInvulnerable(otherIdx)) {
                         if (isParryActive) {
                             // Parry whiffs against a charge. Loud, so it reads
@@ -650,6 +769,15 @@ public:
             }
             else if (type == BodyType::Bullet &&
                 (m_em->bullets[i].markedForDestroy || m_em->bullets[i].lifetime <= 0)) {
+                // A rocket always goes off -- on contact, or when its fuse
+                // runs out mid-air. Never a silent despawn: a live fuse the
+                // player has walked away from is a hazard they earned.
+                const auto& b = m_em->bullets[i];
+                if (b.isRocket || (b.isMine && b.armTimer <= 0.f)) {
+                    detonate(m_em->transforms[i].position, b.blastRadius, b.blastDamage,
+                        i, b.isWild ? playerIdx : (size_t)-1,
+                        b.isWild ? sf::Color(255, 240, 180) : sf::Color(255, 130, 40));
+                }
                 shouldDestroy = true;
             }
 
@@ -934,10 +1062,295 @@ private:
     }
 
     // ========================================================================
+    // AREA BLASTS
+    // ========================================================================
+
+    /**
+     * @brief One radial blast: damage with falloff, stagger, FX.
+     *
+     * @param skipIdx    the source entity (never damages itself)
+     * @param creditIdx  index whose stagger is suppressed -- the player when
+     *                   the blast is theirs. A redirected payload that still
+     *                   knocked the player around would punish the parry.
+     *
+     * Friendly fire is unconditional. Every hazard the Maniac produces is
+     * worth redirecting precisely BECAUSE it does not care whose hull it
+     * touches; an "enemies are immune" rule would quietly delete the reason
+     * to parry any of it.
+     */
+    void detonate(sf::Vector2f pos, float radius, float damage,
+        size_t skipIdx, size_t creditIdx, sf::Color tint)
+    {
+        if (radius <= 1.f || damage <= 0.f) return;
+
+        const size_t playerIdx = m_em->getEntityIndex(m_playerEntityId);
+
+        m_em->addDebugAoE(pos, radius, tint, 0.35f);
+        m_em->spawnShockRing(pos, 12.f, radius, 0.30f, tint, 6.f, 240.f);
+        m_em->addTrauma(std::clamp(radius / 420.f, 0.12f, 0.45f));
+
+        // ---- Debris field ----
+        // Particle count scales with the blast instead of being fixed, so
+        // shrinking a radius for balance does not also make the explosion look
+        // cheap -- a small blast should be DENSE, not sparse.
+        const int burst = 34 + static_cast<int>(radius * 0.30f);
+        m_em->spawnExplosion(pos, tint, burst, 4.2f);
+        m_em->spawnExplosion(pos, sf::Color(255, 245, 215), burst / 3, 2.6f);
+
+        // NOTE: no big "core" particle here. Particles are axis-aligned
+        // squares, so anything above ~40px reads as a literal cube sitting in
+        // the middle of the explosion. The centre is carried by the shock ring
+        // and the dense small stuff instead.
+
+        // Radial streaks out to the actual damage edge: the ring says WHERE
+        // the blast ends, and these make that edge legible mid-fight.
+        for (int a = 0; a < 360; a += 14) {
+            const float r = a * 3.14159f / 180.f;
+            const sf::Vector2f d(std::cos(r), std::sin(r));
+            const float sp = radius * (2.6f + (rand() % 90) / 100.f);
+            const float life = 0.22f + (rand() % 26) / 100.f;
+            m_em->particles.push_back({ m_em->nextEntityId++,
+                pos + d * (radius * 0.18f), d * sp,
+                sf::Color(255, static_cast<uint8_t>(150 + rand() % 90), 60, 240),
+                life, life, 2.f + rand() % 3 });
+        }
+
+        // Slow smoke that outlives the flash and marks the spot.
+        for (int k = 0; k < 8; ++k) {
+            const float r = (rand() % 360) * 3.14159f / 180.f;
+            m_em->particles.push_back({ m_em->nextEntityId++, pos,
+                sf::Vector2f(std::cos(r), std::sin(r)) * (25.f + rand() % 55),
+                sf::Color(80, 62, 55, 165), 0.85f, 0.85f, 6.f + rand() % 6 });
+        }
+
+        for (size_t j = 0; j < m_em->physics.size(); ++j) {
+            if (j == skipIdx) continue;
+
+            // Bullets in the blast are ignored on purpose: chaining every
+            // round in the air turns two rockets into an arena-wide cascade.
+            BodyUserData* ud = b2Body_IsValid(m_em->physics[j].bodyId)
+                ? (BodyUserData*)b2Body_GetUserData(m_em->physics[j].bodyId) : nullptr;
+            if (ud && ud->type == BodyType::Bullet) continue;
+
+            const sf::Vector2f o = m_em->transforms[j].position;
+            const float dx = pos.x - o.x, dy = pos.y - o.y;
+            const float d = std::sqrt(dx * dx + dy * dy);
+            if (d >= radius) continue;
+
+            const float falloff = 1.f - (d / radius);
+            m_em->healths[j].currentHp -= damage * falloff;
+
+            if (ud && ud->type == BodyType::Enemy && j < m_em->enemies.size()) {
+                m_em->enemies[j].hitFlashTimer = 0.2f;
+                m_em->enemies[j].timesHit += 2;   // an AoE is unambiguous
+            }
+
+            if (j == playerIdx && j != creditIdx &&
+                falloff > vcfg("stagger_blast_falloff", 0.45f)) {
+                m_em->staggerPlayer(playerIdx, o - pos,
+                    vcfg("stagger_knockback", 900.f) * falloff,
+                    vcfg("stagger_tumble_duration", 1.1f),
+                    vcfg("stagger_recover_duration", 0.55f),
+                    vcfg("stagger_spin_speed", 620.f));
+            }
+        }
+    }
+
+    // ========================================================================
+    // ROCKETS
+    // ========================================================================
+
+    /**
+     * @brief Parry a skid rocket: it survives, and changes sides.
+     *
+     * Destroying it would make the parry a defensive button identical to
+     * shooting the rocket down. Keeping the entity alive -- same fuse, no
+     * guidance, spinning off the way it was hit -- is what turns a defensive
+     * read into an offensive one, and what lets the player aim it at the
+     * squad that fired it.
+     */
+    void parryRocket(size_t playerIdx, size_t rocketIdx) {
+        auto& b = m_em->bullets[rocketIdx];
+        const sf::Vector2f rPos = m_em->transforms[rocketIdx].position;
+        const sf::Vector2f pPos = m_em->transforms[playerIdx].position;
+
+        sf::Vector2f dir = rPos - pPos;
+        float l = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+        if (l > 0.01f) dir /= l;
+        else dir = { 0.f, -1.f };
+
+        b.isWild = true;
+        b.homingTargetEntityId = 0;     // no guidance, ever again
+        b.homingTurnRate = 0.f;
+        b.trackTimer = 0.f;
+        b.skidTurnRate = 0.f;
+        b.spin = ((rand() % 2) ? 1.f : -1.f) * (620.f + rand() % 560);
+        b.wanderAmp = wcfg("parry_rocket_wander", 430.f);
+        b.wanderFreq = 4.2f + (rand() % 40) / 10.f;
+        b.wanderPhase = static_cast<float>(rand() % 628) / 100.f;
+        b.ownerEntityId = m_playerEntityId;
+        b.isEnemyBullet = false;        // it belongs to the player now
+        b.armTimer = wcfg("parry_rocket_arm", 0.10f);
+        b.blastDamage *= wcfg("parry_rocket_damage_mult", 1.6f);
+        b.blastRadius *= wcfg("parry_rocket_radius_mult", 1.15f);
+
+        // Fuse untouched but floored, so a rocket parried in its last moments
+        // still has time to travel somewhere worth travelling to.
+        b.lifetime = std::max(b.lifetime, wcfg("parry_rocket_min_fuse", 1.6f));
+
+        const float speed = wcfg("parry_rocket_speed", 780.f);
+        if (b2Body_IsValid(m_em->physics[rocketIdx].bodyId)) {
+            b2Body_SetLinearVelocity(m_em->physics[rocketIdx].bodyId,
+                { dir.x * speed / SCALE, dir.y * speed / SCALE });
+        }
+
+        auto& sh = m_em->renders[rocketIdx].shape;
+        sh.setFillColor(sf::Color(255, 250, 225));
+        sh.setOutlineColor(sf::Color(120, 255, 220, 240));
+        sh.setOutlineThickness(2.6f);
+
+        m_em->spawnExplosion(rPos, sf::Color(0, 255, 200), 14, 2.2f);
+        onParrySuccess(playerIdx, rPos);
+        if (isPerfectParry(playerIdx)) onPerfectParry(playerIdx, rPos);
+    }
+
+    // ========================================================================
+    // FRENZY
+    // ========================================================================
+
+    /// Tick every thrown Maniac's fuse. Impact is handled by the contact loop;
+    /// this is the timeout, and the safety net for one thrown into open space.
+    void updateThrown(float dt) {
+        for (size_t i = 0; i < m_em->enemies.size(); ++i) {
+            auto& ec = m_em->enemies[i];
+            if (ec.frenzyState != FrenzyState::Thrown) continue;
+            if (ec.detonated) continue;
+
+            ec.frenzyTimer -= dt;
+
+            // Trailing sparks: a thrown Maniac must be legible as a hazard in
+            // flight, not just as a ragdoll.
+            if ((rand() % 100) < 70) {
+                const float a = (rand() % 360) * 3.14159f / 180.f;
+                m_em->particles.push_back({ m_em->nextEntityId++,
+                    m_em->transforms[i].position +
+                        sf::Vector2f(std::cos(a), std::sin(a)) * 18.f,
+                    sf::Vector2f(std::cos(a), std::sin(a)) * (70.f + rand() % 140),
+                    sf::Color(255, static_cast<uint8_t>(120 + rand() % 110), 50, 230),
+                    0.26f, 0.26f, 3.f });
+            }
+
+            if (ec.frenzyTimer <= 0.f) blowUpManiac(i, true);
+        }
+    }
+
+    /**
+     * @brief The player's hull met a charging (or thrown) Maniac.
+     *
+     * Parried mid-charge, he becomes ordnance: same body, no AI, thrown along
+     * the parry with a hard spin and a short fuse. Unparried, the charge does
+     * what it promised.
+     */
+    void resolveFrenzyContact(size_t playerIdx, size_t enIdx) {
+        auto& ec = m_em->enemies[enIdx];
+        if (ec.detonated) return;
+
+        // Already thrown: touching anything is impact, including the player.
+        if (ec.frenzyState == FrenzyState::Thrown) { blowUpManiac(enIdx, true); return; }
+
+        const sf::Vector2f ePos = m_em->transforms[enIdx].position;
+        const sf::Vector2f pPos = m_em->transforms[playerIdx].position;
+
+        // ---- PARRIED ----
+        if (m_em->players[playerIdx].parryTimer > 0.f) {
+            sf::Vector2f away = ePos - pPos;
+            float l = std::sqrt(away.x * away.x + away.y * away.y);
+            if (l > 0.01f) away /= l; else away = { 0.f, -1.f };
+
+            ec.frenzyState = FrenzyState::Thrown;
+            ec.frenzyTimer = wcfg("thrown_fuse", 2.0f);
+            ec.frenzyDir = away;
+            ec.bashState = BashState::None;
+            ec.ramState = RamState::None;
+
+            // Stunned for longer than the fuse. He must not steer, and an
+            // AI that woke up mid-flight would undo the whole trick.
+            m_em->healths[enIdx].stunTimer = ec.frenzyTimer + 1.f;
+
+            if (b2Body_IsValid(m_em->physics[enIdx].bodyId)) {
+                const float spd = wcfg("thrown_speed", 1150.f);
+                b2Body_SetLinearVelocity(m_em->physics[enIdx].bodyId,
+                    { away.x * spd / SCALE, away.y * spd / SCALE });
+                b2Body_SetAngularVelocity(m_em->physics[enIdx].bodyId,
+                    ((rand() % 2) ? 1.f : -1.f) * wcfg("thrown_spin", 14.f));
+            }
+
+            m_em->spawnExplosion(ePos, sf::Color(0, 255, 200), 26, 3.4f);
+            m_em->spawnShockRing(ePos, 14.f, 150.f, 0.28f, sf::Color(120, 255, 230), 4.f, 240.f);
+            onParrySuccess(playerIdx, (pPos + ePos) * 0.5f);
+            if (isPerfectParry(playerIdx)) onPerfectParry(playerIdx, ePos);
+            return;
+        }
+
+        // ---- NOT PARRIED ----
+        blowUpManiac(enIdx, true);
+    }
+
+    /**
+     * @brief Blow him up where he stands and mark him dead.
+     *
+     * @param full  true for a completed charge or a thrown impact; false for a
+     *              charge that was shot down. The smaller blast is what keeps
+     *              "kill him early" a genuinely safer answer than "parry him",
+     *              rather than a strictly worse one.
+     */
+    void blowUpManiac(size_t i, bool full) {
+        auto& ec = m_em->enemies[i];
+        if (ec.detonated) return;
+        ec.detonated = true;
+
+        const sf::Vector2f pos = m_em->transforms[i].position;
+        const float radius = acfg(i, "suicide_blast_radius", 260.f) * (full ? 1.f : 0.55f);
+        const float damage = acfg(i, "suicide_blast_damage", 75.f) * (full ? 1.f : 0.45f);
+
+        // A Maniac thrown by the player should not then stagger the player.
+        const size_t credit = (ec.frenzyState == FrenzyState::Thrown)
+            ? m_em->getEntityIndex(m_playerEntityId) : (size_t)-1;
+
+        detonate(pos, radius, damage, i, credit, sf::Color(255, 170, 60));
+        m_em->spawnExplosion(pos, sf::Color(255, 240, 190), 30, 5.0f);
+
+        // ---- FLASH ----
+        // Screen-level only. The previous version also dropped a huge white
+        // particle at the epicentre, which -- particles being squares -- drew
+        // a white cube in the middle of the blast.
+        const float white = full ? 1.f : 0.55f;
+        m_em->spawnScreenFlash(sf::Color(255, 245, 235), 0.26f * white, 165.f * white);
+        m_em->spawnShockRing(pos, 8.f, radius * 0.55f, 0.14f,
+            sf::Color(255, 250, 240), 10.f, 255.f);
+        m_em->requestHitstop(0.04f * white, 0.11f, 0.38f);
+
+        m_em->healths[i].currentHp = 0.f;
+    }
+
+    // ========================================================================
     // ENEMY DEATH
     // ========================================================================
 
     void spawnEnemyDeath(size_t i, sf::Vector2f deathPos) {
+        // Already blew himself up -- the blast WAS the death. Stacking a
+        // standard explosion on top of it would read as two separate events.
+        if (m_em->enemies[i].detonated) return;
+
+        // Shot down mid-charge: it still goes off, just smaller. A Maniac who
+        // simply vanished when killed during the charge would make the whole
+        // ignition beat retroactively meaningless.
+        if (m_em->enemies[i].frenzyState == FrenzyState::Ignite ||
+            m_em->enemies[i].frenzyState == FrenzyState::Charge) {
+            blowUpManiac(i, false);
+            return;
+        }
+
         if (m_registry) {
             const enemyarch::ArchetypeDef& adef = m_registry->resolve(m_em->enemies[i].archetype);
             if (adef.config["death_style"].get_or<std::string>("standard") == "visceral") {
