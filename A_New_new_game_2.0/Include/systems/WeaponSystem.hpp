@@ -307,46 +307,31 @@ private:
                 const sf::Vector2f mp = m_em->transforms[i].position;
 
                 if (bullet.mineArmed && bullet.mineFuse <= 0.f) {
-                    // Idle blink: slow, so an armed mine reads as present but
-                    // not urgent. The urgency is reserved for the fuse.
-                    if ((rand() % 100) < 7) {
-                        m_em->particles.push_back({ m_em->nextEntityId++, mp,
-                            { 0.f, 0.f }, sf::Color(255, 140, 50, 220),
-                            0.18f, 0.18f, 4.f });
-                    }
 
-                    // Triggered by the player OR by any enemy: the Maniac's own
-                    // squad walking into his minefield is the joke landing.
-                    for (size_t j = 0; j < m_em->physics.size(); ++j) {
-                        if (j == i) continue;
-                        BodyUserData* jud = b2Body_IsValid(m_em->physics[j].bodyId)
-                            ? (BodyUserData*)b2Body_GetUserData(m_em->physics[j].bodyId)
-                            : nullptr;
-                        if (!jud) continue;
-                        if (jud->type != BodyType::Player && jud->type != BodyType::Enemy) continue;
-
-                        const sf::Vector2f d = m_em->transforms[j].position - mp;
-                        if (d.x * d.x + d.y * d.y > bullet.mineTrigger * bullet.mineTrigger)
-                            continue;
-
-                        bullet.mineFuse = bullet.mineFuseTime;
-                        m_em->spawnShockRing(mp, 6.f, bullet.mineTrigger, 0.30f,
-                            sf::Color(255, 90, 40), 3.f, 230.f);
-                        break;
+                    // ---- ZONE TRIGGER: THE PLAYER ONLY ----
+                    // Rakshari crossing a minefield set nothing off. That is
+                    // deliberate: if his own squad tripped these by flying
+                    // past, a Maniac in a pack would clear his own field
+                    // within seconds and the hazard would never reach you.
+                    // They can still set one off by DAMAGING it -- a stray
+                    // round, a blast, a bash -- which is handled in
+                    // DamageSystem, not here.
+                    const size_t pIdx = m_em->getEntityIndex(m_playerEntityId);
+                    if (pIdx != (size_t)-1) {
+                        const sf::Vector2f d = m_em->transforms[pIdx].position - mp;
+                        if (d.x * d.x + d.y * d.y <= bullet.mineTrigger * bullet.mineTrigger)
+                            m_em->lightMineFuse(bullet, mp);
                     }
                 }
                 else if (bullet.mineFuse > 0.f) {
                     bullet.mineFuse -= dt;
 
-                    // Blink rate ramps as the fuse burns -- the countdown has
-                    // to be readable from across the arena, because the whole
-                    // point is deciding whether you can still cross.
                     const float urgency = 1.f - std::clamp(
                         bullet.mineFuse / std::max(0.1f, bullet.mineFuseTime), 0.f, 1.f);
-                    if ((rand() % 100) < static_cast<int>(18 + 62 * urgency)) {
+                    if ((rand() % 100) < static_cast<int>(20 + 65 * urgency)) {
                         m_em->particles.push_back({ m_em->nextEntityId++, mp,
                             { (float)((rand() % 120) - 60), (float)((rand() % 120) - 60) },
-                            sf::Color(255, static_cast<uint8_t>(200 - 120 * urgency), 60, 240),
+                            sf::Color(255, static_cast<uint8_t>(90 - 50 * urgency), 45, 240),
                             0.14f, 0.14f, 3.f + 2.f * urgency });
                     }
 
@@ -384,19 +369,20 @@ private:
                 const b2Vec2 rv = b2Body_GetLinearVelocity(bodyId);
                 const sf::Vector2f v(rv.x * SCALE, rv.y * SCALE);
 
-                // ---- WILD: chaotic arcs ----
-                // The heading is steered by two sines that never line up, so
-                // it carves arcs and reverses them at no fixed interval.
-                if (bullet.isWild && bullet.wanderAmp > 0.f) {
-                    bullet.wanderPhase += dt * bullet.wanderFreq;
-                    const float p = bullet.wanderPhase;
-                    const float turnDeg = (std::sin(p) + 0.62f * std::sin(p * 2.7f + 1.3f)
-                        + 0.31f * std::sin(p * 5.3f + 0.7f)) * bullet.wanderAmp * dt;
-                    const float t = turnDeg * 3.14159f / 180.f;
-                    const float c = std::cos(t), sn = std::sin(t);
+                // ---- WILD: sent, tumbling, and slowing ----
+                // It travels the way you hit it. The tumble is the read that
+                // it is no longer guided, but the PATH stays honest, because a
+                // parried rocket that curved away from everything was a high
+                // risk with no payoff. It bleeds speed and goes off on its own
+                // once it stalls, so a parry always ends in a detonation
+                // somewhere -- the only question is where you put it.
+                if (bullet.isWild && bullet.wildDrag > 0.f) {
                     const b2Vec2 v0 = b2Body_GetLinearVelocity(bodyId);
-                    b2Body_SetLinearVelocity(bodyId,
-                        { v0.x * c - v0.y * sn, v0.x * sn + v0.y * c });
+                    const float decay = std::exp(-bullet.wildDrag * dt);
+                    b2Body_SetLinearVelocity(bodyId, { v0.x * decay, v0.y * decay });
+
+                    const float spd = std::sqrt(v0.x * v0.x + v0.y * v0.y) * SCALE;
+                    if (spd < bullet.wildStallSpeed) bullet.markedForDestroy = true;
                 }
 
                 // A live rocket points where it flies. A parried one tumbles:
@@ -405,10 +391,17 @@ private:
                     m_em->transforms[i].rotation += bullet.spin * dt;
 
                     // Fake the second axis. The shape is flat, so squashing it
-                    // on a different phase than the roll reads as end-over-end
-                    // tumbling rather than as a sprite spinning on the spot.
-                    const float w = std::fabs(std::cos(bullet.wanderPhase * 1.7f + 0.9f));
-                    m_em->renders[i].shape.setScale({ 0.35f + 0.65f * w, 1.f });
+                    // on its own phase reads as end-over-end tumbling rather
+                    // than as a sprite spinning on the spot.
+                    //
+                    // The phase has to ADVANCE. It used to be driven by the
+                    // wander term, and when wander was removed the phase froze
+                    // -- leaving every parried rocket pinned at whatever squash
+                    // it happened to start on, usually a thin sliver. That is
+                    // why the parried rocket looked small and washed out.
+                    bullet.wanderPhase += dt * 7.4f;
+                    const float w = std::fabs(std::cos(bullet.wanderPhase));
+                    m_em->renders[i].shape.setScale({ 0.40f + 0.60f * w, 1.f });
                 }
                 else if (std::fabs(v.x) + std::fabs(v.y) > 1.f) {
                     m_em->transforms[i].rotation =
@@ -417,7 +410,10 @@ private:
 
                 // Exhaust. Wild rockets burn white-hot and throw more of it --
                 // at a glance you can tell which ones are now yours.
-                const int rate = bullet.isWild ? 2 : 1;
+                // Trail carries the ownership colour too, so a parried rocket
+                // is readable from the streak alone when the body itself is
+                // mid-tumble and briefly edge-on.
+                const int rate = bullet.isWild ? 3 : 1;
                 for (int k = 0; k < rate; ++k) {
                     const float jx = ((rand() % 60) - 30);
                     const float jy = ((rand() % 60) - 30);
@@ -425,10 +421,10 @@ private:
                         m_em->nextEntityId++,
                         m_em->transforms[i].position,
                         { -v.x * 0.18f + jx, -v.y * 0.18f + jy },
-                        bullet.isWild ? sf::Color(255, 240, 200, 220)
-                                      : sf::Color(255, 140, 40, 200),
-                        0.20f, 0.20f,
-                        bullet.isWild ? 4.f : 3.f });
+                        bullet.isWild ? sf::Color(255, 220, 60, 235)
+                                      : sf::Color(255, 110, 35, 205),
+                        0.22f, 0.22f,
+                        bullet.isWild ? 5.f : 3.f });
                 }
 
                 // Fuse warning: it gets visibly agitated before it goes off,
@@ -535,6 +531,15 @@ private:
             }
 
             if (bullet.lifetime <= 0 || bullet.markedForDestroy) {
+                // ORDNANCE IS NOT DESTROYED HERE.
+                // This was the bug behind "it just disappears instead of
+                // exploding": rockets and mines carry a blast that lives in
+                // DamageSystem, and destroying them here removed the entity
+                // before that code ever ran. Everything that ends a rocket or
+                // a mine -- fuse, stall, contact, gunfire -- has to funnel
+                // through the same detonation, so this loop leaves them alone
+                // and DamageSystem's destroy pass picks them up next.
+                if (bullet.isRocket || bullet.isMine) continue;
                 m_em->destroyEntity(i);
             }
         }

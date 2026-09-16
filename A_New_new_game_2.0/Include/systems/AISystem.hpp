@@ -263,6 +263,12 @@ public:
             updateMines(dt, tf, ec, ai, entityId, config);
 
             // ================================================================
+            // MINE RUN — owns the ship while it lays its field
+            // ================================================================
+            if (updateMineRun(dt, i, tf, ec, ai, bodyId, config,
+                toPlayerN, distToPlayer)) continue;
+
+            // ================================================================
             // BASH — owns movement, rotation and guns while active
             // ================================================================
             if (updateBash(dt, tf, ec, ai, bodyId, config, adef,
@@ -354,7 +360,7 @@ private:
         const uint32_t h = entityId * 2654435761u;
         auto frac = [&](int shift) {
             return static_cast<float>((h >> shift) & 0xFF) / 255.f;
-        };
+            };
 
         // Fixed profile (swarm / naval)
         if (!config["personality_variance"].get_or(true)) {
@@ -398,6 +404,7 @@ private:
         if (ec.shotClearTimer > 0.f) ec.shotClearTimer = std::max(0.f, ec.shotClearTimer - dt);
         if (ec.microRecover > 0.f) ec.microRecover = std::max(0.f, ec.microRecover - dt);
         if (ec.rocketCooldown > 0.f) ec.rocketCooldown = std::max(0.f, ec.rocketCooldown - dt);
+        if (ec.mineRunCooldown > 0.f) ec.mineRunCooldown = std::max(0.f, ec.mineRunCooldown - dt);
 
         // Trail outlives the charge by design; this must keep running in every
         // state or the wake freezes on screen when the ram ends.
@@ -980,6 +987,153 @@ private:
     }
 
     // ========================================================================
+    // MINE RUN — the laying dash
+    // ========================================================================
+    //
+    // A committed sprint that lays a wall of mines ACROSS the player's ground
+    // rather than behind the Maniac's own. Dropping only in his wake meant the
+    // field was always somewhere the player had no reason to go; this puts it
+    // where they are about to be.
+    //
+    // Harmless to touch. No damage, no invulnerability, no knockback -- the
+    // hazard is what it leaves, not the ship. That is the whole separation
+    // from a Berserker charge, and it has to survive tuning: the moment this
+    // deals contact damage it becomes a worse version of an attack that
+    // already exists.
+    //
+    // Returns true while it owns the ship.
+    bool updateMineRun(float dt, size_t i, TransformComponent& tf, EnemyComponent& ec,
+        AIState& ai, b2BodyId bodyId, sol::table& config,
+        sf::Vector2f toPlayerN, float dist)
+    {
+        (void)i;
+
+        switch (ec.mineRunState) {
+
+        case MineRunState::None: {
+            if (!config["mine_run_enabled"].get_or(false)) return false;
+            if (!config["mine_enabled"].get_or(false)) return false;
+            if (ec.mineRunCooldown > 0.f) return false;
+            if (ai.currentState != EnemyState::COMBAT) return false;
+            if (ec.frenzyState != FrenzyState::None) return false;
+            if (ec.microRecover > 0.f || ec.rocketsLeft != 0) return false;
+            if (ec.bashState != BashState::None) return false;
+
+            const float minR = config["mine_run_min_range"].get_or(240.f);
+            const float maxR = config["mine_run_max_range"].get_or(800.f);
+            if (dist < minR || dist > maxR) return false;
+            if (countMines(tf.entityId) >= config["mine_max_active"].get_or(6)) return false;
+
+            // ---- Pick the line ----
+            // Aim at where the player is GOING, offset sideways, so the run
+            // crosses their path instead of chasing it. A run straight at them
+            // lays mines they simply back away from.
+            sf::Vector2f lead = toPlayerN;
+            const float pv = std::sqrt(m_playerVel.x * m_playerVel.x +
+                m_playerVel.y * m_playerVel.y);
+            if (pv > 40.f) {
+                const sf::Vector2f pd = m_playerVel / pv;
+                const float weight = config["mine_run_lead"].get_or(0.55f);
+                lead = toPlayerN + pd * weight;
+                const float l = std::sqrt(lead.x * lead.x + lead.y * lead.y);
+                if (l > 0.01f) lead /= l;
+            }
+
+            ec.mineRunState = MineRunState::Windup;
+            ec.mineRunDuration = config["mine_run_windup"].get_or(0.45f);
+            ec.mineRunTimer = ec.mineRunDuration;
+            ec.mineRunDir = lead;
+            ec.telegraphActive = false;
+            ec.telegraphTimer = 0.f;
+            return true;
+        }
+
+        case MineRunState::Windup: {
+            ec.mineRunTimer -= dt;
+            ec.mineRunDir = toPlayerN;   // keeps tracking until the run starts
+            turnToward(tf, bodyId, ec.mineRunDir,
+                config["mine_run_turn"].get_or(9.f), dt);
+
+            const b2Vec2 v = b2Body_GetLinearVelocity(bodyId);
+            const float brake = std::exp(-6.f * dt);
+            b2Body_SetLinearVelocity(bodyId, { v.x * brake, v.y * brake });
+
+            // Sparks off the back: something is about to come out of there.
+            if ((rand() % 100) < 50) {
+                const float r = tf.rotation * 3.14159f / 180.f;
+                const sf::Vector2f aft(-std::sin(r), std::cos(r));
+                m_em->particles.push_back({ m_em->nextEntityId++,
+                    tf.position + aft * 26.f,
+                    aft * (40.f + rand() % 90),
+                    sf::Color(255, 180, 90, 225), 0.20f, 0.20f, 2.f + rand() % 2 });
+            }
+
+            if (ec.mineRunTimer <= 0.f) {
+                ec.mineRunState = MineRunState::Run;
+                ec.mineRunDuration = config["mine_run_time"].get_or(0.85f);
+                ec.mineRunTimer = ec.mineRunDuration;
+                ec.mineRunDrop = 0.f;   // distance accumulator: first drop is immediate
+                lockHeading(tf, bodyId, ec.mineRunDir);
+            }
+            return true;
+        }
+
+        case MineRunState::Run: {
+            ec.mineRunTimer -= dt;
+            lockHeading(tf, bodyId, ec.mineRunDir);
+
+            const float spd = config["mine_run_speed"].get_or(760.f);
+            b2Body_SetLinearVelocity(bodyId,
+                { ec.mineRunDir.x * spd / SCALE, ec.mineRunDir.y * spd / SCALE });
+
+            // ---- Spacing is DISTANCE, not time ----
+            // A timed drop bunches the whole carpet into one clump whenever
+            // the run is slow or short, and the blast zones then sit on top of
+            // each other: six mines covering one mine's worth of ground. The
+            // gap defaults to a full blast radius, so the zones touch without
+            // overlapping and the carpet actually spans a line the player has
+            // to go around rather than a spot they step past.
+            ec.mineRunDrop -= std::sqrt(
+                (ec.mineRunDir.x * spd * dt) * (ec.mineRunDir.x * spd * dt) +
+                (ec.mineRunDir.y * spd * dt) * (ec.mineRunDir.y * spd * dt));
+
+            if (ec.mineRunDrop <= 0.f &&
+                countMines(tf.entityId) < config["mine_max_active"].get_or(6)) {
+                const sf::Vector2f back = -ec.mineRunDir;
+                dropMine(tf.position + back * 28.f,
+                    back * (30.f + rand() % 40), back, tf.entityId, config);
+                ec.mineRunDrop = config["mine_run_gap"].get_or(
+                    config["mine_blast_radius"].get_or(130.f));
+            }
+
+            if (ec.mineRunTimer <= 0.f) {
+                ec.mineRunState = MineRunState::Recover;
+                ec.mineRunDuration = config["mine_run_recover"].get_or(0.55f);
+                ec.mineRunTimer = ec.mineRunDuration;
+            }
+            return true;
+        }
+
+        case MineRunState::Recover: {
+            ec.mineRunTimer -= dt;
+            const b2Vec2 v = b2Body_GetLinearVelocity(bodyId);
+            const float brake = std::exp(-4.f * dt);
+            b2Body_SetLinearVelocity(bodyId, { v.x * brake, v.y * brake });
+
+            tf.visualOffsetAngle += 5.f * std::sin(ec.mineRunTimer * 21.f);
+
+            if (ec.mineRunTimer <= 0.f) {
+                ec.mineRunState = MineRunState::None;
+                ec.mineRunCooldown = config["mine_run_cooldown"].get_or(7.f)
+                    + (rand() % 200) / 100.f;
+            }
+            return true;
+        }
+        }
+        return false;
+    }
+
+    // ========================================================================
     // FRENZY — the Maniac's low-HP suicide override
     // ========================================================================
     //
@@ -1013,6 +1167,9 @@ private:
             ec.frenzyState = FrenzyState::Ignite;
             ec.frenzyTimer = config["suicide_ignite_time"].get_or(0.8f);
             ec.frenzy = 0.f;
+            ec.frenzyFuse = config["suicide_fuse"].get_or(5.0f);
+            ec.frenzyGrace = 0.f;
+            ec.mineRunState = MineRunState::None;
 
             // Drop everything he was doing. A rocket in the tube at the moment
             // he ignites would arrive during the charge and muddy the read.
@@ -1045,12 +1202,18 @@ private:
 
             tf.visualOffsetAngle += (9.f + 14.f * u) * std::sin(m_noiseTime * 61.f);
 
-            // ONE pulse, the same one the charge uses, just ramping in. The
-            // ignition and the charge are the same message -- he is low and he
-            // is coming -- so they should not look like two different events.
-            const float pulse = 1.f + 0.07f * u * std::sin(m_noiseTime * 11.f);
-            tf.visualScale.x *= pulse * (1.f + 0.06f * u);
-            tf.visualScale.y *= pulse * (1.f + 0.06f * u);
+            // Shake and swell. The blink itself is drawn by RenderSystem off
+            // frenzyBlinkHz, so it speaks with one voice across hull colour,
+            // corona and exhaust instead of each system picking its own beat.
+            ec.frenzyBlinkHz = 2.5f + 3.5f * u;
+
+            // Shake hard. Together with the blink this is the "rules just
+            // changed" beat, and it has to survive a screen with a dozen other
+            // things moving on it.
+            tf.visualOffsetAngle += (6.f + 9.f * u) * std::sin(m_noiseTime * 77.f);
+            const float pulse = 1.f + 0.10f * u * std::sin(m_noiseTime * 23.f);
+            tf.visualScale.x *= pulse * (1.f + 0.09f * u);
+            tf.visualScale.y *= pulse * (1.f + 0.09f * u);
 
             // The laugh, as sparks. No audio system to lean on, so the beat has
             // to carry on motion and particles alone.
@@ -1075,6 +1238,37 @@ private:
             ec.frenzyTimer -= dt;
             ec.frenzy = 1.f;
 
+            // ---- Blink rate is RANGE ----
+            // Slow far away, frantic up close. The player never has to read a
+            // number or a bar: how fast he is flashing IS how close he is to
+            // going off in their face.
+            const float blastR = config["suicide_blast_radius"].get_or(270.f);
+            const float near01 = 1.f - std::clamp(dist / std::max(1.f, blastR * 2.2f), 0.f, 1.f);
+            ec.frenzyBlinkHz = 2.5f + 14.f * near01 * near01;
+
+            // ---- Fuse ----
+            // He does not go off on contact alone: the fuse has to be out AND
+            // the player has to be inside the blast. That makes the charge a
+            // countdown the player can out-run rather than a touch of death,
+            // and it is what gives "get distance" a real answer.
+            if (ec.frenzyFuse > 0.f) {
+                ec.frenzyFuse -= dt;
+                if (ec.frenzyFuse <= 0.f)
+                    ec.frenzyGrace = config["suicide_grace"].get_or(1.0f);
+            }
+            else {
+                if (dist <= blastR * config["suicide_detonate_fraction"].get_or(0.7f)) {
+                    m_em->healths[i].currentHp = 0.f;   // DamageSystem blows him up
+                    return true;
+                }
+                // Out of fuse, player out of reach: one last second to close.
+                ec.frenzyGrace -= dt;
+                if (ec.frenzyGrace <= 0.f) {
+                    m_em->healths[i].currentHp = 0.f;
+                    return true;
+                }
+            }
+
             turnToward(tf, bodyId, toPlayerN, config["suicide_turn_rate"].get_or(5.0f), dt);
 
             // Steered, not railed. A locked lane would make him dodgeable the
@@ -1089,35 +1283,60 @@ private:
 
             tf.visualOffsetAngle += 6.f * std::sin(m_noiseTime * 47.f);
 
-            // Heartbeat. Slower than the ignition strobe and perfectly
-            // regular, so the two beats never read as the same state: the
-            // ignition is a fault, the charge is a countdown.
+            // Shake and swell on the same beat as the blink, so the ship
+            // visibly winds up as it closes.
             {
-                const float beat = 1.f + 0.07f * std::sin(m_noiseTime * 11.f);
+                const float hz = std::max(1.f, ec.frenzyBlinkHz);
+                const float beat = 1.f + 0.09f * std::sin(m_noiseTime * hz * 6.28318f);
                 tf.visualScale.x *= beat;
                 tf.visualScale.y *= beat;
+                tf.visualOffsetAngle += (4.f + 7.f * near01) * std::sin(m_noiseTime * 83.f);
             }
 
-            for (int k2 = 0; k2 < 4; ++k2) {
-                if ((rand() % 100) >= 70) continue;
+            // ---- Engine burn ----
+            // Thrown straight out the back in a fat cone. EffectsSystem already
+            // opens the throttle for frenzy; this is the raw sparkle on top,
+            // and it scales with how close he is.
+            {
+                const float r = tf.rotation * 3.14159f / 180.f;
+                const sf::Vector2f aft(-std::sin(r), std::cos(r));
+                const sf::Vector2f side(-aft.y, aft.x);
+                const int n = 3 + static_cast<int>(5.f * near01);
+                for (int k = 0; k < n; ++k) {
+                    const float lat = ((rand() % 200) - 100) / 100.f;
+                    const float life = 0.16f + (rand() % 20) / 100.f;
+                    m_em->particles.push_back({ m_em->nextEntityId++,
+                        tf.position + aft * 22.f + side * (lat * 12.f),
+                        aft * (220.f + rand() % 320) + side * (lat * 130.f),
+                        sf::Color(255, static_cast<uint8_t>(170 + rand() % 85),
+                            static_cast<uint8_t>(60 + rand() % 90), 240),
+                        life, life, 3.f + rand() % 3 });
+                }
+            }
+
+            // Spark output rises with the blink, so the closer he gets the
+            // more he visibly comes apart.
+            const int sparks = 2 + static_cast<int>(6.f * near01);
+            for (int k2 = 0; k2 < sparks; ++k2) {
                 const float a = (rand() % 360) * 3.14159f / 180.f;
+                const sf::Vector2f d(std::cos(a), std::sin(a));
                 m_em->particles.push_back({ m_em->nextEntityId++,
-                    tf.position + sf::Vector2f(std::cos(a), std::sin(a)) * 24.f,
-                    sf::Vector2f(std::cos(a), std::sin(a)) * (60.f + rand() % 120),
-                    sf::Color(255, static_cast<uint8_t>(90 + rand() % 90), 30, 220),
+                    tf.position + d * 24.f, d * (70.f + rand() % 160),
+                    sf::Color(255, static_cast<uint8_t>(60 + rand() % 70), 30, 225),
                     0.22f, 0.22f, 2.f + rand() % 3 });
             }
 
-            // Safety valve: a Maniac who somehow never reaches anyone goes off
-            // anyway rather than charging forever.
+            // Hard backstop, well past the fuse.
             if (ec.frenzyTimer <= 0.f) m_em->healths[i].currentHp = 0.f;
             return true;
         }
 
         case FrenzyState::Thrown: {
-            // No AI. DamageSystem owns the fuse and the blast; this branch
-            // exists only to make sure nothing else drives the body.
+            // DamageSystem owns the fuse and the blast. This branch only adds
+            // the shake: he is a lit bomb tumbling away, and the frantic blink
+            // (set at throw time) tells the player how long they have.
             ec.frenzy = 1.f;
+            tf.visualOffsetAngle += 11.f * std::sin(m_noiseTime * 71.f);
             return true;
         }
 
@@ -1143,12 +1362,14 @@ private:
         if (ec.bashState != BashState::None || ec.ramState != RamState::None) return;
 
         // ---- Mid-volley ----
-        if (ec.rocketsLeft > 0) {
+        if (ec.rocketsLeft != 0) {
             ec.rocketVolleyTimer -= dt;
             if (ec.rocketVolleyTimer > 0.f) return;
 
-            fireRocket(tf, ec, entityId, toPlayerN, config);
-            if (--ec.rocketsLeft > 0) {
+            fireRocket(tf, ec, entityId, toPlayerN, config, ec.rocketsLeft == -1);
+            if (ec.rocketsLeft == -1) ec.rocketsLeft = 0;
+            else --ec.rocketsLeft;
+            if (ec.rocketsLeft > 0) {
                 ec.rocketVolleyTimer = config["rocket_spacing"].get_or(0.22f);
             }
             else {
@@ -1171,9 +1392,19 @@ private:
         const float maxR = config["rocket_max_range"].get_or(900.f);
         if (dist < minR || dist > maxR) return;
 
-        const int cMin = std::max(1, config["rocket_count_min"].get_or(1));
-        const int cMax = std::max(cMin, config["rocket_count_max"].get_or(2));
-        ec.rocketsLeft = cMin + rand() % (cMax - cMin + 1);
+        // Two shapes of attack off one weapon, rolled per volley:
+        //   SALVO  2-3 tracking rockets, spaced -- a wall you route around.
+        //   SNIPE  one rocket at ~2x speed -- a shot you react to.
+        // Same tracking on both, so the skill is reading WHICH one left the
+        // tube, not learning two different behaviours.
+        if ((rand() % 100) < static_cast<int>(config["rocket_fast_chance"].get_or(0.35f) * 100.f)) {
+            ec.rocketsLeft = -1;   // sentinel: one fast round
+        }
+        else {
+            const int cMin = std::max(1, config["rocket_count_min"].get_or(2));
+            const int cMax = std::max(cMin, config["rocket_count_max"].get_or(3));
+            ec.rocketsLeft = cMin + rand() % (cMax - cMin + 1);
+        }
         ec.rocketVolleyTimer = 0.f;
     }
 
@@ -1190,6 +1421,7 @@ private:
     {
         if (!config["mine_enabled"].get_or(false)) return;
         if (ec.frenzyState != FrenzyState::None) return;   // ranged kit is gone
+        if (ec.mineRunState != MineRunState::None) return; // the run drops its own
         if (ai.currentState != EnemyState::COMBAT) return;
 
         ec.mineTimer -= dt;
@@ -1212,10 +1444,28 @@ private:
         // exact line he took -- a perfectly spaced trail looks authored.
         const sf::Vector2f back = -vel / std::max(1.f, speed);
         const sf::Vector2f jitter((float)((rand() % 40) - 20), (float)((rand() % 40) - 20));
-        m_ef->createMine(*m_em, tf.position + back * 30.f + jitter,
-            back * (25.f + rand() % 40) + vel * 0.15f, entityId, m_worldId, config);
+        dropMine(tf.position + back * 30.f + jitter,
+            back * (25.f + rand() % 40) + vel * 0.15f, back, entityId, config);
 
         ec.mineTimer = config["mine_interval"].get_or(2.6f) + (rand() % 90) / 100.f;
+    }
+
+    /// Lay one mine with its release spark. The spark points aft: it reads as
+    /// something being ejected, which is what stops a mine appearing out of
+    /// nowhere behind a ship the player was already tracking.
+    void dropMine(sf::Vector2f pos, sf::Vector2f drift, sf::Vector2f back,
+        uint32_t entityId, sol::table& config)
+    {
+        m_ef->createMine(*m_em, pos, drift, entityId, m_worldId, config);
+
+        const sf::Vector2f side(-back.y, back.x);
+        for (int k = 0; k < 7; ++k) {
+            const float lat = ((rand() % 200) - 100) / 100.f;
+            const float life = 0.18f + (rand() % 16) / 100.f;
+            m_em->particles.push_back({ m_em->nextEntityId++, pos,
+                back * (30.f + rand() % 70) + side * (lat * 90.f),
+                sf::Color(255, 190, 110, 230), life, life, 2.f + rand() % 2 });
+        }
     }
 
     int countMines(uint32_t ownerId) const {
@@ -1225,27 +1475,56 @@ private:
         return n;
     }
 
+    /**
+     * @brief One rocket, out of the nose.
+     *
+     * @param fast  the single-shot variant: same tracking, far more speed.
+     *
+     * All rounds leave from the centreline now. The old alternating off-axis
+     * launch was there to stop one rocket eating the other's blast, but with a
+     * 95px radius that no longer happens, and a volley that fans out of the
+     * hull reads as a shotgun rather than as aimed fire.
+     */
     void fireRocket(TransformComponent& tf, EnemyComponent& ec, uint32_t entityId,
-        sf::Vector2f toPlayerN, sol::table& config)
+        sf::Vector2f toPlayerN, sol::table& config, bool fast)
     {
         (void)ec;
-        // Launched off-axis, alternating sides. Firing both rounds down the
-        // centreline would let one rocket eat the other's blast the moment the
-        // first one detonates.
-        const float spread = config["rocket_launch_spread"].get_or(26.f)
-            * ((rand() % 2) ? 1.f : -1.f);
-        const float r = spread * 3.14159f / 180.f;
+        const float jitter = config["rocket_launch_spread"].get_or(7.f)
+            * (((rand() % 200) - 100) / 100.f);
+        const float r = jitter * 3.14159f / 180.f;
         const sf::Vector2f dir(toPlayerN.x * std::cos(r) - toPlayerN.y * std::sin(r),
             toPlayerN.x * std::sin(r) + toPlayerN.y * std::cos(r));
 
         const float angle = std::atan2(dir.y, dir.x) * 180.f / 3.14159f + 90.f;
-        const sf::Vector2f spawn = tf.position + dir * 34.f;
+        const sf::Vector2f spawn = tf.position + dir * 38.f;
 
+        const float mult = fast ? config["rocket_fast_speed_mult"].get_or(2.1f) : 1.f;
         m_ef->createEnemyRocket(*m_em, spawn, angle, entityId,
-            m_playerEntityId, m_worldId, config);
+            m_playerEntityId, m_worldId, config, mult);
 
-        m_em->spawnImpact(spawn, sf::Color(255, 180, 80), dir * -240.f);
-        m_em->spawnShockRing(spawn, 3.f, 26.f, 0.16f, sf::Color(255, 190, 90), 2.f, 190.f);
+        // ---- Launch smoke ----
+        // Thrown BACKWARD out of the tube and spread wide, so the plume hangs
+        // where the rocket was rather than chasing it. A fast rocket outruns
+        // its own launch cloud, which is most of what sells the speed.
+        const sf::Vector2f side(-dir.y, dir.x);
+        const int puffs = fast ? 16 : 11;
+        for (int k = 0; k < puffs; ++k) {
+            const float lat = ((rand() % 200) - 100) / 100.f;
+            const float back = 40.f + rand() % 130;
+            const float life = 0.30f + (rand() % 40) / 100.f;
+            m_em->particles.push_back({ m_em->nextEntityId++,
+                spawn + side * (lat * 6.f),
+                -dir * back + side * (lat * 70.f),
+                sf::Color(190, 170, 160, 190), life, life, 4.f + rand() % 5 });
+        }
+        for (int k = 0; k < 5; ++k) {
+            const float life = 0.16f + (rand() % 14) / 100.f;
+            m_em->particles.push_back({ m_em->nextEntityId++, spawn,
+                -dir * (110.f + rand() % 160), sf::Color(255, 200, 110, 235),
+                life, life, 3.f });
+        }
+        m_em->spawnShockRing(spawn, 3.f, fast ? 40.f : 28.f, 0.16f,
+            sf::Color(255, 190, 90), 2.f, 190.f);
     }
 
     // ========================================================================

@@ -290,8 +290,17 @@ enemy_defaults = {
     rocket_cooldown       = 4.5,
     rocket_min_range      = 260.0,   -- Too close to arm and turn
     rocket_max_range      = 900.0,
-    rocket_launch_spread  = 26.0,    -- Off-axis, alternating sides, so one
-                                     -- round does not eat the other's blast
+    rocket_launch_spread  = 7.0,     -- Small jitter only. Rounds leave from the
+                                     -- NOSE; a volley that fans out of the hull
+                                     -- reads as a shotgun, not as aimed fire.
+    rocket_fast_chance    = 0.35,    -- Chance a volley is instead ONE rocket at
+    rocket_fast_speed_mult = 2.1,    -- this multiple of speed, same tracking.
+                                     -- Salvo = a wall you route around; snipe =
+                                     -- a shot you react to.
+    parry_rocket_speed    = 1150.0,  -- After a parry. Must beat the sender's
+                                     -- top speed or the reward has no target.
+    parry_rocket_drag     = 0.75,    -- Bleeds off; stalls into its own blast
+    parry_rocket_stall    = 170.0,
     rocket_speed          = 430.0,   -- Slow enough to read and to parry
     rocket_track_time     = 0.85,
     rocket_track_turn     = 260.0,   -- deg/s while tracking: hard to escape
@@ -320,6 +329,28 @@ enemy_defaults = {
                                      -- on top of him and reads as a bug
     mine_arm_time         = 0.5,
     mine_fuse             = 2.0,     -- Once triggered. Long enough to leave.
+
+    -- ===== MINE RUN =====
+    -- A committed dash that lays the field ACROSS the player's ground instead
+    -- of behind the Maniac's. Harmless to touch -- no damage, no i-frames --
+    -- which is the whole separation from a Berserker charge.
+    mine_run_enabled      = false,
+    mine_run_windup       = 0.45,
+    mine_run_time         = 1.15,    -- Long enough to actually lay a line
+    mine_run_speed        = 760.0,
+    mine_run_gap          = 0.0,     -- DISTANCE between drops, px. 0 = use
+                                     -- mine_blast_radius, which makes the
+                                     -- zones touch without overlapping. Timed
+                                     -- spacing bunched the whole carpet into
+                                     -- one clump covering one mine's ground.
+    mine_run_recover      = 0.55,
+    mine_run_cooldown     = 7.0,
+    mine_run_turn         = 9.0,
+    mine_run_min_range    = 240.0,
+    mine_run_max_range    = 800.0,
+    mine_run_lead         = 0.55,    -- How far ahead of the player the line is
+                                     -- aimed. 0 chases their tail; too high
+                                     -- and he runs at empty space.
     mine_trigger_radius   = 95.0,
     mine_blast_radius     = 130.0,
     mine_blast_damage     = 42.0,
@@ -348,6 +379,22 @@ enemy_defaults = {
                                      -- charging forever
     suicide_blast_radius  = 260.0,
     suicide_blast_damage  = 75.0,
+    suicide_fuse          = 5.0,     -- Runs during the charge. He detonates
+                                     -- when it is out AND you are inside the
+                                     -- blast -- a countdown you can out-run,
+                                     -- not a touch of death.
+    suicide_detonate_fraction = 0.7, -- Of the blast radius: how close you must
+                                     -- be for the fuse running out to mean you
+    suicide_grace         = 1.0,     -- If you are not, he gets this long to
+                                     -- close before going off anyway.
+
+    -- ===== THROWN (parried mid-charge) =====
+    thrown_fuse           = 1.5,
+    thrown_speed          = 1150.0,  -- Raised automatically if the fuse and
+    thrown_clearance      = 1.35,    -- radius would otherwise land him on you
+    thrown_spin           = 16.0,
+    thrown_blast_mult     = 1.35,    -- Parry is the highest-risk answer, so it
+    thrown_damage_mult    = 1.4,     -- has to be the biggest bang
 
     -- ===== PERSONALITY ROLL =====
     personality_variance  = true,
@@ -828,7 +875,7 @@ enemy_archetypes.BERSERKER = derive {
     -- to wire until the Bloodseeker exists.
 
     -- ===== SPAWN =====
-    spawn_weight         = 50.0,
+    spawn_weight         = 200.0,
     max_active           = 3,
     threat_cost          = 4,      -- Three of them fill the 12 budget
 
@@ -921,38 +968,56 @@ enemy_archetypes.MANIAC = derive {
     combat_lose_time     = 5.0,
     combat_lose_distance = 1400.0,
 
-    -- ===== SCRAPFIRE =====
-    fire_rate            = 0.30,
-    telegraph_time       = 0.0,
-    aim_spread           = 19.0,   -- Deliberately bad. It is pressure, not aim.
+    -- ===== SCRAPFIRE (backup only) =====
+    -- Telegraphed like a Raider's, but slower and far less accurate: you see
+    -- the charge, then 3 wild rounds. It exists to stop the player parking at
+    -- mid range between volleys, not to kill anyone.
+    fire_rate            = 0.42,
+    telegraph_time       = 0.55,
+    aim_spread           = 22.0,
     attack_range         = 560.0,
-    bullet_speed         = 540.0,
-    bullet_lifetime      = 1.1,
-    bullet_damage        = 4.0,
+    bullet_speed         = 480.0,
+    bullet_lifetime      = 1.3,
+    bullet_damage        = 5.0,
     bullet_iframes       = 0.15,
-    burst_count          = 4,
-    burst_pause          = 0.9,
+    burst_count          = 3,
+    burst_pause          = 1.6,
 
     storm_enabled        = false,
     chaos_dodge_chance   = 0.30,   -- Twitchy, and it shows
     bullet_dodge_chance  = 0.45,
 
-    -- ===== ROCKETS =====
+    parry_rocket_speed   = 1150.0, -- Fast enough to run him down with his own
+    parry_rocket_drag    = 0.75,   -- rocket before it stalls and goes off
+    parry_rocket_stall   = 170.0,
+
+    -- ===== ROCKETS (primary) =====
     rocket_enabled       = true,
-    rocket_count_min     = 1,
-    rocket_count_max     = 2,
-    rocket_cooldown      = 4.2,
-    rocket_min_range     = 280.0,
+    rocket_count_min     = 2,
+    rocket_count_max     = 3,
+    rocket_spacing       = 0.20,
+    rocket_cooldown      = 3.6,
+    rocket_min_range     = 260.0,
     rocket_max_range     = 950.0,
+    rocket_fast_chance   = 0.35,
+    rocket_fast_speed_mult = 2.2,
     micro_recover        = 0.85,
 
-    -- ===== MINES =====
+    -- ===== MINES (primary) =====
     mine_enabled         = true,
-    mine_interval        = 2.4,
-    mine_max_active      = 4,
+    mine_interval        = 3.2,      -- Trail drops are the slow drip; the run
+                                     -- below is where the field comes from
+    mine_max_active      = 8,      -- The run alone lays ~7
     mine_trigger_radius  = 95.0,
     mine_blast_radius    = 130.0,
     mine_blast_damage    = 40.0,
+
+    mine_run_enabled     = true,
+    mine_run_cooldown    = 6.5,
+    mine_run_speed       = 780.0,
+    mine_run_time        = 1.25,     -- ~975px of run...
+    mine_run_gap         = 140.0,    -- ...at one blast radius apart = ~7 mines
+                                     -- spanning a wall, not a pile
 
     -- ===== BASH (secondary panic tool) =====
     bash_enabled         = true,
@@ -977,6 +1042,11 @@ enemy_archetypes.MANIAC = derive {
     suicide_speed        = 720.0,
     suicide_blast_radius = 270.0,
     suicide_blast_damage = 78.0,
+    suicide_fuse         = 5.0,
+    suicide_grace        = 1.0,
+    thrown_fuse          = 1.5,
+    thrown_blast_mult    = 1.4,
+    thrown_damage_mult   = 1.45,
 
     -- ===== LOOK =====
     thruster_rate        = 1.1,
@@ -991,7 +1061,7 @@ enemy_archetypes.MANIAC = derive {
     death_trauma         = 0.34,
 
     -- ===== SPAWN =====
-    spawn_weight         = 45.0,
+    spawn_weight         = 200.0,
     max_active           = 2,
     threat_cost          = 4,
 

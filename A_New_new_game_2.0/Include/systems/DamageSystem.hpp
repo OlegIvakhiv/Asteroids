@@ -134,6 +134,26 @@ public:
             BodyType typeB = udB ? udB->type : BodyType::Asteroid;
 
             // ================================================================
+            // 2a-pre0. A THROWN MANIAC hitting ANYTHING
+            // ================================================================
+            // Not just the player: the entire point of throwing him is to put
+            // him into something else. Checked before ordnance so a thrown
+            // Maniac meeting a mine resolves as his blast, not the mine's.
+            {
+                bool done = false;
+                for (int pass = 0; pass < 2 && !done; ++pass) {
+                    BodyUserData* ud = pass ? udB : udA;
+                    if (!ud || (pass ? typeB : typeA) != BodyType::Enemy) continue;
+                    const size_t idx = m_em->getEntityIndex(ud->entityId);
+                    if (idx == (size_t)-1) continue;
+                    if (m_em->enemies[idx].frenzyState != FrenzyState::Thrown) continue;
+                    blowUpManiac(idx, true);
+                    done = true;
+                }
+                if (done) continue;
+            }
+
+            // ================================================================
             // 2a-pre. ORDNANCE vs ANYTHING
             // ================================================================
             // Rockets and mines resolve here rather than in the player-centric
@@ -164,25 +184,46 @@ public:
                 if (ordIdx != (size_t)-1) {
                     auto& ord = m_em->bullets[ordIdx];
 
-                    // Its own launcher, or not armed yet: pass through.
                     const bool ownerHit = (otherIdx2 != (size_t)-1) &&
                         (m_em->transforms[otherIdx2].entityId == ord.ownerEntityId);
-
                     if (ord.armTimer > 0.f || ownerHit) continue;
 
-                    // A player round meeting ordnance is a SHOOT-DOWN, handled
-                    // as damage in 2a so a tough mine takes more than one hit.
-                    if (otherType2 == BodyType::Bullet) {
-                        // ordnance vs ordnance: let the blast chain handle it
+                    // ---- MINES ----
+                    if (ord.isMine) {
+                        // Hull contact is NOT a trigger, with one exception.
+                        // A Rakshari brushing past a mine leaves it sitting
+                        // there -- otherwise a pack clears its own field in
+                        // seconds. An ASTEROID counts as a damaging event:
+                        // rock hitting armed explosive should set it off, and
+                        // it gives the player a second way to clear a lane.
+                        if (otherType2 == BodyType::Asteroid) {
+                            m_em->lightMineFuse(ord, m_em->transforms[ordIdx].position);
+                        }
+                        else if (otherType2 == BodyType::Bullet && otherIdx2 != (size_t)-1) {
+                            // A round -- anyone's -- lights it and dies on it,
+                            // the same way a bullet dies on a rock. No health
+                            // involved: shooting a mine is a decision, not a
+                            // damage race.
+                            m_em->lightMineFuse(ord, m_em->transforms[ordIdx].position);
+                            m_em->bullets[otherIdx2].markedForDestroy = true;
+                            m_em->spawnImpact(m_em->transforms[ordIdx].position,
+                                sf::Color(255, 160, 70),
+                                m_em->transforms[otherIdx2].velocity);
+                        }
+                        else if (otherIdx2 == playerIdx) {
+                            // The player physically touching one is inside the
+                            // zone by definition, so this is just the zone
+                            // trigger arriving early.
+                            m_em->lightMineFuse(ord, m_em->transforms[ordIdx].position);
+                        }
                         continue;
                     }
 
-                    // The player's own parry beats the blast -- checked before
-                    // detonation, or the correct answer to a rocket would be to
-                    // never let it touch you.
+                    // ---- ROCKETS ----
+                    if (otherType2 == BodyType::Bullet) continue;   // handled above
+
                     const bool isPlayerHit = (otherIdx2 == playerIdx);
-                    if (isPlayerHit && ord.isRocket &&
-                        m_em->players[playerIdx].parryTimer > 0.f) {
+                    if (isPlayerHit && m_em->players[playerIdx].parryTimer > 0.f) {
                         parryRocket(playerIdx, ordIdx);
                         continue;
                     }
@@ -225,18 +266,9 @@ public:
                     const float dmg = blt.damage * blt.damageMultiplier;
 
                     if (targetType == BodyType::Bullet) {
-                        // Shooting ordnance out of the air. It takes real
-                        // damage rather than popping on any hit, so clearing a
-                        // minefield costs ammo and heat -- and a mine shot next
-                        // to a Rakshari still detonates on THEM.
-                        auto& tgt = m_em->bullets[targetIdx];
-                        if (tgt.isMine || tgt.isRocket) {
-                            m_em->healths[targetIdx].currentHp -= dmg;
-                            m_em->spawnImpact(hitPos, sf::Color(255, 170, 70), hitVel);
-                            if (m_em->healths[targetIdx].currentHp <= 0.f)
-                                tgt.markedForDestroy = true;
-                            blt.markedForDestroy = true;
-                        }
+                        // Ordnance is settled in the block above; nothing to
+                        // do here. Kept explicit so a future projectile type
+                        // does not fall through into the asteroid branch.
                     }
                     else if (targetType == BodyType::Asteroid) {
                         m_em->healths[targetIdx].currentHp -= dmg;
@@ -1184,10 +1216,13 @@ private:
         b.homingTurnRate = 0.f;
         b.trackTimer = 0.f;
         b.skidTurnRate = 0.f;
+        // Tumble hard around its own centre -- the same language as a
+        // parry-launched asteroid or a staggered ship, so "this is loose now"
+        // reads instantly. The PATH stays straight: it goes where you sent it.
         b.spin = ((rand() % 2) ? 1.f : -1.f) * (620.f + rand() % 560);
-        b.wanderAmp = wcfg("parry_rocket_wander", 430.f);
-        b.wanderFreq = 4.2f + (rand() % 40) / 10.f;
-        b.wanderPhase = static_cast<float>(rand() % 628) / 100.f;
+        b.wanderAmp = 0.f;
+        b.wildDrag = wcfg("parry_rocket_drag", 0.75f);
+        b.wildStallSpeed = wcfg("parry_rocket_stall", 170.f);
         b.ownerEntityId = m_playerEntityId;
         b.isEnemyBullet = false;        // it belongs to the player now
         b.armTimer = wcfg("parry_rocket_arm", 0.10f);
@@ -1198,18 +1233,28 @@ private:
         // still has time to travel somewhere worth travelling to.
         b.lifetime = std::max(b.lifetime, wcfg("parry_rocket_min_fuse", 1.6f));
 
-        const float speed = wcfg("parry_rocket_speed", 780.f);
+        // Fast enough to run down the Maniac who fired it. A parried rocket
+        // that the sender simply out-flies is a parry with no target, and the
+        // sender is the target the player actually wants.
+        const float speed = wcfg("parry_rocket_speed", 1150.f);
         if (b2Body_IsValid(m_em->physics[rocketIdx].bodyId)) {
             b2Body_SetLinearVelocity(m_em->physics[rocketIdx].bodyId,
                 { dir.x * speed / SCALE, dir.y * speed / SCALE });
         }
 
+        // YELLOW: the game's existing "parried, now yours" colour, the same
+        // one a reflected bullet wears. Live rockets are orange/red, so the
+        // switch is unmistakable even in a crowded frame.
+        // Full-saturation yellow with a white-hot rim, and a thicker outline:
+        // at a 10px shape a subtle recolour is invisible in a busy frame. Same
+        // colour a reflected bullet wears.
         auto& sh = m_em->renders[rocketIdx].shape;
-        sh.setFillColor(sf::Color(255, 250, 225));
-        sh.setOutlineColor(sf::Color(120, 255, 220, 240));
-        sh.setOutlineThickness(2.6f);
+        sh.setFillColor(sf::Color(255, 238, 0));
+        sh.setOutlineColor(sf::Color(255, 255, 210, 255));
+        sh.setOutlineThickness(4.0f);
 
         m_em->spawnExplosion(rPos, sf::Color(0, 255, 200), 14, 2.2f);
+        m_em->spawnShockRing(rPos, 5.f, 52.f, 0.20f, sf::Color(255, 240, 90), 3.f, 240.f);
         onParrySuccess(playerIdx, rPos);
         if (isPerfectParry(playerIdx)) onPerfectParry(playerIdx, rPos);
     }
@@ -1240,6 +1285,7 @@ private:
                     0.26f, 0.26f, 3.f });
             }
 
+            // Shake is drawn by AISystem; this is the countdown itself.
             if (ec.frenzyTimer <= 0.f) blowUpManiac(i, true);
         }
     }
@@ -1268,8 +1314,9 @@ private:
             if (l > 0.01f) away /= l; else away = { 0.f, -1.f };
 
             ec.frenzyState = FrenzyState::Thrown;
-            ec.frenzyTimer = wcfg("thrown_fuse", 2.0f);
+            ec.frenzyTimer = acfg(enIdx, "thrown_fuse", 1.5f);
             ec.frenzyDir = away;
+            ec.frenzyBlinkHz = 16.f;   // frantic: the fuse is short now
             ec.bashState = BashState::None;
             ec.ramState = RamState::None;
 
@@ -1278,11 +1325,18 @@ private:
             m_em->healths[enIdx].stunTimer = ec.frenzyTimer + 1.f;
 
             if (b2Body_IsValid(m_em->physics[enIdx].bodyId)) {
-                const float spd = wcfg("thrown_speed", 1150.f);
+                // Thrown hard enough to clear his own blast. The reward for a
+                // parry cannot be "he explodes on top of you anyway": speed x
+                // fuse has to exceed the radius, so this is sized from the
+                // blast rather than picked by feel.
+                const float need = acfg(enIdx, "suicide_blast_radius", 270.f)
+                    * acfg(enIdx, "thrown_clearance", 1.35f)
+                    / std::max(0.2f, ec.frenzyTimer);
+                const float spd = std::max(acfg(enIdx, "thrown_speed", 1150.f), need);
                 b2Body_SetLinearVelocity(m_em->physics[enIdx].bodyId,
                     { away.x * spd / SCALE, away.y * spd / SCALE });
                 b2Body_SetAngularVelocity(m_em->physics[enIdx].bodyId,
-                    ((rand() % 2) ? 1.f : -1.f) * wcfg("thrown_spin", 14.f));
+                    ((rand() % 2) ? 1.f : -1.f) * acfg(enIdx, "thrown_spin", 16.f));
             }
 
             m_em->spawnExplosion(ePos, sf::Color(0, 255, 200), 26, 3.4f);
@@ -1310,8 +1364,21 @@ private:
         ec.detonated = true;
 
         const sf::Vector2f pos = m_em->transforms[i].position;
-        const float radius = acfg(i, "suicide_blast_radius", 260.f) * (full ? 1.f : 0.55f);
-        const float damage = acfg(i, "suicide_blast_damage", 75.f) * (full ? 1.f : 0.45f);
+
+        // Three sizes, and the ordering is the design:
+        //   thrown  > full > shot down
+        // Parrying him is the highest-risk answer, so it has to produce the
+        // biggest bang -- otherwise the safe play (shoot him early) would also
+        // be the strongest one, and the parry would be a stunt with no payoff.
+        float scale = full ? 1.f : 0.55f;
+        float dmgScale = full ? 1.f : 0.45f;
+        if (ec.frenzyState == FrenzyState::Thrown) {
+            scale = acfg(i, "thrown_blast_mult", 1.35f);
+            dmgScale = acfg(i, "thrown_damage_mult", 1.4f);
+        }
+
+        const float radius = acfg(i, "suicide_blast_radius", 260.f) * scale;
+        const float damage = acfg(i, "suicide_blast_damage", 75.f) * dmgScale;
 
         // A Maniac thrown by the player should not then stagger the player.
         const size_t credit = (ec.frenzyState == FrenzyState::Thrown)

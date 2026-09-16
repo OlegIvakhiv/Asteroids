@@ -79,6 +79,15 @@ public:
             float drawRot = tf.rotation;
 
             // ================================================================
+            // MINES
+            // ================================================================
+            if (type == BodyType::Bullet && i < m_em->bullets.size() &&
+                m_em->bullets[i].isMine) {
+                drawMine(tf, rd, m_em->bullets[i]);
+                continue;
+            }
+
+            // ================================================================
             // ASTEROIDS
             // ================================================================
             if (type == BodyType::Asteroid) {
@@ -194,7 +203,7 @@ public:
                             arc[s].color = arcCol;
                         }
                         m_window->draw(arc);
-                    };
+                        };
                     drawArc(tf.rotation - 90.f);
                     drawArc(tf.rotation + 90.f);
                 }
@@ -304,25 +313,34 @@ public:
                 // on colour as well as on shape, so neither read depends on
                 // the other surviving a busy frame.
                 if (ec.frenzy > 0.f) {
-                    // One read, one channel: a red pulse that says "low HP and
-                    // committed". The earlier version strobed on one frequency
-                    // during Ignite and pulsed on another during Charge, which
-                    // just looked broken -- two beats competing to mean the
-                    // same thing.
-                    const float p = 0.45f + 0.55f *
-                        (0.5f + 0.5f * std::sin(m_enemyAnimTime * 11.f));
+                    // One beat, and the AI sets its rate from range: slow far
+                    // away, frantic in your face. Same language as a lit mine
+                    // on purpose -- both are fuses, and the player should not
+                    // have to learn two vocabularies for "this is about to go
+                    // off".
+                    // A SQUARE WAVE, not a soft tint. The previous version
+                    // faded between two reds a shade apart -- correct in
+                    // principle, invisible in practice at ship size against a
+                    // dark background. This flips hard between deep red and a
+                    // near-white flash, exactly like a lit mine, and the rate
+                    // comes from range so it winds up as he closes.
+                    const float hz = std::max(1.f, ec.frenzyBlinkHz);
+                    const float phase = std::fmod(m_enemyAnimTime * hz, 1.f);
+                    const float on = (phase < 0.42f) ? 1.f : 0.f;
                     const float w = std::clamp(ec.frenzy, 0.f, 1.f);
-                    const sf::Color hot(
-                        static_cast<uint8_t>(180 + 75 * p),
-                        static_cast<uint8_t>(20 + 30 * p),
-                        static_cast<uint8_t>(20 + 20 * p));
+
+                    const sf::Color dark(150, 28, 24);
+                    const sf::Color flash(255, 225, 205);
+                    const sf::Color hot = (on > 0.5f) ? flash : dark;
+
                     fill = sf::Color(
                         static_cast<uint8_t>(fill.r + (hot.r - fill.r) * w),
                         static_cast<uint8_t>(fill.g + (hot.g - fill.g) * w),
                         static_cast<uint8_t>(fill.b + (hot.b - fill.b) * w));
-                    outlineWidth = std::max(outlineWidth, 1.8f + 2.6f * w * p);
-                    outlineColor = sf::Color(255, 90, 60,
-                        static_cast<uint8_t>(140 + 100 * w * p));
+                    outlineWidth = std::max(outlineWidth, 2.2f + 4.0f * w * on);
+                    outlineColor = (on > 0.5f)
+                        ? sf::Color(255, 255, 235, 255)
+                        : sf::Color(255, 70, 45, static_cast<uint8_t>(150 + 70 * w));
                 }
 
                 float bashU = -1.f;   // <0 = no bash tell this frame
@@ -723,6 +741,91 @@ private:
     }
 
     /**
+     * @brief A floating mine, with its trigger zone made visible.
+     *
+     * Two things had to be legible at a glance, and neither was before:
+     *
+     *  1. WHERE it reaches. A hazard whose radius the player has to learn by
+     *     dying to it is not a hazard, it is a trap. The zone is drawn as a
+     *     sonar sweep -- a ring that expands out to the exact trigger radius
+     *     and fades -- so the boundary is stated rather than implied.
+     *  2. WHETHER it is counting. Idle is slow, dim and grey-amber. Triggered
+     *     is RED and accelerating, and the ring sweeps faster too. The player
+     *     should be able to tell "I can still cross that" from "I cannot" from
+     *     across the arena without reading anything.
+     */
+    void drawMine(const TransformComponent& tf, RenderComponent& rd,
+        const BulletComponent& mine) {
+        const bool lit = mine.mineFuse > 0.f;
+        const float urgency = lit
+            ? 1.f - std::clamp(mine.mineFuse / std::max(0.1f, mine.mineFuseTime), 0.f, 1.f)
+            : 0.f;
+
+        // ---- Blink ----
+        // Idle ticks slowly; a lit fuse ramps from brisk to frantic.
+        const float hz = lit ? (3.f + 12.f * urgency) : 0.7f;
+        const float phase = std::fmod(m_enemyAnimTime * hz, 1.f);
+        const float duty = lit ? 0.55f : 0.16f;   // idle: brief tick, long dark
+        const float on = (phase < duty) ? 1.f : 0.f;
+
+        const sf::Color idleCol(170, 165, 150);
+        const sf::Color hotCol(255, static_cast<uint8_t>(70 - 40 * urgency), 45);
+        const sf::Color blink = lit ? hotCol : idleCol;
+
+        // ---- Trigger zone: sonar sweep ----
+        // Only while armed. An unarmed mine has no zone yet, and drawing one
+        // would promise a threat that is not live.
+        if (mine.mineArmed && mine.mineTrigger > 1.f) {
+            const float sweepHz = lit ? (1.1f + 1.6f * urgency) : 0.45f;
+            const float t = std::fmod(m_enemyAnimTime * sweepHz, 1.f);
+            const float r = mine.mineTrigger * (0.12f + 0.88f * t);
+            const float fade = (1.f - t) * (1.f - t);
+
+            sf::CircleShape sweep(r, 40);
+            sweep.setOrigin({ r, r });
+            sweep.setPosition(tf.position);
+            sweep.setFillColor(sf::Color::Transparent);
+            sweep.setOutlineThickness(lit ? 2.2f : 1.4f);
+            sweep.setOutlineColor(sf::Color(blink.r, blink.g, blink.b,
+                static_cast<uint8_t>((lit ? 190.f : 90.f) * fade)));
+            m_window->draw(sweep);
+
+            // The boundary itself, held faintly all the time, so the edge is
+            // readable even between sweeps.
+            sf::CircleShape edge(mine.mineTrigger, 44);
+            edge.setOrigin({ mine.mineTrigger, mine.mineTrigger });
+            edge.setPosition(tf.position);
+            edge.setFillColor(sf::Color::Transparent);
+            edge.setOutlineThickness(1.f);
+            edge.setOutlineColor(sf::Color(blink.r, blink.g, blink.b,
+                static_cast<uint8_t>(lit ? 70 + 60 * on : 34)));
+            m_window->draw(edge);
+        }
+
+        // ---- Body ----
+        rd.shape.setPosition(tf.position);
+        rd.shape.setRotation(sf::degrees(tf.rotation));
+        rd.shape.setOutlineColor(sf::Color(blink.r, blink.g, blink.b,
+            static_cast<uint8_t>(140 + 115 * on)));
+        rd.shape.setFillColor(lit
+            ? sf::Color(static_cast<uint8_t>(60 + 120 * on), 34, 30)
+            : sf::Color(64, 58, 56));
+        m_window->draw(rd.shape);
+
+        // ---- Lamp ----
+        // A hard dot at the centre. The hull outline can be lost against a
+        // bright background; this cannot.
+        if (on > 0.5f) {
+            const float s = lit ? 5.f + 3.f * urgency : 3.f;
+            sf::CircleShape lamp(s, 8);
+            lamp.setOrigin({ s, s });
+            lamp.setPosition(tf.position);
+            lamp.setFillColor(sf::Color(blink.r, blink.g, blink.b, 245));
+            m_window->draw(lamp);
+        }
+    }
+
+    /**
      * @brief Ragged corona around an ignited Maniac.
      *
      * Deliberately NOT a clean ring like the shock rings or the bash crescent:
@@ -732,7 +835,12 @@ private:
      */
     void drawFrenzyCorona(const TransformComponent& tf, const EnemyComponent& ec,
         const enemyarch::ArchetypeDef& adef) {
-        const float w = std::clamp(ec.frenzy, 0.f, 1.f);
+        // The corona breathes on the same square wave as the hull, so the
+        // whole ship reads as ONE object flashing rather than as a body and a
+        // separate effect that happen to be near each other.
+        const float hz = std::max(1.f, ec.frenzyBlinkHz);
+        const float on = (std::fmod(m_enemyAnimTime * hz, 1.f) < 0.42f) ? 1.f : 0.45f;
+        const float w = std::clamp(ec.frenzy, 0.f, 1.f) * on;
         constexpr int SPOKES = 14;
 
         sf::VertexArray va(sf::PrimitiveType::Triangles, SPOKES * 3);
@@ -740,7 +848,7 @@ private:
             const float base = (k / static_cast<float>(SPOKES)) * 6.28318f;
             const float wob = std::sin(m_enemyAnimTime * (23.f + k * 3.1f) + k);
             const float r0 = adef.radius * 0.92f;
-            const float r1 = r0 + (5.f + 9.f * w) * (0.55f + 0.45f * wob);
+            const float r1 = r0 + (6.f + 15.f * w) * (0.55f + 0.45f * wob);
             const float half = 0.11f + 0.05f * w;
 
             const sf::Vector2f a(tf.position.x + std::cos(base - half) * r0,
@@ -751,7 +859,7 @@ private:
                 tf.position.y + std::sin(base) * r1);
 
             const sf::Color hot(255, static_cast<uint8_t>(60 + 40 * wob), 45,
-                static_cast<uint8_t>(150 * w));
+                static_cast<uint8_t>(200 * w));
             const sf::Color out(255, 50, 30, 0);
             va[k * 3 + 0] = sf::Vertex{ a, hot };
             va[k * 3 + 1] = sf::Vertex{ b, hot };

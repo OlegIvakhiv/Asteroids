@@ -199,8 +199,10 @@ public:
 
         b2ShapeDef shapeDef = b2DefaultShapeDef();
         shapeDef.filter.categoryBits = CATEGORY_PLAYER;
+        // ORDNANCE belongs here too -- this is the path the refit ship uses,
+        // so leaving it out meant rockets and mines ignored the actual player.
         shapeDef.filter.maskBits = CATEGORY_ASTEROID | CATEGORY_ENEMY
-            | CATEGORY_ENEMY_BULLET | CATEGORY_BULLET;
+            | CATEGORY_ENEMY_BULLET | CATEGORY_BULLET | CATEGORY_ORDNANCE;
         shapeDef.enableContactEvents = true;
         shapeDef.density = design.tuning().density;
 
@@ -423,7 +425,7 @@ public:
         auto ch = [&](int base) {
             return static_cast<uint8_t>(std::clamp(
                 static_cast<int>(base * lift) + jitter, 0, 255));
-        };
+            };
 
         rc.shape.setFillColor(sf::Color(ch(cr), ch(cg), ch(cb)));
         rc.shape.setOutlineColor(sf::Color(
@@ -730,11 +732,11 @@ public:
      */
     uint32_t createEnemyRocket(EntityManager& em, sf::Vector2f pos, float angle,
         uint32_t ownerEntityId, uint32_t targetEntityId, b2WorldId worldId,
-        const sol::table& cfg)
+        const sol::table& cfg, float speedMult = 1.f)
     {
         uint32_t entityId = em.nextEntityId++;
 
-        const float speed = cfg["rocket_speed"].get_or(430.f);
+        const float speed = cfg["rocket_speed"].get_or(430.f) * speedMult;
         const float rad = (angle - 90.f) * 3.14159f / 180.f;
         const sf::Vector2f vel = { std::cos(rad) * speed, std::sin(rad) * speed };
 
@@ -784,6 +786,8 @@ public:
         bc.armTimer = cfg["rocket_arm_time"].get_or(0.12f);
         bc.homingTargetEntityId = targetEntityId;
         bc.homingTurnRate = cfg["rocket_track_turn"].get_or(260.f);
+        bc.wildDrag = cfg["parry_rocket_drag"].get_or(0.75f);
+        bc.wildStallSpeed = cfg["parry_rocket_stall"].get_or(170.f);
         em.bullets.push_back(bc);
 
         em.healths.push_back({ entityId });
@@ -801,9 +805,12 @@ public:
         rc.shape.setPoint(3, { 0.f,   11.f });
         rc.shape.setPoint(4, { -4.f,   7.f });
         rc.shape.setPoint(5, { -5.f,  -4.f });
-        rc.shape.setFillColor(sf::Color(255, 200, 90));
+        // Live rockets sit in the ORANGE/RED band -- the enemy-threat colour.
+        // A parried one turns YELLOW, matching a parried bullet, so "this is
+        // mine now" is the same visual promise everywhere in the game.
+        rc.shape.setFillColor(sf::Color(225, 95, 35));
         rc.shape.setOutlineThickness(2.f);
-        rc.shape.setOutlineColor(sf::Color(255, 90, 20, 230));
+        rc.shape.setOutlineColor(sf::Color(255, 60, 20, 235));
 
         em.renders.push_back(rc);
         em.entityIdMap[entityId] = em.transforms.size() - 1;
@@ -877,11 +884,11 @@ public:
         bc.blastDamage = cfg["mine_blast_damage"].get_or(42.f);
         em.bullets.push_back(bc);
 
-        HealthComponent hc;
-        hc.entityId = entityId;
-        hc.maxHp = cfg["mine_hp"].get_or(12.f);
-        hc.currentHp = hc.maxHp;
-        em.healths.push_back(hc);
+        // No health, on purpose. A mine is not a thing you whittle down: any
+        // damaging contact lights the fuse, full stop. Giving it HP meant
+        // player rounds visibly bounced off it while it sat there unharmed,
+        // which told the player the wrong thing about what shooting it does.
+        em.healths.push_back({ entityId });
 
         em.scoreRewards.push_back({});
         em.enemies.push_back({});
@@ -894,9 +901,9 @@ public:
             const float a = k * 3.14159f / 3.f;
             rc.shape.setPoint(k, { std::cos(a) * 9.f, std::sin(a) * 9.f });
         }
-        rc.shape.setFillColor(sf::Color(70, 60, 58));
-        rc.shape.setOutlineThickness(2.2f);
-        rc.shape.setOutlineColor(sf::Color(255, 120, 40, 220));
+        rc.shape.setFillColor(sf::Color(64, 58, 56));
+        rc.shape.setOutlineThickness(2.4f);
+        rc.shape.setOutlineColor(sf::Color(150, 150, 140, 220));
 
         em.renders.push_back(rc);
         em.entityIdMap[entityId] = em.transforms.size() - 1;

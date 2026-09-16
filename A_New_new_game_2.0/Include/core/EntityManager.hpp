@@ -520,6 +520,23 @@ public:
     }
 
 
+    /**
+     * @brief Start a mine's countdown.
+     *
+     * Lives here rather than in a system because both WeaponSystem (the zone
+     * trigger) and DamageSystem (every damaging trigger) need it, and a mine
+     * that lit differently depending on which path found it would be a bug
+     * waiting to happen. Idempotent: a mine already burning ignores further
+     * triggers, so a burst of gunfire cannot shorten a fuse the player is
+     * already running from.
+     */
+    void lightMineFuse(BulletComponent& mine, sf::Vector2f pos) {
+        if (!mine.isMine || !mine.mineArmed || mine.mineFuse > 0.f) return;
+        mine.mineFuse = mine.mineFuseTime;
+        spawnShockRing(pos, 6.f, mine.mineTrigger, 0.30f,
+            sf::Color(255, 70, 40), 3.f, 235.f);
+    }
+
     void spawnScreenFlash(sf::Color color, float duration, float peakAlpha = 120.f) {
         screenFlashes.push_back({ duration, duration, peakAlpha, color });
     }
