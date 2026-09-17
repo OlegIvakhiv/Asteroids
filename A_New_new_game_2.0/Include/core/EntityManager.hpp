@@ -239,6 +239,13 @@ public:
     float cameraTrauma = 0.f;   ///< 0..1, decays every frame. Shake = trauma²
     float cameraZoomKick = 0.f;   ///< One-shot zoom impulse (negative = punch in)
 
+    // ---- Stagger rules. DamageSystem refreshes these from Lua (visuals.*) ----
+    float staggerGrace = 0.8f;          ///< Tumble-immunity after control returns
+    float staggerTumbleIframes = 1.0f;  ///< Fraction of the tumble spent invulnerable
+    float staggerImmuneShove = 0.35f;   ///< Knockback kept when a hit cannot tumble
+    float poisePerKnockback = 0.1f;     ///< Poise damage = hit knockback x this
+    float poiseAbsorbShove = 0.30f;     ///< Knockback kept when poise absorbs a hit
+
     /**
      * @brief Push screen shake from anywhere without coupling to CameraSystem
      * @param amount 0..1. Additive, clamped. ~0.15 = tap, ~0.6 = heavy hit
@@ -579,14 +586,109 @@ public:
  * @param spinSpeed      Peak tumble rate in deg/sec (sign is randomised)
  */
 
+ // ========================================================================
+ // PLAYER DAMAGE -- the ONE funnel for hull damage
+ // ========================================================================
+
+ /**
+  * @brief Deal damage to the player through class armour.
+  *
+  * Every hull-damage site goes through here: bullets, contact, blasts,
+  * bash, ram. Writing `currentHp -= x` directly skips the gunship's
+  * damage reduction -- exactly how "armour works on bullets but not on
+  * rockets" happens. Returns the damage actually taken.
+  */
+    float damagePlayer(size_t playerIdx, float amount) {
+        if (playerIdx >= healths.size() || playerIdx >= players.size() || amount <= 0.f) return 0.f;
+        const auto& ps = players[playerIdx];
+        const float taken = amount * ps.damageTakenScale * (ps.hyperarmor ? ps.hyperarmorDamageScale : 1.f);
+        healths[playerIdx].currentHp -= taken;
+        return taken;
+    }
+
+    /**
+     * @brief Wear poise down without ever breaking it.
+     *
+     * For chip damage (enemy bullets): it softens the ship up so the next
+     * real blow breaks through, but a stream of small shots alone can never
+     * tumble anyone. Floors at 1 poise, costs nothing under hyperarmor.
+     */
+    void chipPoise(size_t playerIdx, float amount) {
+        if (playerIdx >= players.size() || amount <= 0.f) return;
+        auto& ps = players[playerIdx];
+        if (ps.poiseMax <= 0.f || ps.hyperarmor || ps.staggerImmuneTimer > 0.f) return;
+        if (ps.poise > 1.f) ps.poise = std::max(1.f, ps.poise - amount);
+        ps.poiseRegenTimer = ps.poiseDelay;
+        ps.poiseHitFlash = std::max(ps.poiseHitFlash, 0.12f);
+    }
+
+    /// @param poiseDamage explicit poise cost of this hit; negative = derive from knockback
     void staggerPlayer(size_t playerIdx, sf::Vector2f knockDir, float knockSpeed,
-        float tumbleDuration, float recoverDuration, float spinSpeed) {
+        float tumbleDuration, float recoverDuration, float spinSpeed, float poiseDamage = -1.f) {
         if (playerIdx >= players.size()) return;
         auto& ps = players[playerIdx];
 
         // Already tumbling? Don't restack — that's how you get a 4-second lockout
         // from a single asteroid cluster.
         if (ps.staggerTimer > 0.f) return;
+
+        // Poise damage reads the hit's RAW knockback: how hard the blow was,
+        // not how far this particular hull gets pushed by it.
+        if (poiseDamage < 0.f) poiseDamage = knockSpeed * poisePerKnockback;
+        knockSpeed *= ps.knockbackScale;
+
+        // ---- Anti-stunlock ----
+        // Two Berserkers used to chain bash -> tumble -> bash forever: each
+        // respected its OWN cooldown, but not each other's. After a tumble the
+        // player is immune to a NEW tumble until control has been back for a
+        // moment. The hit still lands (damage is the caller's), it just shoves
+        // instead of knocking the ship out of control.
+        if (ps.staggerImmuneTimer > 0.f) {
+            float l = std::sqrt(knockDir.x * knockDir.x + knockDir.y * knockDir.y);
+            if (l > 0.001f) {
+                const float shove = knockSpeed * staggerImmuneShove / l;
+                b2Body_SetLinearVelocity(physics[playerIdx].bodyId,
+                    { knockDir.x * shove / SCALE, knockDir.y * shove / SCALE });
+            }
+            addTrauma(0.35f);
+            return;
+        }
+        // ---- Poise: mass absorbs the blow ----
+        // Checked AFTER the anti-stunlock gate, so hits during the grace period
+        // cost nothing. Hyperarmor (heavy dodge burst) absorbs without draining.
+        ps.poiseRegenTimer = ps.poiseDelay;
+        if (ps.poiseMax > 0.f && (ps.hyperarmor || ps.poise - poiseDamage > 0.f)) {
+            if (!ps.hyperarmor) ps.poise -= poiseDamage;
+            ps.poiseHitFlash = 0.25f;
+
+            float l = std::sqrt(knockDir.x * knockDir.x + knockDir.y * knockDir.y);
+            if (l > 0.001f) {
+                // ADD, don't set: a heavy that absorbs a hit keeps its heading.
+                const float shove = knockSpeed * poiseAbsorbShove / l;
+                const b2Vec2 v = b2Body_GetLinearVelocity(physics[playerIdx].bodyId);
+                b2Body_SetLinearVelocity(physics[playerIdx].bodyId,
+                    { v.x + knockDir.x * shove / SCALE, v.y + knockDir.y * shove / SCALE });
+            }
+            addTrauma(0.30f);
+            spawnShockRing(transforms[playerIdx].position, 14.f, 70.f, 0.22f,
+                sf::Color(255, 200, 80), 4.f, 230.f);
+            return;
+        }
+
+        // ---- Poise broke (or there was none): a real tumble ----
+        if (ps.poiseMax > 0.f) {
+            ps.poise = ps.poiseMax;          // refills: the break IS the punishment
+            ps.poiseBreakFlash = 0.6f;
+        }
+        tumbleDuration *= ps.tumbleScale;
+        recoverDuration *= ps.tumbleScale;
+
+        ps.staggerImmuneTimer = tumbleDuration + recoverDuration + staggerGrace;
+
+        // Can't be hit while spinning helplessly -- the tumble is the punishment.
+        if (playerIdx < healths.size())
+            healths[playerIdx].invulTimer = std::max(healths[playerIdx].invulTimer,
+                tumbleDuration * staggerTumbleIframes);
 
         ps.isStaggered = true;
         ps.staggerDuration = tumbleDuration;
@@ -597,6 +699,9 @@ public:
 
         // Cancel every competing state.
         ps.dashAnim = DashAnim::None; ps.dashAnimTimer = 0.f;
+        if (ps.dashTimer > 0.f) b2Body_SetBullet(physics[playerIdx].bodyId, false);  // CCD was dodge-only
+        ps.dashTimer = 0.f;   // a running dodge would otherwise overwrite the knockback
+        ps.dashDriftTimer = 0.f;
         ps.isParrying = false; ps.parryTimer = 0.f; ps.parryAnimTimer = 0.f;
         ps.riftCharging = false;
         ps.isTurbo = false;

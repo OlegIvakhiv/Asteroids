@@ -139,9 +139,14 @@ public:
  * convexity and the 8-point cap, so it feeds b2ComputeHull with no
  * conversion and no visual/physics mismatch.
  *
- * HP, energy and engine power come from geometry. Mass is not set here at
- * all: Box2D derives it from shape area x density, which is why a bigger
- * hull is slower without a single tuning value.
+ * MASS: Box2D would derive mass from the polygon alone, which ignores the
+ * mounts. After the shape is created the body's mass data is overwritten
+ * with the design's total (hull + guns + drives, at their real positions),
+ * so a wide-mounted ship genuinely turns and shoves like one.
+ *
+ * KIT: everything the starting gear reads from the hull goes onto
+ * PlayerComponent::kit. Thrust is calibrated against Lua engine_power so the
+ * reference build (stock hull, auto-mounted) moves exactly as before.
  */
     uint32_t createPlayerFromDesign(EntityManager& em, sf::Vector2f pos,
         sol::state& lua, b2WorldId worldId,
@@ -162,18 +167,30 @@ public:
         PlayerComponent& pc = em.players.back();
         pc.maxEnergyDrive = st.energyMax;
         pc.energyDrive = st.energyMax;
-        pc.enginePower = st.thrustN;
+        pc.kit = design.kit(lua["engine_power"].get_or(150.f));
+        pc.enginePower = pc.kit.forwardForceN;
 
         pc.gunMountCount = 0;
-        for (int gi : design.mountedGuns()) {
-            if (pc.gunMountCount >= 4) break;
-            if (gi >= 0 && gi < static_cast<int>(outline.size()))
-                pc.gunMounts[pc.gunMountCount++] = outline[gi];
+        for (int g = 0; g < pc.kit.gunCount && g < 4; ++g)
+            pc.gunMounts[pc.gunMountCount++] = pc.kit.gunPosPx[g];
+
+        // The model only ships if the player authored a legal one; otherwise
+        // the renderer draws the hitbox exactly as before.
+        if (design.decorAuthored() && design.decorCheck().ok) {
+            pc.modelOutline = design.renderOutline();
+            pc.modelTris = design.renderTriangles();
         }
+
         // Never leave the ship unable to shoot, whatever the editor produced.
         if (pc.gunMountCount == 0) {
             pc.gunMounts[0] = { 0.f, -30.f };
             pc.gunMountCount = 1;
+            pc.kit.gunCount = 1;
+            pc.kit.gunPosPx[0] = { 0.f, -30.f };
+            pc.kit.spinalSlot = 0;
+            pc.kit.riftShared = true;
+            pc.kit.primarySlots[0] = 0;
+            pc.kit.primaryCount = 1;
         }
 
         // ---- Box2D body ----
@@ -207,6 +224,17 @@ public:
         shapeDef.density = design.tuning().density;
 
         b2CreatePolygonShape(bid, &shapeDef, &polygon);
+
+        // Hull + mounts. MUST come after the last shape: adding a shape makes
+        // Box2D recompute mass from shapes and silently discard this.
+        // Body-level rotational inertia is about the centre of mass.
+        if (pc.kit.valid) {
+            b2MassData md;
+            md.mass = pc.kit.massKg;
+            md.center = { pc.kit.centreOfMassPx.x / SCALE, pc.kit.centreOfMassPx.y / SCALE };
+            md.rotationalInertia = pc.kit.inertiaKgM2;
+            b2Body_SetMassData(bid, md);
+        }
 
         PhysicsShapeData shapeData;
         shapeData.type = PhysicsShapeData::Type::Polygon;

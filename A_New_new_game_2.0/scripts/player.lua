@@ -7,7 +7,7 @@
 -- colors, weapons, and key bindings.
 -- 
 -- @author Oleg Ivakhiv
--- @version 1.1
+-- @version 1.3
 -- ============================================================================
 
 -- ============================================================================
@@ -114,6 +114,23 @@ visuals = {
     stagger_spin_decay = 2.6,        -- higher = spin dies off sooner
     stagger_trauma_floor = 0.18,     -- sustained rumble while tumbling
     stagger_blast_falloff = 0.45,    -- how close to an explosion staggers you (0-1)
+
+    -- ===== POISE =====
+    -- Poise soaks stagger-grade hits before they tumble you. It is depleted by
+    -- knockback-weighted hits and refills after a quiet window.
+    poise_per_knockback = 0.1,   -- poise damage per point of hit knockback
+                                 -- (bash 95, ram 110, rock 90, blast 40-90)
+    poise_absorb_shove  = 0.30,  -- share of knockback still applied when poise
+                                 -- eats the hit. 0 = pure absorb, 1 = same as
+                                 -- a normal shove with no tumble.
+    bullet_poise_per_damage = 0.6,   -- chip only: bullets never break poise alone
+
+    -- ===== ROCK TIERS =====
+    -- Poise and knockback scale x0.5 at 12 m/s closing speed up to x1.0 at 30 m/s.
+    rock_small_damage = 8,    rock_small_poise = 12,  rock_small_knockback = 260,
+    rock_medium_damage = 15,  rock_medium_poise = 45, rock_medium_knockback = 600,
+    rock_large_damage = 22,   rock_large_poise = 90,  rock_large_knockback = 900,
+    rock_magma_damage = 18,   rock_magma_poise = 70,  rock_magma_knockback = 750,
 
     -- ===== PARRY SUCCESS =====
     parry_hitstop_freeze = 0.06,     -- HARD freeze. Above ~0.15 reads as a hitch.
@@ -360,4 +377,128 @@ key_bindings = {
     -- NOT the fire button, deliberately. Players mash fire the instant they
     -- overheat -- that is the reflex the lockout creates -- so binding the QTE
     -- to fire would auto-fail it before the bar could even be read.
+}
+
+
+
+-- Optional. Paste into player.lua. Every key has a C++ default equal to the
+-- value below, so a missing table changes nothing (sol2 get_or is silent).
+refit = {
+    rcs_scale          = 1.0,   -- reverse/strafe floor. 1 = class default, 2 = MEDIUM reverses at full power
+    yaw_drift_scale    = 0.2,   -- how hard off-axis drives pull the nose
+    yaw_drift_damping  = 3.0,   -- how fast that pull settles
+    yaw_drift_max      = 240,   -- deg/s cap on drift
+    recoil_yaw_scale   = 0.35,  -- nose kick from off-centre guns / wing-mounted Rift
+    gun_convergence    = 520,   -- px ahead where all plasma barrels meet
+}
+
+
+-- Playtest pass: values to change / add in player.lua.
+-- Every key below also has the same default in C++, so deleting an old line
+-- gives you the new value too. sol2 get_or is silent: a typo'd key = default.
+
+-- ---- In your existing `weapon = { ... }` table ----
+--   shot_energy_cost  = 3,     -- was 6.  Plasma is the spam button; heat limits it, not energy
+--   rift_energy_cost  = 24,    -- was 40. ~24% of a medium pool instead of ~48% with the drain
+--   rift_charge_drain = 4,     -- was 14. Charging costs time, not a second energy bill
+--   rift_cooldown     = 2.0,   -- NEW.    The heavy attack's real price: slow to SHOOT
+
+-- ---- In your existing `visuals = { ... }` table ----
+--   stagger_grace          = 0.8,   -- NEW. No new tumble until 0.8s after control returns
+--   stagger_tumble_iframes = 1.0,   -- NEW. Fraction of the tumble spent invulnerable
+--   stagger_immune_shove   = 0.35,  -- NEW. Knockback kept when a hit can't tumble you
+
+-- ---- Now ONLY used by the legacy (non-refit) ship ----
+--   dash_velocity, dash_max_cooldown, dash_energy_cost
+
+-- Lua beats the C++ defaults: if you keep the old table, you keep the old
+-- short dodges. New keys: dash_carry, dash_drift.
+--
+--   dash_carry  share of the burst's average speed kept when the burst ends
+--   dash_drift  seconds for that carry to bleed back to your entry speed
+--               (only the component along the dodge is capped: you can steer out)
+--
+-- Measured from standstill at 60fps: LIGHT 335px, MEDIUM 311px, HEAVY 286px.
+--
+-- ---- POISE (per hull class) ----
+--   poise        0 = every stagger-grade hit tumbles you
+--   poise_regen  per second, after poise_delay seconds without a hit
+--   knockback    multiplier on every shove
+--   tumble       stagger duration multiplier when poise breaks
+--   hyperarmor   1 = dodge burst absorbs hits without draining poise
+--
+--   damage_reduction       flat damage multiplier applied to incoming hits
+--   hyperarmor_reduction   extra multiplier applied during the dodge burst
+--                          (95 ram: 76 normally, 38 in the dodge)
+--   shoulder_bash          enables the shoulder check
+--   shoulder_damage        damage on a clean shoulder hit
+--   shoulder_knock         px/sec shove on a clean shoulder hit
+--   shoulder_stun          seconds of stun on a clean shoulder hit
+--   shoulder_counter       x multiplier when the bash breaks a charge
+--   ramming                enables ramming damage
+--   ram_min_speed          minimum closing m/s to register a ram
+--   ram_damage_per_speed   damage per m/s above ram_min_speed
+--   ram_base_damage        flat damage added on top of the speed term
+--   ram_medium_taken       share of damage the heavy takes from a medium ram
+hull_classes = {
+    light = {
+        dash_distance = 290, dash_duration = 0.18, dash_iframes = 0.26,
+        dash_recovery = 0.22, dash_cost = 12, dash_carry = 0.20, dash_drift = 0.22,
+        heat_capacity = 0.75, heat_cool = 1.40, heat_vent = 1.35, qte_window = 1.45,
+        parry_window = 1.15, regen = 1.20,
+
+        -- POISE
+        poise        = 30,
+        poise_regen  = 30,
+        poise_delay  = 1.0,
+        knockback    = 1.10,
+        tumble       = 1.0,
+        hyperarmor   = 0,
+    },
+    medium = {
+        dash_distance = 250, dash_duration = 0.21, dash_iframes = 0.20,
+        dash_recovery = 0.40, dash_cost = 15, dash_carry = 0.28, dash_drift = 0.32,
+        heat_capacity = 1.0, heat_cool = 1.0, heat_vent = 1.0, qte_window = 1.0,
+        parry_window = 1.0, regen = 1.0,
+
+        -- POISE
+        poise        = 80,
+        poise_regen  = 60,
+        poise_delay  = 1.2,
+        knockback    = 0.85,
+        tumble       = 1.0,
+        hyperarmor   = 0,
+    },
+    heavy = {
+        dash_distance = 200, dash_duration = 0.27, dash_iframes = 0.12,
+        dash_recovery = 0.70, dash_cost = 20, dash_carry = 0.38, dash_drift = 0.45,
+        heat_capacity = 1.35, heat_cool = 0.72, heat_vent = 0.80, qte_window = 0.65,
+        parry_window = 0.85, regen = 0.85,
+
+        -- POISE
+        poise        = 340,
+        poise_regen  = 22,       -- slow on purpose
+        poise_delay  = 4.0,      -- long quiet window before regen starts
+        knockback    = 0.50,
+        tumble       = 0.75,
+        hyperarmor   = 1,
+
+        -- DAMAGE MITIGATION
+        damage_reduction     = 0.20,
+        hyperarmor_reduction = 0.50,  -- 95 ram: 76 normally, 38 in the dodge
+
+        -- SHOULDER BASH
+        shoulder_bash     = 1,
+        shoulder_damage   = 20,
+        shoulder_knock    = 750,
+        shoulder_stun     = 0.9,
+        shoulder_counter  = 1.75,     -- x1.75 when it breaks a charge
+
+        -- RAMMING
+        ramming              = 1,
+        ram_min_speed        = 12,
+        ram_damage_per_speed = 3,
+        ram_base_damage      = 15,
+        ram_medium_taken     = 0.35,
+    },
 }

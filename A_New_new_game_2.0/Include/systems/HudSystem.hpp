@@ -1,17 +1,17 @@
-/**
+ï»¿/**
  * @file HudSystem.hpp
  * @brief Stylized screen-space HUD (health, energy, heat, score)
  *
  * Pulled out of game.cpp, which was building SFML shapes inline every frame.
  *
- * DESIGN NOTES — why these bars look the way they do:
+ * DESIGN NOTES ï¿½ why these bars look the way they do:
  *
  *  1. SKEWED PARALLELOGRAMS, not rectangles. A 12px shear costs nothing and
  *     instantly stops the HUD reading as programmer-art. Everything is drawn
  *     as sf::ConvexShape quads so the skew is free.
  *
  *  2. SEGMENTED FILLS. Ticks cut into the bar every N units. Continuous bars
- *     are hard to read at a glance — segments let you count remaining chunks
+ *     are hard to read at a glance ï¿½ segments let you count remaining chunks
  *     in peripheral vision without looking directly at the HUD.
  *
  *  3. DAMAGE GHOST. The health bar keeps a second, slower bar behind the real
@@ -26,7 +26,7 @@
  *     ship's nose glow, so the bar and the ship tell the same story with the
  *     same vocabulary.
  *
- * Drawn in screen space — SystemManager must set the default view first.
+ * Drawn in screen space ï¿½ SystemManager must set the default view first.
  *
  * @author Oleg Ivakhiv
  * @version 1.0
@@ -96,6 +96,19 @@ public:
             /*iframe*/ hp.invulTimer > 0.f);
         y += 30.f;
 
+        // ---- Poise: thin amber strip under the hull bar, only if the class has any ----
+        // White when it just absorbed a hit, red when it just broke. Reading it
+        // is the whole skill of a heavy: "can I eat this one?"
+        if (ps.poiseMax > 0.f) {
+            const float pr = clamp01(ps.poise / ps.poiseMax);
+            sf::Color pc = (ps.poiseBreakFlash > 0.f) ? pulse(sf::Color(255, 60, 40), sf::Color(255, 180, 160), 14.f)
+                : (ps.poiseHitFlash > 0.f) ? sf::Color(255, 245, 220)
+                : sf::Color(255, 185, 40);
+            quad(x, y - 3.f, 260.f, 5.f, sf::Color(30, 24, 14, 220), 5.f);
+            quad(x, y - 3.f, 260.f * pr, 5.f, pc, 5.f);
+            y += 8.f;
+        }
+
         // ================================================================
         // ENERGY DRIVE
         // ================================================================
@@ -105,7 +118,8 @@ public:
             ? pulse(sf::Color(255, 69, 0), sf::Color(255, 150, 60), 12.f)
             : sf::Color(0, 191, 255);
 
-        const float dashCost = (*m_lua)["dash_energy_cost"].get_or(30.f);
+        // Written every frame by InputSystem, class-scaled for refit ships.
+        const float dashCost = ps.dashEnergyCost;
         const float costRatio = clamp01(dashCost / std::max(1.f, ps.maxEnergyDrive));
 
         drawBar(x, y, 260.f, 13.f, enRatio, enCol,
@@ -117,8 +131,22 @@ public:
         }
         y += 20.f;
 
+        // ---- Rift readiness: thin violet strip, fills as the cooldown runs ----
+        // The heavy attack is gated by time now; the player needs to SEE when.
+        {
+            const float cdMax = std::max(0.001f, ps.riftCooldownMax);
+            const float ready = (ps.riftCooldown > 0.f) ? clamp01(1.f - ps.riftCooldown / cdMax) : 1.f;
+            const bool full = ready >= 1.f;
+            const sf::Color violet = full
+                ? pulse(sf::Color(175, 95, 255), sf::Color(215, 170, 255), 3.f)
+                : sf::Color(95, 55, 140);
+            quad(x, y - 4.f, 260.f, 4.f, sf::Color(20, 16, 30, 220), 4.f);
+            quad(x, y - 4.f, 260.f * ready, 4.f, violet, 4.f);
+        }
+        y += 6.f;
+
         // ================================================================
-        // WEAPON HEAT / VENT QTE — unified widget
+        // WEAPON HEAT / VENT QTE ï¿½ unified widget
         // ================================================================
         const float qteT = ps.qteActive ? 1.f : 0.f;
         m_qteOpen += (qteT - m_qteOpen) * (1.f - std::exp(-11.f * dt));
@@ -230,8 +258,10 @@ private:
                 hot, ui::alpha(ui::CYAN_LOW, 0.35f));
 
             // Vent-unlock threshold
+            // Threshold scales with class capacity exactly as WeaponSystem's
+            // does, so the ratio is capacity-independent: raw Lua / raw Lua.
             const float unlockAt = wcfg("heat_unlock_threshold", 30.f)
-                / std::max(1.f, ps.maxWeaponHeat);
+                / std::max(1.f, wcfg("max_weapon_heat", 100.f));
             ui::vline(*m_window, x + unlockAt * w, y - 2.f, h + 4.f, ui::CYAN_MID);
 
             // ---- Overdrive readout ----
@@ -273,7 +303,7 @@ private:
         auto zone = [&](float half, sf::Color c, float inset) {
             const float zx = x + (ps.qteGoodCenter - half) * w;
             ui::fill(*m_window, zx, y + inset, half * 2.f * w, h - inset * 2.f, c);
-        };
+            };
         zone(ps.qteGoodHalf, ui::alpha(ui::BLUE_COOL, 0.55f), 1.f);
         zone(ps.qtePerfectHalf, ui::alpha(ui::AMBER_HOT, 0.95f), 1.f);
 

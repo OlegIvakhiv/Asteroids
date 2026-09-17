@@ -15,6 +15,7 @@
 
 #include <SFML/Graphics.hpp>
 #include <box2d/box2d.h>
+#include "ShipDesign.hpp"   // ship::KitProfile -- pure data, no rendering/Box2D
 
  // ============================================================================
  // COLLISION SHAPE DATA (for debug drawing only)
@@ -75,6 +76,20 @@ struct PlayerComponent {
     float dashCooldown;                 // Time left until dash is available again
     float dashMaxCooldown;              // Total cooldown after a dash
 
+    // ---- Dodge burst (refit ships; see ClassTuning.hpp) ----
+    // A controlled burst, not a velocity kick: velocity is driven along an
+    // ease-out curve for dashDuration, then handed back. Distance is exact
+    // and independent of linear damping.
+    float        dashTimer = 0.f;       // >0 while the burst is running
+    float        dashDuration = 0.f;
+    float        dashPeakSpeed = 0.f;   // px/s at the start of the curve
+    float        dashExitSpeed = 0.f;   // px/s the burst ends on (the carry)
+    float        dashEntrySpeed = 0.f;  // px/s along dashDir before the dodge; drift returns to it
+    float        dashDriftTimer = 0.f;  // >0 while momentum bleeds off after the burst
+    float        dashDriftDuration = 0.f;
+    sf::Vector2f dashDir;
+    float        dashEnergyCost = 30.f; // Written every frame by InputSystem; HUD reads it
+
     // ---- Dash animation (driven by ShipAnimSystem) ----
     DashAnim dashAnim = DashAnim::None;
     float    dashAnimTimer = 0.f;       // Counts down
@@ -103,6 +118,8 @@ struct PlayerComponent {
     // ---- Rift Shot (charged shot) ----
     bool riftCharging = false;
     float riftChargeTimer = 0.f;
+    float riftCooldown = 0.f;           // Seconds until the Rift can charge again
+    float riftCooldownMax = 0.f;        // For the HUD sweep
     uint32_t riftBoltEntityId = 0;      // EntityId of the live bolt (0 = none in flight)
     bool riftBoltInFlight = false;
 
@@ -118,6 +135,24 @@ struct PlayerComponent {
     float staggerRecoverTimer = 0.f;    // Recovery remaining — aim only
     float staggerRecoverDuration = 0.f;
     float staggerSpinSpeed = 0.f;       // deg/sec, signed, decays over the tumble
+    float staggerImmuneTimer = 0.f;     // >0 = cannot be knocked into a new tumble (anti-stunlock)
+
+    // ---- Poise (class feel; InputSystem writes the tuning every frame) ----
+    // Legacy defaults (poiseMax 0, scales 1) reproduce the old stagger exactly.
+    float poise = 0.f;
+    float poiseMax = 0.f;
+    float poiseRegen = 0.f;
+    float poiseDelay = 0.f;
+    float poiseRegenTimer = 0.f;        // counts down after a hit; regen when <= 0
+    float knockbackScale = 1.f;
+    float tumbleScale = 1.f;
+    bool  hyperarmor = false;           // true while a hyperarmor dodge burst runs
+    float damageTakenScale = 1.f;       // 1 - passive damage reduction
+    float hyperarmorDamageScale = 1.f;  // extra multiplier while hyperarmor is up
+    bool  shoulderUsed = false;         // this dodge already bashed something
+    float poiseHitFlash = 0.f;          // HUD: absorbed a hit
+    float poiseBreakFlash = 0.f;        // HUD: poise broke
+    float parryWindowTotal = 0.f;       // The window THIS parry opened with (class-scaled)
 
     // ---- Parry success feedback ----
     float parryFlashTimer = 0.f;        // Hull flashes white while > 0
@@ -129,9 +164,24 @@ struct PlayerComponent {
     bool  weaponOverheated = false;     // True = firing locked until it vents
 
     // ---- Hull-derived (written by EntityFactory from ShipDesign) ----
-    float        enginePower = 150.f;   ///< InputSystem should read THIS, not Lua
+    float        enginePower = 150.f;   ///< Legacy readout; movement reads `kit`
     sf::Vector2f gunMounts[4];          ///< Local pixels, where shots originate
     int          gunMountCount = 0;
+
+    // ---- Refit kit ----
+    // Everything the starting gear reads from the hull. `kit.valid == false`
+    // (the legacy createPlayer path) means every system keeps its pre-refit
+    // behaviour, so the attract-mode ship and old saves cannot break.
+    ship::KitProfile kit;
+
+    // ---- Decorative model (refit ships) ----
+    // What the player SEES. The hitbox stays in RenderComponent::shape, whose
+    // transform and colours the renderer reuses so every flash, squash and
+    // parry effect lands on the model too. Empty = draw the hitbox as before.
+    std::vector<sf::Vector2f> modelOutline;   // local px, ring order
+    std::vector<sf::Vector2f> modelTris;      // local px, 3 per triangle
+    int   plasmaCycle = 0;              ///< Next primary gun in the firing rotation
+    float yawDriftVel = 0.f;            ///< deg/s. Off-axis thrust and recoil feed it; aim fights it.
 
     // ---- Overheat vent QTE ----
     bool  qteActive = false;

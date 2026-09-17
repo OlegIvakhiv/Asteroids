@@ -70,6 +70,7 @@
 #include "core/EntityManager.hpp"
 #include "utils/InputRegistry.hpp"
 #include "utils/UiPalette.hpp"
+#include "utils/ClassTuning.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -230,8 +231,12 @@ private:
         ps.qteGoodCenter = margin +
             (static_cast<float>(rand()) / RAND_MAX) * (1.f - margin * 2.f);
 
-        ps.qteGoodHalf = cfg("qte_good_half", 0.105f);
-        ps.qtePerfectHalf = cfg("qte_perfect_half", 0.035f);
+        // Class window: a light ship overheats more often, so its vent is
+        // easier to catch; a heavy overheats rarely and has to earn it.
+        // Clamped so the good zone can never outgrow the target margin.
+        const float win = ship::classFeelFor(*m_lua, ps.kit).qteWindow;
+        ps.qteGoodHalf = std::min(0.20f, cfg("qte_good_half", 0.105f) * win);
+        ps.qtePerfectHalf = std::min(ps.qteGoodHalf * 0.6f, cfg("qte_perfect_half", 0.035f) * win);
 
         // Streak ramp. See the header note on why this exists.
         const float base = cfg("qte_speed", 1.30f);

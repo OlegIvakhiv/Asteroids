@@ -2,6 +2,30 @@
  * @file WeaponSystem.hpp
  * @brief Player shooting, weapon heat, Rift Shot, and projectile steering
  *
+ * CHANGED in 1.5 (playtest pass):
+ *  - LIGHT vs HEAVY ATTACK. Plasma is the spam button, the Rift is the big
+ *    commitment. The Rift is cheaper in energy but gated by rift_cooldown
+ *    (starts when the bolt leaves), so it is slow to SHOOT, not expensive to
+ *    own. Charging no longer bleeds much energy.
+ *  - Plasma energy per shot x 1/sqrt(guns): energy per SECOND of fire is the
+ *    same on every ship. Heat is what limits sustained fire.
+ *  - Class thermal profile (ClassTuning.hpp): capacity, cooling, venting.
+ *    Replaces the area-based heat capacity from 1.4.
+ *
+ * CHANGED in 1.4 (refit kit):
+ *  - Plasma fires from the MOUNTED guns, cycling left to right while the
+ *    trigger is held. Rate x 1/sqrt(guns), per-bolt damage unchanged, heat per
+ *    shot rises with each extra gun. Bolts toe in to a convergence range.
+ *  - The Rift fires from the SPINAL mount. Power and cost scale with the
+ *    hull's energy pool, so it exists on every ship and dominates on none.
+ *  - DEDICATED spinal mount (2+ guns): plasma keeps firing while the Rift
+ *    charges or flies. SHARED (lone gun, or chosen): the old interlock.
+ *  - Detonate with a fresh RMB press on every ship. LMB still detonates on
+ *    SHARED ships, exactly as before.
+ *  - Off-axis recoil kicks the nose (yaw drift). Weapon heat capacity scales
+ *    with hull size.
+ *  - Legacy ships (kit.valid == false) keep 1.3 behaviour.
+ *
  * CHANGED in 1.3:
  *  - Homing steering for reflected (parried) bullets, in the bullet loop.
  *  - Projectile trails: rift bolts and reflected shots leave visible streaks.
@@ -14,7 +38,7 @@
  *   HEAT   � tactical rhythm, weapon-only, hard-locks the gun at max.
  *
  * @author Oleg Ivakhiv
- * @version 1.3
+ * @version 1.5
  */
 
 #pragma once
@@ -24,6 +48,7 @@
 #include "core/EntityFactory.hpp"
 #include "utils/InputRegistry.hpp"
 #include "utils/GameConfig.hpp"
+#include "utils/ClassTuning.hpp"
 #include <cfloat>
 #include <cmath>
 #include <cstdlib>
@@ -37,6 +62,8 @@ public:
         m_worldId = ctx.worldId;
         m_playerEntityId = ctx.playerEntityId;
         m_lua = ctx.lua;
+        m_riftKeyWasDown = false;
+        m_riftRearmLock = false;
     }
 
     void update(float dt) override {
@@ -50,6 +77,7 @@ public:
         auto& playerTf = m_em->transforms[playerIdx];
 
         playerStats.shootTimer -= dt;
+        if (playerStats.riftCooldown > 0.f) playerStats.riftCooldown -= dt;
 
         // ====================================================================
         // 0. WEAPON HEAT
@@ -71,16 +99,28 @@ public:
             (*m_lua)["rift_detonate_key"].get_or(std::string("MouseRight"))
         );
 
-        const float shotEnergy = wcfg("shot_energy_cost", 6.f);
-        const float shotHeat = wcfg("shot_heat", 5.0f);
-        const float riftEnergy = wcfg("rift_energy_cost", 40.f);
+        // ---- Refit kit ----
+        const ship::KitProfile& kit = playerStats.kit;
+        const bool refit = kit.valid && kit.gunCount > 0;
+        const bool riftShared = !refit || kit.riftShared;
+        const float riftCostScale = refit ? kit.riftCostScale : 1.f;
+
+        const bool riftKeyPressed = detonateKey && !m_riftKeyWasDown;
+        m_riftKeyWasDown = detonateKey;
+        if (!detonateKey) m_riftRearmLock = false;
+
+        const float shotEnergy = wcfg("shot_energy_cost", 3.f) * (refit ? kit.shotEnergyScale : 1.f);
+        const float shotHeat = wcfg("shot_heat", 5.0f) * (refit ? kit.shotHeatScale : 1.f);
+        const float riftEnergy = wcfg("rift_energy_cost", 24.f) * riftCostScale;
         const float riftHeat = wcfg("rift_heat", 52.f);
-        const float riftChargeDrain = wcfg("rift_charge_drain", 14.f);
+        const float riftChargeDrain = wcfg("rift_charge_drain", 4.f) * riftCostScale;
 
         // ====================================================================
         // 1. RIFT SHOT CHARGING
         // ====================================================================
         const bool canStartRift =
+            !m_riftRearmLock &&
+            playerStats.riftCooldown <= 0.f &&
             !playerStats.riftBoltInFlight &&
             !playerStats.riftCharging &&
             !playerStats.weaponOverheated &&
@@ -95,7 +135,8 @@ public:
             playerStats.riftCharging = true;
             playerStats.riftChargeTimer = 0.f;
         }
-        else if (detonateKey && !playerStats.riftCharging && !playerStats.riftBoltInFlight) {
+        else if (detonateKey && !m_riftRearmLock
+            && !playerStats.riftCharging && !playerStats.riftBoltInFlight) {
             if (m_denyCooldown <= 0.f) {
                 m_denyCooldown = 0.35f;
                 spawnDenyPuff(playerTf);
@@ -115,7 +156,9 @@ public:
             for (int n = 0; n < sparkCount; ++n) {
                 float rotRad = (playerTf.rotation - 90.f) * 3.14159f / 180.f;
                 sf::Vector2f fwd(std::cos(rotRad), std::sin(rotRad));
-                sf::Vector2f nosePos = playerTf.position + fwd * 40.f;
+                sf::Vector2f nosePos = refit
+                    ? localToWorld(playerTf, spinalMuzzleLocal(kit, 2.f))
+                    : playerTf.position + fwd * 40.f;
 
                 float a = (rand() % 360) * 3.14159f / 180.f;
                 float dist = 60.f + rand() % 50;
@@ -148,16 +191,26 @@ public:
 
                 float rotRad = (playerTf.rotation - 90.f) * 3.14159f / 180.f;
                 sf::Vector2f fwd(std::cos(rotRad), std::sin(rotRad));
-                sf::Vector2f spawnPos = playerTf.position + fwd * 55.f;
+                sf::Vector2f spawnPos = refit
+                    ? localToWorld(playerTf, spinalMuzzleLocal(kit, 18.f))
+                    : playerTf.position + fwd * 55.f;
                 sf::Vector2f vel = fwd * (*m_lua)["rift_bullet_speed"].get_or(1100.f);
 
                 playerStats.energyDrive = std::max(0.f, playerStats.energyDrive - riftEnergy);
                 addHeat(playerStats, riftHeat, playerTf.position);
 
+                // The heavy attack's real price is TIME. Starts on release, so
+                // a detonation never shortens it.
+                playerStats.riftCooldownMax = wcfg("rift_cooldown", 2.0f);
+                playerStats.riftCooldown = playerStats.riftCooldownMax;
+
                 // Recoil: impulse, so it ADDS to your momentum.
                 const float recoil = wcfg("rift_recoil_impulse", 26.f);
                 b2Body_ApplyLinearImpulseToCenter(m_em->physics[playerIdx].bodyId,
                     { -fwd.x * recoil, -fwd.y * recoil }, true);
+                // A Rift from a wing tip yanks the nose. Put it on the centreline
+                // and it does not -- the editor says so, the physics agrees.
+                if (refit) addRecoilYaw(playerStats, kit.gunPosPx[kit.spinalSlot].x, recoil);
 
                 m_em->addTrauma(wcfg("rift_fire_trauma", 0.40f));
                 m_em->cameraZoomKick = -wcfg("rift_fire_zoom_kick", 0.05f);
@@ -168,6 +221,13 @@ public:
 
                 uint32_t boltId = m_ef->createRiftBolt(*m_em, spawnPos, vel,
                     playerTf.rotation, *m_lua, m_worldId);
+                if (refit) {
+                    const size_t bi = m_em->getEntityIndex(boltId);
+                    if (bi != (size_t)-1) {
+                        m_em->bullets[bi].damage *= kit.riftPower;
+                        m_em->bullets[bi].knockback *= kit.riftPower;
+                    }
+                }
                 playerStats.riftBoltEntityId = boltId;
                 playerStats.riftBoltInFlight = true;
 
@@ -200,7 +260,13 @@ public:
                 playerStats.riftBoltInFlight = false;
                 playerStats.riftBoltEntityId = 0;
             }
-            else if (fireHeld && playerStats.shootTimer <= 0 && !playerStats.isParrying) {
+            else if (riftKeyPressed) {
+                // Fresh RMB press: works on every ship, and is the ONLY way on a
+                // dedicated mount, where LMB is busy firing plasma.
+                detonate(boltIdx, playerIdx, playerStats);
+                m_riftRearmLock = true;   // holding on does not start a new charge
+            }
+            else if (riftShared && fireHeld && playerStats.shootTimer <= 0 && !playerStats.isParrying) {
                 detonate(boltIdx, playerIdx, playerStats);
             }
         }
@@ -211,8 +277,9 @@ public:
         const bool canFire =
             fireHeld &&
             playerStats.shootTimer <= 0 &&
-            !playerStats.riftCharging &&
-            !playerStats.riftBoltInFlight &&
+            // The interlock only binds a SHARED mount. A dedicated spinal gun
+            // leaves the plasma guns free -- that is what the third gun buys.
+            (!riftShared || (!playerStats.riftCharging && !playerStats.riftBoltInFlight)) &&
             !playerStats.parryWhiffRecovery &&
             !playerStats.weaponOverheated &&
             playerStats.energyDrive >= shotEnergy;
@@ -222,21 +289,51 @@ public:
             sf::Vector2f direction(std::cos(rotRad), std::sin(rotRad));
             float bulletSpeed = (*m_lua)["bullet_speed"].get_or(800.f);
             sf::Vector2f spawnPos = playerTf.position + direction * 50.f;
+            float bulletAngle = playerTf.rotation;
+            float gunLocalX = 0.f;
+            float perShotFeel = 1.f;
+
+            if (refit) {
+                // Minigun rotation through the plasma guns, left to right.
+                const int n = std::max(1, kit.primaryCount);
+                const int slot = kit.primarySlots[playerStats.plasmaCycle % n];
+                playerStats.plasmaCycle = (playerStats.plasmaCycle + 1) % n;
+
+                const sf::Vector2f mount = kit.gunPosPx[slot];
+                const sf::Vector2f muzzle = kit.gunMuzzlePx[slot];   // model spike tip, if any
+                spawnPos = localToWorld(playerTf, { muzzle.x, muzzle.y - 10.f });
+                gunLocalX = mount.x - kit.centreOfMassPx.x;
+
+                // Toe-in: every barrel aims at one point ahead of the ship, so
+                // wing guns straddle up close and stack at range.
+                const sf::Vector2f conv = playerTf.position
+                    + direction * rcfg("gun_convergence", 520.f);
+                sf::Vector2f d = conv - spawnPos;
+                const float dl = std::sqrt(d.x * d.x + d.y * d.y);
+                if (dl > 1.f) direction = d / dl;
+                bulletAngle = std::atan2(direction.y, direction.x) * 180.f / 3.14159f + 90.f;
+
+                // More barrels = more shots per second. Keep the shake per
+                // SECOND close to one gun's, or four guns is an earthquake.
+                perShotFeel = 1.f / std::sqrt(std::sqrt(static_cast<float>(n)));
+            }
 
             m_ef->createBullet(*m_em, spawnPos, direction * bulletSpeed,
-                playerTf.rotation, *m_lua, m_worldId);
-            playerStats.shootTimer = (*m_lua)["fire_rate"].get_or(0.2f);
+                bulletAngle, *m_lua, m_worldId);
+            playerStats.shootTimer = (*m_lua)["fire_rate"].get_or(0.2f)
+                * (refit ? kit.fireIntervalScale : 1.f);
 
             playerStats.energyDrive = std::max(0.f, playerStats.energyDrive - shotEnergy);
             addHeat(playerStats, shotHeat, playerTf.position);
 
             // Recoil scales with heat: a hot gun kicks harder.
             const float heatT = playerStats.weaponHeat / std::max(1.f, playerStats.maxWeaponHeat);
-            const float kick = wcfg("shot_recoil_impulse", 3.0f) * (1.f + heatT * 0.8f);
+            const float kick = wcfg("shot_recoil_impulse", 3.0f) * (1.f + heatT * 0.8f) * perShotFeel;
             b2Body_ApplyLinearImpulseToCenter(m_em->physics[playerIdx].bodyId,
                 { -direction.x * kick, -direction.y * kick }, true);
+            if (refit) addRecoilYaw(playerStats, gunLocalX, kick);
 
-            m_em->addTrauma(wcfg("shot_trauma", 0.10f) * (1.f + heatT));
+            m_em->addTrauma(wcfg("shot_trauma", 0.10f) * (1.f + heatT) * perShotFeel);
 
             // Muzzle flash shifts cyan -> orange -> white as heat rises.
             const int flashCount = 5 + static_cast<int>(heatT * 5.f);
@@ -584,8 +681,9 @@ private:
 
         // ---- MODE 1: AIR BURST ----
         if (nearestIdx == (size_t)-1 || nearestDist > impactThreshold) {
-            const float burstRadius = (*m_lua)["rift_burst_radius"].get_or(120.f);
-            const float burstDamage = (*m_lua)["rift_burst_damage"].get_or(20.f);
+            const float power = playerStats.kit.valid ? playerStats.kit.riftPower : 1.f;
+            const float burstRadius = (*m_lua)["rift_burst_radius"].get_or(120.f) * std::sqrt(power);
+            const float burstDamage = (*m_lua)["rift_burst_damage"].get_or(20.f) * power;
             const float burstKnock = wcfg("rift_burst_knockback", 420.f);
 
             m_em->addDebugAoE(boltPos, impactThreshold, sf::Color(0, 255, 200, 255), 0.5f);
@@ -700,7 +798,8 @@ private:
         // ---- MODE 3: SYSTEMS OVERLOAD ----
         else if (nearestType == BodyType::Enemy) {
             const float riftDamage = (*m_lua)["rift_damage"].get_or(45.f)
-                * wcfg("rift_overload_multiplier", 4.f);
+                * wcfg("rift_overload_multiplier", 4.f)
+                * (playerStats.kit.valid ? playerStats.kit.riftPower : 1.f);
             m_em->healths[nearestIdx].currentHp -= riftDamage;
             m_em->healths[nearestIdx].stunTimer = wcfg("rift_overload_stun", 2.5f);
             m_em->enemies[nearestIdx].hitFlashTimer = 0.25f;
@@ -740,7 +839,9 @@ private:
         m_em->bullets[boltIdx].markedForDestroy = true;
         playerStats.riftBoltInFlight = false;
         playerStats.riftBoltEntityId = 0;
-        playerStats.shootTimer = 0.5f;
+        // The pause only exists so an LMB detonation does not also fire a bolt.
+        // A dedicated mount detonates on RMB and should not stall the plasma.
+        if (!playerStats.kit.valid || playerStats.kit.riftShared) playerStats.shootTimer = 0.5f;
     }
 
     // ========================================================================
@@ -754,12 +855,15 @@ private:
     // from 100 is dead air.
     // ========================================================================
     void updateHeat(float dt, PlayerComponent& ps, const TransformComponent& tf) {
-        ps.maxWeaponHeat = wcfg("max_weapon_heat", 100.f);
+        // Class thermal profile: light runs hot and sheds it fast, heavy soaks
+        // it and sheds it slowly. Medium is 1.0 across the board.
+        const ship::ClassFeel feel = ship::classFeelFor(*m_lua, ps.kit);
+        ps.maxWeaponHeat = wcfg("max_weapon_heat", 100.f) * feel.heatCapacity;
 
         const float coolDelay = wcfg("heat_cool_delay", 0.40f);
-        const float coolRate = wcfg("heat_cool_rate", 34.f);
-        const float ventRate = wcfg("heat_vent_rate", 50.f);
-        const float unlockAt = wcfg("heat_unlock_threshold", 30.f);
+        const float coolRate = wcfg("heat_cool_rate", 34.f) * feel.heatCool;
+        const float ventRate = wcfg("heat_vent_rate", 50.f) * feel.heatVent;
+        const float unlockAt = wcfg("heat_unlock_threshold", 30.f) * feel.heatCapacity;
         (void)coolDelay;
 
         if (ps.heatCoolDelay > 0.f) ps.heatCoolDelay -= dt;
@@ -914,6 +1018,46 @@ private:
         }
     }
 
+    // ========================================================================
+    // REFIT HELPERS
+    // ========================================================================
+
+    /// Ship-local pixels -> world pixels. Local forward is (0,-1); rotation is
+    /// clockwise-positive degrees, matching tf.rotation everywhere else.
+    static sf::Vector2f localToWorld(const TransformComponent& tf, sf::Vector2f local) {
+        const float r = tf.rotation * 3.14159f / 180.f;
+        const float c = std::cos(r), s = std::sin(r);
+        return { tf.position.x + local.x * c - local.y * s,
+                 tf.position.y + local.x * s + local.y * c };
+    }
+
+    /// The spinal MUZZLE (model spike tip, or just ahead of the mount), pushed
+    /// `ahead` pixels further along local forward.
+    static sf::Vector2f spinalMuzzleLocal(const ship::KitProfile& kit, float ahead) {
+        const sf::Vector2f m = kit.gunMuzzlePx[std::clamp(kit.spinalSlot, 0, ship::MAX_GUN_MOUNTS - 1)];
+        return { m.x, m.y - ahead };
+    }
+
+    /**
+     * @brief Recoil from an off-centre barrel turns the ship.
+     *
+     * Angular impulse = lever arm x linear impulse. Added to the drift
+     * velocity InputSystem integrates, so aim assist fights it the same way
+     * it fights off-axis thrust. Alternating wing guns mostly cancel; a lone
+     * wing-mounted Rift does not.
+     */
+    void addRecoilYaw(PlayerComponent& ps, float localXFromCoM, float impulse) {
+        const float inertia = std::max(0.01f, ps.kit.inertiaKgM2);
+        const float armM = localXFromCoM / SCALE;
+        ps.yawDriftVel += (armM * impulse / inertia) * 57.29578f * rcfg("recoil_yaw_scale", 0.35f);
+    }
+
+    float rcfg(const char* key, float def) const {
+        sol::optional<sol::table> v = (*m_lua)["refit"];
+        if (!v) return def;
+        return (*v)[key].get_or(def);
+    }
+
     float wcfg(const char* key, float def) const {
         sol::optional<sol::table> v = (*m_lua)["weapon"];
         if (!v) return def;
@@ -927,4 +1071,6 @@ private:
     sol::state* m_lua = nullptr;
 
     float m_denyCooldown = 0.f;
+    bool  m_riftKeyWasDown = false;   ///< Edge detection: RMB detonates on a fresh press
+    bool  m_riftRearmLock = false;    ///< Set by an RMB detonation; cleared on release
 };

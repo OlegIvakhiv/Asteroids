@@ -210,7 +210,8 @@ public:
 
                 rd.shape.setPosition(drawPos);
                 rd.shape.setRotation(sf::degrees(drawRot));
-                m_window->draw(rd.shape);
+                if (!playerStats.modelTris.empty()) drawPlayerModel(rd.shape, playerStats);
+                else                                m_window->draw(rd.shape);
 
                 drawNoseHeat(rd.shape, playerStats, heatT);
                 continue;
@@ -1182,16 +1183,104 @@ private:
     // ========================================================================
     // SHIP NOSE HEAT
     // ========================================================================
+    // ========================================================================
+    // PLAYER MODEL
+    // ========================================================================
+
+    /**
+     * @brief Draw the player's decorative model in place of the hitbox shape.
+     *
+     * Everything that styles the ship -- fill priority, parry pulse, stagger
+     * flicker, dash flash, visual pivot/scale/offset -- has already been
+     * written onto the hitbox ConvexShape by the time this runs. The model
+     * borrows that transform and those colours, so no effect needs to know
+     * the model exists. SFML's ConvexShape cannot draw a concave outline,
+     * hence the pre-triangulated mesh and hand-built outline.
+     */
+     /// Outline miter cap, in multiples of thickness. ~11 degree spikes stay sharp.
+    static constexpr float MITER_LIMIT = 10.f;
+
+    void drawPlayerModel(const sf::ConvexShape& hull, const PlayerComponent& ps) {
+        const sf::Transform& tr = hull.getTransform();
+        const sf::Color fill = hull.getFillColor();
+
+        sf::VertexArray mesh(sf::PrimitiveType::Triangles, ps.modelTris.size());
+        for (std::size_t i = 0; i < ps.modelTris.size(); ++i)
+            mesh[i] = { tr.transformPoint(ps.modelTris[i]), fill };
+        m_window->draw(mesh);
+
+        const float t = hull.getOutlineThickness();
+        if (t <= 0.f) return;
+        const sf::Color oc = hull.getOutlineColor();
+        const auto& P = ps.modelOutline;
+        const std::size_t n = P.size();
+        if (n < 3) return;
+
+        // Outline grows OUTWARD, like SFML's. Which side is out depends on winding.
+        float area = 0.f;
+        for (std::size_t i = 0; i < n; ++i) {
+            const auto& a = P[i]; const auto& b = P[(i + 1) % n];
+            area += a.x * b.y - b.x * a.y;
+        }
+        // Shoelace > 0 here means (e.y, -e.x) already points outward.
+        const float side = (area > 0.f) ? 1.f : -1.f;
+
+        const auto normalOf = [&](std::size_t i) {
+            const sf::Vector2f e = P[(i + 1) % n] - P[i];
+            const float l = std::max(0.0001f, std::sqrt(e.x * e.x + e.y * e.y));
+            return sf::Vector2f(e.y / l, -e.x / l) * side;
+            };
+
+        // MITER joins -- the same construction SFML uses for ConvexShape
+        // outlines. The earlier bevel join cut every spike tip flat, which on
+        // a 2.5-7px outline read as a smoothed, blunt model. The miter is
+        // capped so a needle-thin spike cannot grow a lance of outline.
+        std::vector<sf::Vector2f> outer(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            const sf::Vector2f n1 = normalOf((i + n - 1) % n);
+            const sf::Vector2f n2 = normalOf(i);
+            const float k = 1.f + (n1.x * n2.x + n1.y * n2.y);
+            sf::Vector2f m = (n1 + n2) / std::max(k, 0.0001f);
+            const float ml = std::sqrt(m.x * m.x + m.y * m.y);
+            if (ml > MITER_LIMIT) m *= MITER_LIMIT / ml;
+            outer[i] = P[i] + m * t;
+        }
+
+        sf::VertexArray line(sf::PrimitiveType::Triangles, n * 6);
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::size_t j = (i + 1) % n;
+            const sf::Vector2f A = tr.transformPoint(P[i]), B = tr.transformPoint(P[j]);
+            const sf::Vector2f C = tr.transformPoint(outer[j]), D = tr.transformPoint(outer[i]);
+            line[i * 6 + 0] = { A, oc }; line[i * 6 + 1] = { B, oc }; line[i * 6 + 2] = { C, oc };
+            line[i * 6 + 3] = { A, oc }; line[i * 6 + 4] = { C, oc }; line[i * 6 + 5] = { D, oc };
+        }
+        m_window->draw(line);
+    }
+
     void drawNoseHeat(const sf::ConvexShape& hull, const PlayerComponent& ps, float heatT) {
         if (heatT <= 0.02f && !ps.weaponOverheated) return;
 
-        const sf::Vector2f nose = hull.getTransform().transformPoint({ 0.f, -30.f });
+        // Heat shows where plasma actually leaves: every plasma muzzle on a
+        // refit ship, the old nose point on a legacy one.
+        const ship::KitProfile& kit = ps.kit;
+        if (kit.valid && kit.primaryCount > 0) {
+            for (int n = 0; n < kit.primaryCount; ++n) {
+                const sf::Vector2f g = kit.gunMuzzlePx[kit.primarySlots[n]];
+                drawHeatGlow(hull.getTransform().transformPoint({ g.x, g.y - 1.f }), ps, heatT,
+                    kit.primaryCount > 1 ? 0.7f : 1.f);
+            }
+            return;
+        }
+        drawHeatGlow(hull.getTransform().transformPoint({ 0.f, -30.f }), ps, heatT, 1.f);
+    }
+
+    void drawHeatGlow(sf::Vector2f nose, const PlayerComponent& ps, float heatT, float sizeK) {
 
         float intensity = heatT;
         if (ps.weaponOverheated)  intensity = 0.85f + 0.15f * std::sin(m_magmaPulseTime * 28.f);
         else if (heatT > 0.75f)   intensity *= 0.88f + 0.12f * std::sin(m_magmaPulseTime * 18.f);
 
-        const float baseR = 5.f + intensity * 16.f;
+        const float baseR = (5.f + intensity * 16.f) * sizeK;
         struct Layer { float scale; float alpha; };
         const Layer layers[3] = { {1.00f, 0.28f}, {0.62f, 0.55f}, {0.30f, 0.95f} };
 
@@ -1207,7 +1296,7 @@ private:
         }
 
         if (ps.weaponOverheated) {
-            const float rr = 22.f + 4.f * std::sin(m_magmaPulseTime * 22.f);
+            const float rr = (22.f + 4.f * std::sin(m_magmaPulseTime * 22.f)) * sizeK;
             sf::CircleShape ring(rr, 24);
             ring.setOrigin({ rr, rr });
             ring.setPosition(nose);

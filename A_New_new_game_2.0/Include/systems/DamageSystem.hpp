@@ -66,6 +66,7 @@
 
 #pragma once
 
+#include "utils/ClassTuning.hpp"
 #include "ISystem.hpp"
 #include "core/EntityManager.hpp"
 #include "core/EntityFactory.hpp"
@@ -98,6 +99,16 @@ public:
         // ====================================================================
         if (m_em->healths[playerIdx].invulTimer > 0)
             m_em->healths[playerIdx].invulTimer -= dt;
+
+        // Anti-stunlock rules for EntityManager::staggerPlayer, hot-reloadable.
+        m_em->staggerGrace = vcfg("stagger_grace", 0.8f);
+        m_em->staggerTumbleIframes = vcfg("stagger_tumble_iframes", 1.0f);
+        m_em->staggerImmuneShove = vcfg("stagger_immune_shove", 0.35f);
+        m_em->poisePerKnockback = vcfg("poise_per_knockback", 0.1f);
+        m_em->poiseAbsorbShove = vcfg("poise_absorb_shove", 0.30f);
+
+        // Class feel for this frame: armour, shoulder bash, ramming.
+        m_feel = ship::classFeelFor(*m_lua, m_em->players[playerIdx].kit);
         if (m_em->healths[playerIdx].cheapInvulTimer > 0)
             m_em->healths[playerIdx].cheapInvulTimer -= dt;
         if (m_em->players[playerIdx].perfectParryFlash > 0.f) {
@@ -370,6 +381,9 @@ public:
                         resolveFrenzyContact(playerIdx, otherIdx);
                         continue;
                     }
+                    // Gunship dodge into a ship: the dodge IS the attack. Runs
+                    // before the ram contract so it can break a charge.
+                    if (tryShoulderBash(playerIdx, otherIdx)) continue;
                     if (isRamInvulnerable(otherIdx)) {
                         if (isParryActive) {
                             // Parry whiffs against a charge. Loud, so it reads
@@ -497,25 +511,71 @@ public:
                 b2Vec2 vB = b2Body_GetLinearVelocity(bodyB);
                 float relativeSpeed = std::sqrt(std::pow(vA.x - vB.x, 2) + std::pow(vA.y - vB.y, 2));
 
+                const bool isRock = (otherType == BodyType::Asteroid && otherIdx != (size_t)-1);
+                const int tier = isRock ? std::min<int>(3, m_em->healths[otherIdx].asteroidTier) : -1;
+                const bool ramming = m_feel.ramming > 0.5f && relativeSpeed >= m_feel.ramMinSpeed
+                    && m_em->players[playerIdx].kit.valid;
+
+                // ---- GUNSHIP RAMMING ----
+                if (ramming && otherIdx != (size_t)-1) {
+                    const float over = relativeSpeed - m_feel.ramMinSpeed;
+                    const sf::Vector2f op = m_em->transforms[otherIdx].position;
+                    if (tier == 0) {
+                        // Small rock: gone, no damage, no poise, no stop.
+                        m_em->healths[otherIdx].currentHp = -1.f;
+                        m_em->spawnImpact(op, sf::Color(220, 210, 190),
+                            (op - m_em->transforms[playerIdx].position) * 6.f);
+                        m_em->addTrauma(0.08f);
+                        continue;
+                    }
+                    const float dealt = m_feel.ramBaseDamage + over * m_feel.ramDamagePerSpeed;
+                    if (tier == 1) {
+                        m_em->healths[otherIdx].currentHp -= dealt * 2.f;   // medium rocks crack
+                    }
+                    else if (otherType == BodyType::Enemy && !isRamInvulnerable(otherIdx)
+                        && !isBashCommitted(otherIdx)) {
+                        m_em->healths[otherIdx].currentHp -= dealt;
+                        m_em->enemies[otherIdx].hitFlashTimer = 0.2f;
+                        m_em->enemies[otherIdx].timesHit += 1;
+                        sf::Vector2f dir = op - m_em->transforms[playerIdx].position;
+                        staggerEnemy(otherIdx, dir, 380.f + over * 25.f,
+                            std::clamp(over / 20.f, 0.15f, 0.5f));
+                    }
+                }
+
                 if (relativeSpeed > 12.0f && m_em->healths[playerIdx].invulTimer <= 0) {
-                    m_em->healths[playerIdx].currentHp -= 15.0f;
+                    // Hull damage by what you hit. Rocks by size; anything else as before.
+                    float hullDamage = isRock ? rockCfg(tier, "damage", 15.f) : 15.f;
+                    if (ramming && tier == 1) hullDamage *= m_feel.ramMediumTaken;
+                    m_em->damagePlayer(playerIdx, hullDamage);
                     m_em->healths[playerIdx].invulTimer = 1.0f;
 
-                    // ---- HARD IMPACT -> STAGGER ----
-                    float staggerSpeed = vcfg("stagger_speed_threshold", 20.0f);
-                    if (relativeSpeed > staggerSpeed && otherIdx != (size_t)-1) {
-                        sf::Vector2f away = m_em->transforms[playerIdx].position
-                            - m_em->transforms[otherIdx].position;
-                        m_em->staggerPlayer(playerIdx, away,
-                            vcfg("stagger_knockback", 900.f),
-                            vcfg("stagger_tumble_duration", 1.1f),
-                            vcfg("stagger_recover_duration", 0.55f),
-                            vcfg("stagger_spin_speed", 620.f));
+                    // ---- IMPACT -> POISE (or, with no poise, the old stagger rule) ----
+                    // Poise cost scales with SIZE and SPEED. A small rock clipped
+                    // during a dodge costs a sliver; a big one at full burn breaks
+                    // a medium ship. Legacy ships keep the speed threshold.
+                    if (otherIdx != (size_t)-1) {
+                        const auto& ps = m_em->players[playerIdx];
+                        const float speedK = 0.5f + 0.5f * std::clamp((relativeSpeed - 12.f) / 18.f, 0.f, 1.f);
+                        float poiseDmg = (isRock ? rockCfg(tier, "poise", 90.f) : 90.f) * speedK;
+                        float knock = (isRock ? rockCfg(tier, "knockback", 900.f) : vcfg("stagger_knockback", 900.f)) * speedK;
+                        if (ramming && tier == 1) poiseDmg *= 0.5f;
+
+                        const bool legacyStagger = relativeSpeed > vcfg("stagger_speed_threshold", 20.0f);
+                        if (ps.poiseMax > 0.f || legacyStagger) {
+                            sf::Vector2f away = m_em->transforms[playerIdx].position
+                                - m_em->transforms[otherIdx].position;
+                            m_em->staggerPlayer(playerIdx, away, knock,
+                                vcfg("stagger_tumble_duration", 1.1f),
+                                vcfg("stagger_recover_duration", 0.55f),
+                                vcfg("stagger_spin_speed", 620.f),
+                                poiseDmg);
+                        }
                     }
                 }
                 else if (relativeSpeed > 1.5f && m_em->healths[playerIdx].invulTimer <= 0 &&
                     m_em->healths[playerIdx].cheapInvulTimer <= 0) {
-                    m_em->healths[playerIdx].currentHp -= 1.0f;
+                    m_em->damagePlayer(playerIdx, 1.0f);
                     m_em->healths[playerIdx].cheapInvulTimer = 0.2f;
                 }
             }
@@ -540,7 +600,9 @@ public:
                         sf::Vector2f hitVel = m_em->transforms[bulletIdx].velocity;
 
                         if (hitType == BodyType::Player && m_em->healths[playerIdx].invulTimer <= 0) {
-                            m_em->healths[playerIdx].currentHp -= blt.damage;
+                            m_em->damagePlayer(playerIdx, blt.damage);
+                            // Chip: wears poise down, can never break it alone.
+                            m_em->chipPoise(playerIdx, blt.damage * vcfg("bullet_poise_per_damage", 0.6f));
                             m_em->healths[playerIdx].invulTimer = blt.playerIframes;
                             m_em->spawnExplosion(hitPos, sf::Color(255, 100, 0), 8, 2.f);
                             m_em->spawnImpact(hitPos, sf::Color(255, 140, 0), hitVel);
@@ -762,7 +824,8 @@ public:
                             float dist = std::sqrt(ddx * ddx + ddy * ddy);
                             if (dist < radius) {
                                 float falloff = 1.0f - (dist / radius);
-                                m_em->healths[j].currentHp -= damage * falloff;
+                                if (j == playerIdx) m_em->damagePlayer(j, damage * falloff);
+                                else                m_em->healths[j].currentHp -= damage * falloff;
 
                                 if (j == playerIdx && falloff > vcfg("stagger_blast_falloff", 0.45f)) {
                                     m_em->staggerPlayer(playerIdx, otherPos - deathPos,
@@ -861,6 +924,8 @@ private:
         }
     }
 
+    ship::ClassFeel m_feel;   ///< This frame's class feel for the player
+
     float vcfg(const char* key, float def) const {
         sol::optional<sol::table> v = (*m_lua)["visuals"];
         if (!v) return def;
@@ -910,6 +975,79 @@ private:
     bool isRamInvulnerable(size_t idx) const {
         return idx < m_em->enemies.size() &&
             m_em->enemies[idx].ramState == RamState::Charge;
+    }
+
+    /**
+     * @brief Gunship dodge connects with a ship: a cheap bash.
+     *
+     * First enemy per dodge only. Damage, a real stagger and a short stun --
+     * the opening for a follow-up. Against a CHARGING ship it is the counter:
+     * the charge (and the rest of its chain) is broken, the hit is worth
+     * shoulder_counter times more, and the gunship still eats the ram --
+     * through hyperarmor, so no tumble and a fraction of the damage.
+     *
+     * @return true if it bashed, so the caller skips the normal contact rules.
+     */
+    bool tryShoulderBash(size_t playerIdx, size_t enIdx) {
+        auto& ps = m_em->players[playerIdx];
+        if (m_feel.shoulderBash < 0.5f || !ps.kit.valid || ps.shoulderUsed) return false;
+        const bool dashing = ps.dashTimer > 0.f
+            || (ps.dashDriftDuration > 0.f && ps.dashDriftTimer > ps.dashDriftDuration - 0.12f);
+        if (!dashing || enIdx >= m_em->enemies.size()) return false;
+
+        ps.shoulderUsed = true;
+        auto& ec = m_em->enemies[enIdx];
+        const bool breaksCharge = (ec.ramState == RamState::Charge);
+
+        if (breaksCharge) {
+            // Take the ram through hyperarmor: damage, but never a tumble.
+            const bool had = ps.hyperarmor;
+            ps.hyperarmor = true;
+            m_em->damagePlayer(playerIdx, acfg(enIdx, "ram_damage", 95.f));
+            ps.hyperarmor = had;
+
+            ec.ramChainLeft = 0;
+            ec.ramState = RamState::Recover;
+            ec.ramDuration = acfg(enIdx, "ram_recover", 1.9f);
+            ec.ramTimer = ec.ramDuration;
+            ec.ramCooldown = std::max(ec.ramCooldown, acfg(enIdx, "ram_cooldown", 15.f));
+        }
+
+        m_em->healths[enIdx].currentHp -= m_feel.shoulderDamage * (breaksCharge ? m_feel.shoulderCounter : 1.f);
+        ec.hitFlashTimer = 0.25f;
+        ec.timesHit += 2;
+        staggerEnemy(enIdx, ps.dashDir, m_feel.shoulderKnock, breaksCharge ? 1.f : 0.75f);
+        m_em->healths[enIdx].stunTimer = std::max(m_em->healths[enIdx].stunTimer, m_feel.shoulderStun);
+
+        // The gunship stops on the hit instead of sailing through: a bash, not a pass.
+        const b2BodyId pb = m_em->physics[playerIdx].bodyId;
+        ps.dashTimer = 0.f;
+        ps.dashDriftTimer = 0.f;
+        b2Body_SetBullet(pb, false);
+        b2Body_SetLinearVelocity(pb, { -ps.dashDir.x * 140.f / SCALE, -ps.dashDir.y * 140.f / SCALE });
+
+        const sf::Vector2f ep = m_em->transforms[enIdx].position;
+        const sf::Vector2f contact = m_em->transforms[playerIdx].position + (ep - m_em->transforms[playerIdx].position) * 0.55f;
+        m_em->addTrauma(breaksCharge ? 0.60f : 0.42f);
+        m_em->requestHitstop(breaksCharge ? 0.07f : 0.04f, 0.18f, 0.35f);
+        m_em->spawnShockRing(contact, 8.f, breaksCharge ? 150.f : 95.f, 0.24f,
+            sf::Color(255, 205, 90), 6.f, 255.f);
+        m_em->spawnImpact(contact, sf::Color(255, 225, 160), ps.dashDir * 520.f);
+        if (breaksCharge) m_em->spawnScreenFlash(sf::Color(255, 210, 140), 0.14f, 60.f);
+        return true;
+    }
+
+    /// Rock contact tuning by tier, from visuals.rock_<small|medium|large|magma>_<key>.
+    float rockCfg(int tier, const char* key, float fallback) const {
+        static const float kDamage[4] = { 8.f, 15.f, 22.f, 18.f };
+        static const float kPoise[4] = { 12.f, 45.f, 90.f, 70.f };
+        static const float kKnock[4] = { 260.f, 600.f, 900.f, 750.f };
+        static const char* kName[4] = { "small", "medium", "large", "magma" };
+        if (tier < 0 || tier > 3) return fallback;
+        const std::string k = std::string(key);
+        const float def = (k == "damage") ? kDamage[tier] : (k == "poise") ? kPoise[tier]
+            : (k == "knockback") ? kKnock[tier] : fallback;
+        return vcfg((std::string("rock_") + kName[tier] + "_" + k).c_str(), def);
     }
 
     /// Mid-lunge, or recoiling from a strike that already resolved. Contact
@@ -1033,7 +1171,7 @@ private:
                 continue;
             }
 
-            php.currentHp -= acfg(i, "bash_damage", 30.f);
+            m_em->damagePlayer(playerIdx, acfg(i, "bash_damage", 30.f));
             php.invulTimer = acfg(i, "bash_iframes", 0.5f);
 
             m_em->staggerPlayer(playerIdx, ec.bashDir,
@@ -1067,7 +1205,7 @@ private:
         auto& php = m_em->healths[playerIdx];
         if (php.invulTimer > 0.f) return;
 
-        php.currentHp -= acfg(enIdx, "ram_damage", 95.f);
+        m_em->damagePlayer(playerIdx, acfg(enIdx, "ram_damage", 95.f));
         php.invulTimer = acfg(enIdx, "ram_iframes", 1.0f);
 
         const sf::Vector2f pPos = m_em->transforms[playerIdx].position;
@@ -1170,7 +1308,8 @@ private:
             if (d >= radius) continue;
 
             const float falloff = 1.f - (d / radius);
-            m_em->healths[j].currentHp -= damage * falloff;
+            if (j == playerIdx) m_em->damagePlayer(j, damage * falloff);
+            else                m_em->healths[j].currentHp -= damage * falloff;
 
             if (ud && ud->type == BodyType::Enemy && j < m_em->enemies.size()) {
                 m_em->enemies[j].hitFlashTimer = 0.2f;
@@ -1529,9 +1668,14 @@ private:
  * incoming attack rather than pressing early and waiting for it.
  */
     bool isPerfectParry(size_t playerIdx) const {
-        const float window = (*m_lua)["parry_window"].get_or(0.3f);
+        // The window this parry actually opened with -- class-scaled by
+        // InputSystem. Reading raw Lua here made a light ship's early presses
+        // count as "perfect" and a heavy's never could.
+        const auto& ps = m_em->players[playerIdx];
+        const float window = (ps.parryWindowTotal > 0.f)
+            ? ps.parryWindowTotal : (*m_lua)["parry_window"].get_or(0.3f);
         const float frac = (*m_lua)["parry_perfect_fraction"].get_or(0.45f);
-        return m_em->players[playerIdx].parryTimer >= window * (1.f - frac);
+        return ps.parryTimer >= window * (1.f - frac);
     }
 
     /**

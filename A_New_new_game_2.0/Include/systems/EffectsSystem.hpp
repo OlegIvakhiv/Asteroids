@@ -89,9 +89,31 @@ public:
                 sf::Vector2f forward(std::sin(rot), -std::cos(rot));
                 sf::Vector2f right(std::cos(rot), std::sin(rot));
 
-                // Two engine nozzle positions (matching the ship shape stabilizers)
-                sf::Vector2f nozzleL = tf.position - forward * 20.f - right * 18.f;
-                sf::Vector2f nozzleR = tf.position - forward * 20.f + right * 18.f;
+                // ---- Nozzles ----
+                // A refit ship exhausts from the drives it actually mounted, along
+                // each drive's own outward normal. Legacy ships keep the two
+                // hard-coded stabiliser nozzles.
+                struct Nozzle { sf::Vector2f pos; sf::Vector2f dir; };
+                Nozzle nozzles[ship::MAX_ENGINE_MOUNTS];   // >= 2, so the legacy pair fits
+                int nozzleCount = 0;
+
+                const ship::KitProfile& kit = playerStats.kit;
+                if (kit.valid && kit.engineCount > 0) {
+                    const float c = std::cos(rot), sn = std::sin(rot);
+                    const auto toWorld = [&](sf::Vector2f v) {
+                        return sf::Vector2f(v.x * c - v.y * sn, v.x * sn + v.y * c);
+                        };
+                    for (int e = 0; e < kit.engineCount; ++e) {
+                        const sf::Vector2f out = -kit.engineDir[e];   // exhaust leaves opposite the push
+                        nozzles[nozzleCount++] = {
+                            tf.position + toWorld(kit.enginePosPx[e] + out * 4.f),
+                            toWorld(out) };
+                    }
+                }
+                else {
+                    nozzles[nozzleCount++] = { tf.position - forward * 20.f - right * 18.f, -forward };
+                    nozzles[nozzleCount++] = { tf.position - forward * 20.f + right * 18.f, -forward };
+                }
 
                 bool moving = (speed > 1.f);
                 bool turbo = playerStats.isTurbo;
@@ -100,11 +122,10 @@ public:
                 if (moving || turbo) {
                     int count = turbo ? 3 : 1;
                     for (int n = 0; n < count; ++n) {
-                        // Use initializer list to iterate over both nozzles
-                        sf::Vector2f nozzles[2] = { nozzleL, nozzleR };
-                        for (auto& nozzle : nozzles) {
+                        for (int z = 0; z < nozzleCount; ++z) {
+                            const Nozzle& nozzle = nozzles[z];
                             float spread = ((rand() % 40) - 20) * 3.14159f / 180.f;
-                            sf::Vector2f dir = -forward;
+                            sf::Vector2f dir = nozzle.dir;
                             sf::Vector2f pVel = {
                                 (dir.x * std::cos(spread) - dir.y * std::sin(spread)) * (120.f + rand() % 80),
                                 (dir.x * std::sin(spread) + dir.y * std::cos(spread)) * (120.f + rand() % 80)
@@ -122,7 +143,7 @@ public:
 
                             m_em->particles.push_back({
                                 m_em->nextEntityId++,
-                                nozzle,
+                                nozzle.pos,
                                 pVel,
                                 col,
                                 life,
