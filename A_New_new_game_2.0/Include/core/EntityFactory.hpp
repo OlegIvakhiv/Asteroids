@@ -150,7 +150,8 @@ public:
  */
     uint32_t createPlayerFromDesign(EntityManager& em, sf::Vector2f pos,
         sol::state& lua, b2WorldId worldId,
-        const ship::ShipDesign& design) {
+        const ship::ShipDesign& design,
+        const ship::Livery& livery = ship::Livery{}) {
         const ship::ShipStats& st = design.stats();
         const auto& outline = design.outline();
 
@@ -176,6 +177,9 @@ public:
 
         // The model only ships if the player authored a legal one; otherwise
         // the renderer draws the hitbox exactly as before.
+        // Paint travels with the ship; the renderer reads it every frame.
+        pc.livery = livery;
+
         if (design.decorAuthored() && design.decorCheck().ok) {
             pc.modelOutline = design.renderOutline();
             pc.modelTris = design.renderTriangles();

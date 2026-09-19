@@ -16,6 +16,7 @@
 #include <SFML/Graphics.hpp>
 #include <box2d/box2d.h>
 #include "ShipDesign.hpp"   // ship::KitProfile -- pure data, no rendering/Box2D
+#include "ShipLivery.hpp"   // ship::Livery -- paint, decals, cockpit
 
  // ============================================================================
  // COLLISION SHAPE DATA (for debug drawing only)
@@ -180,6 +181,9 @@ struct PlayerComponent {
     // parry effect lands on the model too. Empty = draw the hitbox as before.
     std::vector<sf::Vector2f> modelOutline;   // local px, ring order
     std::vector<sf::Vector2f> modelTris;      // local px, 3 per triangle
+
+    // ---- Livery: paint, decals, cockpit. Defaults are the stock colours. ----
+    ship::Livery livery;
     int   plasmaCycle = 0;              ///< Next primary gun in the firing rotation
     float yawDriftVel = 0.f;            ///< deg/s. Off-axis thrust and recoil feed it; aim fights it.
 

@@ -2436,7 +2436,7 @@ private:
                   (desired.y / SCALE - cv.y) * turnRate }, true);
 
             if (rand() % 3 == 0) {
-                m_em->spawnImpact(aPos, sf::Color(0, 255, 200, 150),
+                m_em->spawnImpact(aPos, homingColor(150),
                     sf::Vector2f(-toTarget.x * 200.f, -toTarget.y * 200.f));
             }
         }
@@ -2515,6 +2515,15 @@ private:
     EntityManager* m_em = nullptr;
     EntityFactory* m_ef = nullptr;
     b2WorldId m_worldId;
+    /// A hijacked or parried rock is the PLAYER's projectile, so its trail
+    /// wears the player's paint, not a hard-coded teal.
+    sf::Color homingColor(std::uint8_t alpha) const {
+        const size_t p = m_em ? m_em->getEntityIndex(m_playerEntityId) : (size_t)-1;
+        if (p == (size_t)-1 || p >= m_em->players.size()) return sf::Color(0, 255, 200, alpha);
+        const sf::Color c = m_em->players[p].livery.paint.homing;
+        return sf::Color(c.r, c.g, c.b, alpha);
+    }
+
     uint32_t m_playerEntityId = 0;
     sol::state* m_lua = nullptr;
     const enemyarch::EnemyRegistry* m_registry = nullptr;

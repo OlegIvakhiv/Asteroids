@@ -131,29 +131,28 @@ public:
                 drawRot = tf.rotation + tf.visualOffsetAngle;
 
                 // ---- Outline ----
+                // Painted colours win; the Lua defaults remain the fallback for
+                // a legacy ship that has no livery.
+                const ship::Paint& paint = playerStats.livery.paint;
                 if (playerStats.isParrying) {
                     float pulse = (std::sin(playerStats.parryTimer * 30.f) + 1.f) / 2.f;
                     rd.shape.setOutlineThickness(2.0f + pulse * 5.0f);
-                    rd.shape.setOutlineColor(sf::Color(0, 255, 255,
+                    rd.shape.setOutlineColor(sf::Color(paint.parry.r, paint.parry.g, paint.parry.b,
                         200 + static_cast<uint8_t>(55 * pulse)));
                 }
                 else {
                     rd.shape.setOutlineThickness(2.5f);
-                    sol::table luaOutline = (*m_lua)["outline_color"];
-                    rd.shape.setOutlineColor(sf::Color(
-                        luaOutline["r"].get_or(255),
-                        luaOutline["g"].get_or(255),
-                        luaOutline["b"].get_or(255)));
+                    rd.shape.setOutlineColor(paint.outline);
                 }
 
                 // ---- Fill, in priority order ----
                 const float heatT = playerStats.weaponHeat /
                     std::max(1.f, playerStats.maxWeaponHeat);
 
+                const float br = paint.hull.r, bg = paint.hull.g, bb = paint.hull.b;
+
                 if (playerStats.parryFlashTimer > 0.f) {
                     const float w = std::clamp(playerStats.parryFlashTimer / 0.25f, 0.f, 1.f);
-                    sol::table clr = (*m_lua)["color"];
-                    const float br = clr["r"].get_or(40), bg = clr["g"].get_or(100), bb = clr["b"].get_or(255);
                     rd.shape.setFillColor(sf::Color(
                         static_cast<uint8_t>(br + (255.f - br) * w),
                         static_cast<uint8_t>(bg + (255.f - bg) * w),
@@ -170,14 +169,9 @@ public:
                         static_cast<uint8_t>(60 * flicker)));
                 }
                 else if (playerStats.dashCooldown > (playerStats.dashMaxCooldown - 0.15f)) {
-                    sol::table flash = (*m_lua)["dash_flash_color"];
-                    rd.shape.setFillColor(sf::Color(
-                        flash["r"].get_or(100), flash["g"].get_or(255),
-                        flash["b"].get_or(255), flash["a"].get_or(200)));
+                    rd.shape.setFillColor(sf::Color(paint.dodge.r, paint.dodge.g, paint.dodge.b, 210));
                 }
                 else {
-                    sol::table clr = (*m_lua)["color"];
-                    const float br = clr["r"].get_or(40), bg = clr["g"].get_or(100), bb = clr["b"].get_or(255);
                     const float k = heatT * heatT * 0.55f;
                     rd.shape.setFillColor(sf::Color(
                         static_cast<uint8_t>(br + (200.f - br) * k),
@@ -190,7 +184,7 @@ public:
                     float parryAnimDuration = (*m_lua)["parry_anim_duration"].get_or(0.6f);
                     float t = playerStats.parryAnimTimer / parryAnimDuration;
                     uint8_t alpha = static_cast<uint8_t>(t * 200);
-                    sf::Color arcCol(0, 255, 220, alpha);
+                    sf::Color arcCol(paint.parry.r, paint.parry.g, paint.parry.b, alpha);
 
                     auto drawArc = [&](float centerAngleDeg) {
                         int segments = 18;
@@ -210,8 +204,10 @@ public:
 
                 rd.shape.setPosition(drawPos);
                 rd.shape.setRotation(sf::degrees(drawRot));
+                drawLivery(rd.shape, playerStats, false);   // decals under the hull
                 if (!playerStats.modelTris.empty()) drawPlayerModel(rd.shape, playerStats);
                 else                                m_window->draw(rd.shape);
+                drawLivery(rd.shape, playerStats, true);    // decals over it, then the canopy
 
                 drawNoseHeat(rd.shape, playerStats, heatT);
                 continue;
@@ -1197,7 +1193,40 @@ private:
      * the model exists. SFML's ConvexShape cannot draw a concave outline,
      * hence the pre-triangulated mesh and hand-built outline.
      */
-     /// Outline miter cap, in multiples of thickness. ~11 degree spikes stay sharp.
+     /**
+      * @brief Decals and canopy, through the hull's transform.
+      *
+      * @param over false = the pass under the hull, true = the pass above it
+      *             plus the cockpit. Geometry comes from ShipLivery, the same
+      *             call the refit bay makes, so the editor cannot lie.
+      */
+    void drawLivery(const sf::ConvexShape& hull, const PlayerComponent& ps, bool over) {
+        const auto& lv = ps.livery;
+        if (lv.decals.empty() && (!over || lv.cockpit.style == ship::CockpitStyle::None)) return;
+
+        const sf::Transform& tr = hull.getTransform();
+        std::vector<sf::Vector2f> tris;
+        sf::VertexArray va(sf::PrimitiveType::Triangles);
+
+        for (const auto& d : lv.decals) {
+            if (d.over != over) continue;
+            tris.clear();
+            ship::decalGeometry(d, tris, false);
+            if (d.mirrored) ship::decalGeometry(d, tris, true);
+            for (const auto& p : tris) va.append({ tr.transformPoint(p), d.color });
+        }
+
+        if (over && lv.cockpit.style != ship::CockpitStyle::None) {
+            std::vector<sf::Vector2f> glass, rim;
+            ship::cockpitGeometry(lv.cockpit, glass, rim);
+            const sf::Color rimCol(14, 18, 26, 235);
+            for (const auto& p : rim)   va.append({ tr.transformPoint(p), rimCol });
+            for (const auto& p : glass) va.append({ tr.transformPoint(p), lv.paint.cockpit });
+        }
+        if (va.getVertexCount() > 0) m_window->draw(va);
+    }
+
+    /// Outline miter cap, in multiples of thickness. ~11 degree spikes stay sharp.
     static constexpr float MITER_LIMIT = 10.f;
 
     void drawPlayerModel(const sf::ConvexShape& hull, const PlayerComponent& ps) {

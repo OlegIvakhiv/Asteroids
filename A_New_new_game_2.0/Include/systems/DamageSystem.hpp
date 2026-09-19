@@ -412,7 +412,7 @@ public:
                         bool isLarge = (reward >= 200);
                         bool isMagmatic = (reward == 75);
 
-                        m_em->spawnExplosion(otherPos, sf::Color(0, 255, 200), 15, 2.5f);
+                        m_em->spawnExplosion(otherPos, parryColor(), 15, 2.5f);
 
                         if (!isLarge && !isMagmatic) {
                             m_em->healths[otherIdx].currentHp = -1.f;
@@ -496,7 +496,7 @@ public:
                                 sh.setOutlineColor(sf::Color(255, 190, 40, 235));
                             }
 
-                            m_em->spawnExplosion(otherPos, sf::Color(0, 255, 200), 10, 1.5f);
+                            m_em->spawnExplosion(otherPos, parryColor(), 10, 1.5f);
                             onParrySuccess(playerIdx, otherPos);
                             // ---- Perfect parry on bullet ----
                             if (isPerfectParry(playerIdx))
@@ -722,8 +722,8 @@ public:
                                 m_em->addTrauma(0.25f + 0.30f * tierMult);
                                 m_em->requestHitstop(0.03f, 0.12f + 0.06f * tierMult, 0.38f);
                                 m_em->spawnShockRing(astPos, 15.f, 120.f + 110.f * tierMult,
-                                    0.40f, sf::Color(0, 255, 200), 6.f, 245.f);
-                                m_em->spawnExplosion(astPos, sf::Color(0, 255, 200),
+                                    0.40f, parryColor(), 6.f, 245.f);
+                                m_em->spawnExplosion(astPos, parryColor(),
                                     20 + static_cast<int>(18 * tierMult), 3.5f);
                             }
                             else {
@@ -789,12 +789,11 @@ public:
                         float radius = m_em->healths[i].explosionRadius * radiusMult;
                         float damage = m_em->healths[i].explosionDamage * damageMult;
 
-                        sf::Color ringColor = wasHoming
-                            ? sf::Color(0, 255, 180, 220)
-                            : sf::Color(255, 80, 0, 220);
+                        const sf::Color homing = homingColor(220);
+                        sf::Color ringColor = wasHoming ? homing : sf::Color(255, 80, 0, 220);
 
                         m_em->addDebugAoE(deathPos, radius, ringColor, 0.4f);
-                        m_em->spawnMagmaExplosion(deathPos, radius, wasHoming);
+                        m_em->spawnMagmaExplosion(deathPos, radius, wasHoming, homingColor(255));
 
                         // Magma rocks throw shards too.
                         sf::Vector2f impactDir(0.f, 0.f);
@@ -805,7 +804,7 @@ public:
                         m_em->fractureAsteroid(i, impactDir, 0, m_ef, m_lua, m_worldId);
 
                         if (wasHoming) {
-                            m_em->spawnExplosion(deathPos, sf::Color(0, 255, 150), 20, 4.0f);
+                            m_em->spawnExplosion(deathPos, homingColor(255), 20, 4.0f);
                         }
 
                         for (int angle = 0; angle < 360; angle += 15) {
@@ -1059,6 +1058,29 @@ private:
             (ec.bashState == BashState::Recover && ec.bashConnected);
     }
 
+    /// The player's painted parry colour. Every parry flash, ring and burst
+    /// reads it, so a repaint is consistent across the whole mechanic.
+    /// A rock the player hijacked or parried is the player's own weapon.
+    sf::Color homingColor(std::uint8_t alpha) const {
+        const size_t p = m_em ? m_em->getEntityIndex(m_playerEntityId) : (size_t)-1;
+        const sf::Color c = (p == (size_t)-1 || p >= m_em->players.size())
+            ? sf::Color(0, 255, 200) : m_em->players[p].livery.paint.homing;
+        return sf::Color(c.r, c.g, c.b, alpha);
+    }
+
+    /// Mix toward white. Keeps a repainted effect's highlight in the family.
+    static sf::Color lighten(sf::Color c, float k) {
+        return sf::Color(static_cast<std::uint8_t>(c.r + (255 - c.r) * k),
+            static_cast<std::uint8_t>(c.g + (255 - c.g) * k),
+            static_cast<std::uint8_t>(c.b + (255 - c.b) * k), c.a);
+    }
+
+    sf::Color parryColor() const {
+        const size_t p = m_em ? m_em->getEntityIndex(m_playerEntityId) : (size_t)-1;
+        if (p == (size_t)-1 || p >= m_em->players.size()) return sf::Color(0, 255, 200);
+        return m_em->players[p].livery.paint.parry;
+    }
+
     /// Per-archetype float, with a fallback if the registry is missing.
     float acfg(size_t idx, const char* key, float def) const {
         if (!m_registry || idx >= m_em->enemies.size()) return def;
@@ -1082,7 +1104,8 @@ private:
             vcfg("parry_hitstop_slomo", 0.35f),
             vcfg("parry_hitstop_min_scale", 0.25f),
             vcfg("parry_trauma", 0.75f),
-            vcfg("parry_flash_alpha", 170.f));
+            vcfg("parry_flash_alpha", 170.f),
+            parryColor());
     }
 
     /**
@@ -1116,7 +1139,7 @@ private:
         staggerEnemy(otherIdx, away, wcfg("parry_melee_knockback", 1100.f), 1.0f);
 
         m_em->enemies[otherIdx].hitFlashTimer = 0.22f;
-        m_em->spawnExplosion(otherPos, sf::Color(0, 255, 200), 22, 3.0f);
+        m_em->spawnExplosion(otherPos, parryColor(), 22, 3.0f);
 
         const sf::Vector2f mid = (playerPos + otherPos) * 0.5f;
         onParrySuccess(playerIdx, mid);
@@ -1392,7 +1415,7 @@ private:
         sh.setOutlineColor(sf::Color(255, 255, 210, 255));
         sh.setOutlineThickness(4.0f);
 
-        m_em->spawnExplosion(rPos, sf::Color(0, 255, 200), 14, 2.2f);
+        m_em->spawnExplosion(rPos, parryColor(), 14, 2.2f);
         m_em->spawnShockRing(rPos, 5.f, 52.f, 0.20f, sf::Color(255, 240, 90), 3.f, 240.f);
         onParrySuccess(playerIdx, rPos);
         if (isPerfectParry(playerIdx)) onPerfectParry(playerIdx, rPos);
@@ -1478,8 +1501,8 @@ private:
                     ((rand() % 2) ? 1.f : -1.f) * acfg(enIdx, "thrown_spin", 16.f));
             }
 
-            m_em->spawnExplosion(ePos, sf::Color(0, 255, 200), 26, 3.4f);
-            m_em->spawnShockRing(ePos, 14.f, 150.f, 0.28f, sf::Color(120, 255, 230), 4.f, 240.f);
+            m_em->spawnExplosion(ePos, parryColor(), 26, 3.4f);
+            m_em->spawnShockRing(ePos, 14.f, 150.f, 0.28f, lighten(parryColor(), 0.55f), 4.f, 240.f);
             onParrySuccess(playerIdx, (pPos + ePos) * 0.5f);
             if (isPerfectParry(playerIdx)) onPerfectParry(playerIdx, ePos);
             return;
@@ -1712,9 +1735,11 @@ private:
         ps.perfectParryChain++;
         ps.perfectParryFlash = 0.30f;
 
-        m_em->spawnScreenFlash(sf::Color(190, 255, 235), 0.16f, 70.f);
+        // Perfect parry reads as a brighter version of the same colour, so a
+        // repaint keeps the "that one was clean" signal intact.
+        m_em->spawnScreenFlash(lighten(parryColor(), 0.72f), 0.16f, 70.f);
         m_em->spawnShockRing(at, 10.f, 165.f, 0.30f,
-            sf::Color(140, 255, 225), 4.f, 300.f);
+            lighten(parryColor(), 0.55f), 4.f, 300.f);
     }
 
 

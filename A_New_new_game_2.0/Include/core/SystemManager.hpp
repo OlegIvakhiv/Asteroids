@@ -40,7 +40,8 @@
 class SystemManager {
 public:
     SystemManager(sf::RenderWindow& window, sol::state& lua)
-        : m_window(window), m_lua(lua) {}
+        : m_window(window), m_lua(lua) {
+    }
 
     ~SystemManager() {
         if (b2World_IsValid(m_worldId)) {
@@ -113,6 +114,7 @@ public:
 
         m_refitSystem.init(ctx);
         m_refitSystem.setDesign(&m_shipDesign);
+        m_refitSystem.setLivery(&m_livery);
 
         m_state = GameState::MainMenu;
     }
@@ -245,7 +247,7 @@ public:
 
         // 3. Re-create the player
         m_playerEntityId = m_entityFactory.createPlayerFromDesign(
-            m_entityManager, { 640.f, 360.f }, m_lua, m_worldId, m_shipDesign);
+            m_entityManager, { 640.f, 360.f }, m_lua, m_worldId, m_shipDesign, m_livery);
 
         m_gameView.setCenter(m_entityManager.transforms[
             m_entityManager.getEntityIndex(m_playerEntityId)].position);
@@ -286,6 +288,7 @@ public:
 
         m_refitSystem.init(ctx);
         m_refitSystem.setDesign(&m_shipDesign);
+        m_refitSystem.setLivery(&m_livery);
 
         m_state = GameState::Playing;
     }
@@ -361,6 +364,7 @@ private:
     int m_hunterLosses = 0;
 
     ship::ShipDesign m_shipDesign = ship::ShipDesign::stock();
+    ship::Livery     m_livery;   ///< Paint, decals, cockpit. Persists across runs.
     RefitSystem m_refitSystem;
 
     // ---- All systems (default-constructible) ----

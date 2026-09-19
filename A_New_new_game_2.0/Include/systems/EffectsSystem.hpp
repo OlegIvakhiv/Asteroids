@@ -134,10 +134,9 @@ public:
                             float life = turbo ? 0.25f + (rand() % 15) / 100.f
                                 : 0.12f + (rand() % 8) / 100.f;
 
-                            // Turbo: hot white-blue core. Normal: cool blue
-                            sf::Color col = turbo
-                                ? sf::Color(180, 220, 255, 220)
-                                : sf::Color(60, 160, 255, 180);
+                            // Turbo: hot core. Normal: cool. Both painted.
+                            sf::Color col = turbo ? playerStats.livery.paint.turbo
+                                : playerStats.livery.paint.thrust;
 
                             float sz = turbo ? 4.f + (rand() % 3) : 2.5f + (rand() % 2);
 
@@ -170,7 +169,7 @@ public:
                             m_em->nextEntityId++,
                             tf.position,
                             dir * spd,
-                            sf::Color(0, 220, 255, 230),
+                            playerStats.livery.paint.dodge,
                             0.2f, 0.2f,
                             3.5f + (rand() % 3)
                             });
@@ -180,7 +179,9 @@ public:
                         m_em->nextEntityId++,
                         tf.position,
                         { 0.f, 0.f },
-                        sf::Color(100, 255, 255, 200),
+                        sf::Color(std::min(255, playerStats.livery.paint.dodge.r + 90),
+                                  std::min(255, playerStats.livery.paint.dodge.g + 60),
+                                  std::min(255, playerStats.livery.paint.dodge.b + 60), 200),
                         0.15f, 0.15f,
                         22.f
                         });
@@ -199,7 +200,9 @@ public:
                         m_em->nextEntityId++,
                         rimPos,
                         rimVel,
-                        sf::Color(0, 255, 220, 200),
+                        sf::Color(playerStats.livery.paint.parry.r,
+                                  playerStats.livery.paint.parry.g,
+                                  playerStats.livery.paint.parry.b, 200),
                         0.15f, 0.15f,
                         2.5f
                         });

@@ -727,19 +727,30 @@ public:
     /**
      * @brief The parry connected. Time-stop, flash, rings, shake.
      */
+     /// @param accent the player's painted parry colour. EntityManager has no
+     ///        idea which entity is the player, so the colour is passed in
+     ///        rather than looked up -- the default is the original teal.
     void triggerParrySuccess(sf::Vector2f pos, float freeze, float slomo,
-        float minScale, float trauma, float flashAlpha) {
+        float minScale, float trauma, float flashAlpha,
+        sf::Color accent = sf::Color(0, 255, 220)) {
         requestHitstop(freeze, slomo, minScale);
         addTrauma(trauma);
         cameraZoomKick = -0.13f;   // punch IN — pulls the eye to the contact
 
-        // Flash lasts the whole time-stop so the freeze reads as intentional.
-        spawnScreenFlash(sf::Color(210, 255, 250), freeze + slomo, flashAlpha);
+        // Pale version of the accent for the flash and sparks; the small inner
+        // ring stays white, because that white is what sells the impact.
+        const sf::Color pale(
+            static_cast<std::uint8_t>(accent.r + (255 - accent.r) * 0.72f),
+            static_cast<std::uint8_t>(accent.g + (255 - accent.g) * 0.72f),
+            static_cast<std::uint8_t>(accent.b + (255 - accent.b) * 0.72f));
 
-        spawnShockRing(pos, 25.f, 300.f, 0.50f, sf::Color(0, 255, 220), 7.f, 255.f);
+        // Flash lasts the whole time-stop so the freeze reads as intentional.
+        spawnScreenFlash(pale, freeze + slomo, flashAlpha);
+
+        spawnShockRing(pos, 25.f, 300.f, 0.50f, accent, 7.f, 255.f);
         spawnShockRing(pos, 10.f, 140.f, 0.28f, sf::Color(255, 255, 255), 4.f, 255.f);
-        spawnExplosion(pos, sf::Color(190, 255, 250), 26, 3.5f);
-        spawnShockwave(pos, 45.f, sf::Color(0, 255, 220));
+        spawnExplosion(pos, pale, 26, 3.5f);
+        spawnShockwave(pos, 45.f, accent);
     }
 
 
@@ -824,10 +835,18 @@ public:
      * player can't measure is an AoE the player will resent.
      * ==========================================================================
      */
-    void spawnMagmaExplosion(sf::Vector2f pos, float radius, bool empowered) {
-        const sf::Color hot = empowered ? sf::Color(140, 255, 220) : sf::Color(255, 190, 90);
-        const sf::Color mid = empowered ? sf::Color(0, 230, 190) : sf::Color(255, 110, 30);
-        const sf::Color deep = empowered ? sf::Color(0, 150, 130) : sf::Color(150, 40, 10);
+     /// @param accent used when `empowered` -- a rock the player turned into
+     ///        their own weapon detonates in the player's homing colour.
+    void spawnMagmaExplosion(sf::Vector2f pos, float radius, bool empowered,
+        sf::Color accent = sf::Color(0, 230, 190)) {
+        const auto shade = [&](float k) {
+            return sf::Color(static_cast<std::uint8_t>(std::clamp(accent.r * k, 0.f, 255.f)),
+                static_cast<std::uint8_t>(std::clamp(accent.g * k, 0.f, 255.f)),
+                static_cast<std::uint8_t>(std::clamp(accent.b * k, 0.f, 255.f)));
+            };
+        const sf::Color hot = empowered ? shade(1.45f) : sf::Color(255, 190, 90);
+        const sf::Color mid = empowered ? accent : sf::Color(255, 110, 30);
+        const sf::Color deep = empowered ? shade(0.62f) : sf::Color(150, 40, 10);
 
         // ---- 1. Core flash: brief, white, small ----
         spawnShockRing(pos, 4.f, radius * 0.42f, 0.16f, sf::Color::White, 9.f, 255.f);

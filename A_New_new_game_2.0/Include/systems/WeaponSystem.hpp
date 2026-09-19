@@ -318,8 +318,18 @@ public:
                 perShotFeel = 1.f / std::sqrt(std::sqrt(static_cast<float>(n)));
             }
 
-            m_ef->createBullet(*m_em, spawnPos, direction * bulletSpeed,
+            const uint32_t boltId = m_ef->createBullet(*m_em, spawnPos, direction * bulletSpeed,
                 bulletAngle, *m_lua, m_worldId);
+            // Painted plasma. The bolt is the player's colour; the Rift stays violet.
+            if (refit) {
+                const size_t bi = m_em->getEntityIndex(boltId);
+                if (bi != (size_t)-1 && bi < m_em->renders.size()) {
+                    const sf::Color pc = playerStats.livery.paint.plasma;
+                    m_em->renders[bi].shape.setFillColor(pc);
+                    m_em->renders[bi].shape.setOutlineColor(sf::Color(
+                        std::min(255, pc.r + 60), std::min(255, pc.g + 60), std::min(255, pc.b + 60)));
+                }
+            }
             playerStats.shootTimer = (*m_lua)["fire_rate"].get_or(0.2f)
                 * (refit ? kit.fireIntervalScale : 1.f);
 
@@ -348,7 +358,7 @@ public:
                     m_em->nextEntityId++,
                     spawnPos,
                     sparkDir * spd,
-                    heatColor(heatT, 230),
+                    heatMix(playerStats.livery.paint.plasma, heatT, 230),
                     0.08f + (rand() % 6) / 100.f,
                     0.12f,
                     2.5f + rand() % 2 + heatT * 2.f
@@ -770,7 +780,7 @@ private:
 
             m_em->addTrauma(wcfg("rift_hijack_trauma", 0.28f));
             m_em->spawnShockRing(boltPos, 15.f, 170.f, 0.35f,
-                sf::Color(0, 255, 200), 5.f, 240.f);
+                playerStats.livery.paint.homing, 5.f, 240.f);
             m_em->healths[nearestIdx].isKineticWeapon = true;
 
             if (enemyIdx != (size_t)-1) {
@@ -790,7 +800,8 @@ private:
                     float a = n * 15.f * 3.14159f / 180.f;
                     sf::Vector2f d(std::cos(a), std::sin(a));
                     m_em->spawnImpact(boltPos + d * 30.f,
-                        sf::Color(0, 255, 200, 200), d * 400.f);
+                        sf::Color(playerStats.livery.paint.homing.r, playerStats.livery.paint.homing.g,
+                            playerStats.livery.paint.homing.b, 200), d * 400.f);
                 }
             }
         }
@@ -1056,6 +1067,20 @@ private:
         sol::optional<sol::table> v = (*m_lua)["refit"];
         if (!v) return def;
         return (*v)[key].get_or(def);
+    }
+
+    /// Cool end of the muzzle flash is the ship's plasma colour; heat still
+    /// pushes it to orange and then white, because heat must stay readable.
+    static sf::Color heatMix(sf::Color cool, float t, std::uint8_t alpha) {
+        t = std::clamp(t, 0.f, 1.f);
+        const sf::Color hot(255, 140, 40), white(255, 245, 225);
+        const sf::Color a = (t < 0.6f) ? cool : hot;
+        const sf::Color b = (t < 0.6f) ? hot : white;
+        const float k = (t < 0.6f) ? (t / 0.6f) : ((t - 0.6f) / 0.4f);
+        return sf::Color(
+            static_cast<std::uint8_t>(a.r + (b.r - a.r) * k),
+            static_cast<std::uint8_t>(a.g + (b.g - a.g) * k),
+            static_cast<std::uint8_t>(a.b + (b.b - a.b) * k), alpha);
     }
 
     float wcfg(const char* key, float def) const {

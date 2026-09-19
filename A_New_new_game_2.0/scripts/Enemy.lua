@@ -540,7 +540,7 @@ enemy_archetypes.RAIDER = derive {
     },
     turrets = {},
 
-    spawn_weight = 75.0,
+    spawn_weight = 150.0,
     max_active   = 6,
     threat_cost  = 3,
 
@@ -685,7 +685,7 @@ enemy_archetypes.BARGE = derive {
     ram_surprise_bonus     = 2.2,
 
     -- ===== SPAWN =====
-    spawn_weight         = 99.0,
+    spawn_weight         = 120.0,
     max_active           = 2,
     threat_cost          = 6,
 
@@ -875,7 +875,7 @@ enemy_archetypes.BERSERKER = derive {
     -- to wire until the Bloodseeker exists.
 
     -- ===== SPAWN =====
-    spawn_weight         = 200.0,
+    spawn_weight         = 70.0,
     max_active           = 3,
     threat_cost          = 4,      -- Three of them fill the 12 budget
 
@@ -1061,7 +1061,7 @@ enemy_archetypes.MANIAC = derive {
     death_trauma         = 0.34,
 
     -- ===== SPAWN =====
-    spawn_weight         = 200.0,
+    spawn_weight         = 50.0,
     max_active           = 2,
     threat_cost          = 4,
 
