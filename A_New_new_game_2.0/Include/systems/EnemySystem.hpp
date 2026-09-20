@@ -38,6 +38,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <vector>
+#include <string>
+#include <iostream>
 
 class EnemySystem : public ISystem {
 public:
@@ -49,6 +51,7 @@ public:
         m_playerEntityId = ctx.playerEntityId;
         m_lua = ctx.lua;
         m_registry = ctx.enemyRegistry;
+        m_dev = ctx.dev;
 
         m_asteroidSpawnClock.restart();
         m_factionClocks.clear();
@@ -62,8 +65,47 @@ public:
 
         const sf::Vector2f playerPos = m_em->transforms[playerIdx].position;
 
-        updateAsteroids(playerPos);
-        updateFactions(dt, playerPos);
+        // Dev toggles. The clocks still run while a spawner is off; they are
+        // reset on the next attempt, so switching one back on gives a single
+        // spawn, not a burst of banked time.
+        if (!m_dev || m_dev->asteroidSpawnerOn) updateAsteroids(playerPos);
+        if (!m_dev || m_dev->directorOn)        updateFactions(dt, playerPos);
+    }
+
+    /**
+     * @brief Create one asteroid of a named asteroids.lua type.
+     *
+     * The director's spawn path and the dev menu share this, so a dev-spawned
+     * MAGMATIC is armed exactly like a natural one -- same explosion values,
+     * same spin. Two copies of this would drift within a week.
+     *
+     * @return The new entity id, or 0 if the type does not exist.
+     */
+    uint32_t spawnAsteroid(const std::string& typeKey, sf::Vector2f pos, sf::Vector2f vel) {
+        if (!m_em || !m_lua || !m_ef) return 0;
+
+        sol::optional<sol::table> cfgOpt = (*m_lua)["asteroid_types"][typeKey];
+        if (!cfgOpt) {
+            std::cerr << "[EnemySystem] spawnAsteroid(\"" << typeKey
+                << "\") -- no such asteroid type.\n";
+            return 0;
+        }
+        sol::table config = *cfgOpt;
+
+        const uint32_t astId = m_ef->createAsteroid(*m_em, pos, vel,
+            config["base_size"], config, m_worldId);
+
+        const size_t astIdx = m_em->getEntityIndex(astId);
+        if (astIdx != (size_t)-1) {
+            if (typeKey == "MAGMATIC") {
+                m_em->healths[astIdx].isExplosive = true;
+                m_em->healths[astIdx].explosionRadius = config["explosion_radius"].get_or(150.0f);
+                m_em->healths[astIdx].explosionDamage = config["explosion_damage"].get_or(30.0f);
+            }
+            const float randomSpin = ((rand() % 200) - 100.f) / 50.f;
+            b2Body_SetAngularVelocity(m_em->physics[astIdx].bodyId, randomSpin);
+        }
+        return astId;
     }
 
     /**
@@ -132,19 +174,7 @@ private:
         const float speed = speedRange[1].get<float>() +
             (rand() % 100 / 100.f) * (speedRange[2].get<float>() - speedRange[1].get<float>());
 
-        const uint32_t astId = m_ef->createAsteroid(*m_em, spawnPos, (dir / len) * speed,
-            config["base_size"], config, m_worldId);
-
-        const size_t astIdx = m_em->getEntityIndex(astId);
-        if (astIdx != (size_t)-1) {
-            if (isMagmatic) {
-                m_em->healths[astIdx].isExplosive = true;
-                m_em->healths[astIdx].explosionRadius = config["explosion_radius"].get_or(150.0f);
-                m_em->healths[astIdx].explosionDamage = config["explosion_damage"].get_or(30.0f);
-            }
-            const float randomSpin = ((rand() % 200) - 100.f) / 50.f;
-            b2Body_SetAngularVelocity(m_em->physics[astIdx].bodyId, randomSpin);
-        }
+        spawnAsteroid(selectedType, spawnPos, (dir / len) * speed);
 
         m_asteroidSpawnClock.restart();
     }
@@ -251,6 +281,7 @@ private:
     uint32_t       m_playerEntityId = 0;
     sol::state* m_lua = nullptr;
     const enemyarch::EnemyRegistry* m_registry = nullptr;
+    DevState* m_dev = nullptr;
 
     // ---- Timers ----
     sf::Clock          m_asteroidSpawnClock;

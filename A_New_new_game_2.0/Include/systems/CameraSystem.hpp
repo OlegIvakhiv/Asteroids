@@ -1,10 +1,10 @@
-/**
+ï»¿/**
  * @file CameraSystem.hpp
  * @brief Owns the world view: follow, look-ahead, speed zoom and trauma shake
  *
  * This system is the SINGLE owner of the game view. RenderSystem does not
  * centre the camera and InputSystem does not build a temporary view for mouse
- * mapping — both read the view this system writes.
+ * mapping ï¿½ both read the view this system writes.
  *
  * SHAKE MODEL (trauma):
  *   - Systems push trauma (0..1) into EntityManager::cameraTrauma.
@@ -32,6 +32,7 @@ public:
         m_lua = ctx.lua;
         m_playerEntityId = ctx.playerEntityId;
         m_view = ctx.gameView;
+        m_dev = ctx.dev;
 
         m_baseSize = sf::Vector2f(m_window->getSize());
         m_zoom = 1.f;
@@ -54,6 +55,43 @@ public:
 
     void update(float dt) override {
         if (!m_em || !m_window || !m_view) return;
+
+        // ====================================================================
+        // 0. DEV FREE CAMERA
+        //
+        // Runs BEFORE the player lookup on purpose: free cam is most useful
+        // exactly when there is no player to follow (post-mortem, or looking
+        // at a fight you are not in). Shake is dropped -- you are inspecting,
+        // not playing.
+        //
+        // WASD is polled raw here while InputRegistry is blocked, which is
+        // what stops the same keys flying the ship.
+        // ====================================================================
+        if (m_dev && m_dev->freeCam) {
+            if (!m_dev->freeCamActive) {
+                m_dev->freeCamCenter = m_smoothCenter;
+                m_dev->freeCamActive = true;
+            }
+            sf::Vector2f move(0.f, 0.f);
+            using S = sf::Keyboard::Scan;
+            if (sf::Keyboard::isKeyPressed(S::W)) move.y -= 1.f;
+            if (sf::Keyboard::isKeyPressed(S::S)) move.y += 1.f;
+            if (sf::Keyboard::isKeyPressed(S::A)) move.x -= 1.f;
+            if (sf::Keyboard::isKeyPressed(S::D)) move.x += 1.f;
+            const bool fast = sf::Keyboard::isKeyPressed(S::LShift);
+            const float speed = 900.f * (fast ? 3.f : 1.f) * m_zoom * m_dev->viewScale;
+            m_dev->freeCamCenter += move * speed * dt;
+            m_smoothCenter = m_dev->freeCamCenter;
+
+            m_shakeOffset = { 0.f, 0.f };
+            m_shakeAngle = 0.f;
+            m_view->setSize(m_baseSize * m_zoom * m_dev->viewScale);
+            m_view->setCenter(m_smoothCenter);
+            m_view->setRotation(sf::degrees(0.f));
+            m_window->setView(*m_view);
+            return;
+        }
+        if (m_dev) m_dev->freeCamActive = false;   // next toggle re-seeds from here
 
         size_t idx = m_em->getEntityIndex(m_playerEntityId);
         if (idx == (size_t)-1) return;
@@ -142,7 +180,10 @@ public:
         // ====================================================================
         // 6. COMMIT THE VIEW
         // ====================================================================
-        m_view->setSize(m_baseSize * m_zoom);
+        // Dev view scale multiplies ON TOP of the speed zoom, and is kept out
+        // of m_zoom so the 0.75..zoom_max clamp above still means what it says.
+        const float devScale = m_dev ? m_dev->viewScale : 1.f;
+        m_view->setSize(m_baseSize * m_zoom * devScale);
         m_view->setCenter(m_smoothCenter + m_shakeOffset);
         m_view->setRotation(sf::degrees(m_shakeAngle));
         m_window->setView(*m_view);
@@ -161,7 +202,7 @@ public:
      * @param fieldSize The full extent stars are scattered across
      *                  (EntityManager::starFieldSize)
      *
-     * The stars live in a FIXED rectangle [0, fieldSize] — not in world space.
+     * The stars live in a FIXED rectangle [0, fieldSize] ï¿½ not in world space.
      * The view must therefore be centred on the middle of that rectangle,
      * fieldSize * 0.5, and NOT on the window centre.
      *
@@ -172,10 +213,13 @@ public:
      * because the field happens to extend 1.5x in those directions.
      *
      * COVERAGE RULE: fieldSize >= windowSize * zoom_max, plus headroom for the
-     * shake offset and rotation. Margin 1.5 vs zoom_max 1.32 is comfortable —
+     * shake offset and rotation. Margin 1.5 vs zoom_max 1.32 is comfortable ï¿½
      * but if you raise zoom_max, raise the margin in initBackground() to match.
      */
     sf::View makeStarView(sf::Vector2f fieldSize) const {
+        // Deliberately m_zoom only, WITHOUT the dev view scale. At 2.0x the
+        // star view would outgrow the 1.5x field margin and show bare edges
+        // (see COVERAGE RULE). Stars are backdrop; they do not need to agree.
         sf::View v;
         v.setSize(m_baseSize * m_zoom);
         v.setCenter(fieldSize * 0.5f + m_shakeOffset);
@@ -187,7 +231,7 @@ public:
      * @brief Generic screen-space view inheriting the camera's shake and zoom
      *
      * Fine for overlays that genuinely want to be centred on the window.
-     * Do NOT use it for the starfield — see makeStarView().
+     * Do NOT use it for the starfield ï¿½ see makeStarView().
      */
     sf::View makeScreenView(const sf::View& base) const {
         sf::View v = base;
@@ -222,6 +266,7 @@ private:
     sf::RenderWindow* m_window = nullptr;
     sol::state* m_lua = nullptr;
     sf::View* m_view = nullptr;
+    DevState* m_dev = nullptr;
     uint32_t m_playerEntityId = 0;
 
     sf::Vector2f m_baseSize;

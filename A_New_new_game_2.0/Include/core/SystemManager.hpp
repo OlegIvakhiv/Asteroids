@@ -13,6 +13,7 @@
 #include "utils/InputRegistry.hpp"
 #include "utils/GameState.hpp"
 #include "utils/ShipDesign.hpp"
+#include "utils/DevState.hpp"
 
 // Include all system headers
 #include "systems/ISystem.hpp"
@@ -36,6 +37,10 @@
 #include "systems/RefitSystem.hpp"
 #include "systems/TurretSystem.hpp"          // turret AI
 #include "systems/VentQTESystem.hpp"        // vent QTE and overdrive
+#include "systems/DevSystem.hpp"            // tilde dev menu
+#include <iostream>
+#include <cmath>
+#include <algorithm>
 
 class SystemManager {
 public:
@@ -73,15 +78,7 @@ public:
         InputRegistry::init();
 
         // 5. Prepare context
-        SystemContext ctx;
-        ctx.em = &m_entityManager;
-        ctx.ef = &m_entityFactory;
-        ctx.worldId = m_worldId;
-        ctx.playerEntityId = m_playerEntityId;
-        ctx.lua = &m_lua;
-        ctx.window = &m_window;
-        ctx.gameView = &m_gameView;
-        ctx.enemyRegistry = &m_enemyRegistry;
+        const SystemContext ctx = makeContext();
 
         // 6. Init all systems (order doesn't matter here)
         m_inputSystem.init(ctx);
@@ -100,7 +97,6 @@ public:
         m_cameraSystem.init(ctx);
         m_shipAnimSystem.init(ctx);
         m_spaceDustSystem.init(ctx);
-        m_debugSystem.init(ctx);
         m_hudSystem.init(ctx);
         // 8192, not 2048: this capacity is load-bearing (see reserveAll's
         // docs -- systems hold references across entity creation, so a
@@ -109,6 +105,8 @@ public:
         m_entityManager.reserveAll(8192);
         m_debrisSystem.init(ctx);
         m_menuSystem.init(ctx);
+        m_devSystem.init(ctx);
+        m_devSystem.setSystems(&m_enemySystem, &m_aiSystem, &m_debugSystem);
         if (m_shipDesign.mountedGuns().empty() && m_shipDesign.mountedEngines().empty())
             m_shipDesign.autoMount();
 
@@ -167,28 +165,32 @@ public:
         // ====================================================================
         // 3. PLAYING / GAME OVER (run the simulation)
         // ====================================================================
-        const float dt = m_entityManager.advanceTime(realDt);
+        m_devSystem.frameBegin(realDt);
 
-        // ----- 3a. LOGIC (scaled) -----
-        m_inputSystem.update(dt);
-        m_physicsSystem.update(dt);
-        m_shipAnimSystem.update(dt);
-        m_effectsSystem.update(dt);
-        m_physicsSystem.cleanup();
-        m_enemySystem.update(dt);
-        m_damageSystem.update(dt);
-        m_ventQTESystem.update(dt);            // must set overdrive before weapon reads it
-        m_weaponSystem.update(dt);
-        m_aiSystem.update(dt);
-        m_turretSystem.update(dt);
-
-        size_t playerIdx = m_entityManager.getEntityIndex(m_playerEntityId);
-        if (playerIdx == (size_t)-1 && m_state != GameState::GameOver) {
-            // Edge-triggered: this block re-runs every frame while dead,
-            // so anything stateful in here MUST check the transition.
-            m_state = GameState::GameOver;
-            m_hunterLosses++;
-            m_menuSystem.setHunterLosses(m_hunterLosses);
+        // ----- 3a. LOGIC (scaled), under dev time control -----
+        //
+        // SPEED-UP RUNS MORE PASSES, NEVER A BIGGER STEP. PhysicsSystem steps
+        // Box2D with the variable dt it is given, and that is only safe
+        // because game.cpp clamps dt to 0.05s. Multiplying dt by 4 would hand
+        // it 0.2s steps and bullets would tunnel through hulls. So 4x is four
+        // ordinary passes; 1.5x is two passes of 0.75 frame each.
+        //
+        // DEV PAUSE SKIPS THE LOGIC BLOCK rather than passing dt = 0. Several
+        // systems divide by dt or edge-detect input per call; zero-length
+        // passes are an invitation to a NaN. Camera and rendering keep
+        // running on real time, so free cam and overlays work while frozen.
+        float dt = 0.f;
+        if (m_dev.paused) {
+            if (m_dev.stepFrames > 0) {
+                --m_dev.stepFrames;
+                dt = runLogicPass(1.f / 60.f);
+            }
+        }
+        else {
+            const float scale = std::clamp(m_dev.timeScale, 0.05f, 4.f);
+            const int passes = std::max(1, static_cast<int>(std::ceil(scale - 0.001f)));
+            const float passDt = std::min(realDt * scale / static_cast<float>(passes), dev::MAX_STEP);
+            for (int k = 0; k < passes; ++k) dt += runLogicPass(passDt);
         }
 
         // ----- 3b. CAMERA + SCREEN FX (real time) -----
@@ -206,6 +208,7 @@ public:
         m_particleSystem.update(dt);
         m_renderSystem.update(dt);
         m_debugSystem.update(dt);
+        m_devSystem.drawWorld();
 
         // ----- 3e. SCREEN OVERLAY -----
         m_window.setView(sf::View(sf::FloatRect({ 0.f, 0.f },
@@ -221,6 +224,34 @@ public:
         if (m_state == GameState::GameOver) {
             m_menuSystem.update(realDt);
         }
+
+        // ----- 3h. DEV MENU -- last, on top, and the only place dev actions
+        //      run: every system has finished iterating by now, so creating
+        //      and destroying entities here cannot pull a vector out from
+        //      under anyone.
+        m_devSystem.drawOverlay(realDt);
+        serviceDevRequests();
+    }
+
+    /**
+     * @brief Reload all three Lua scripts and rebuild the archetype cache.
+     *
+     * The one implementation behind F5 and the dev menu button. Without the
+     * registry reload, enemy.lua edits silently do nothing.
+     */
+    bool reloadScripts() {
+        try {
+            m_lua.script_file("scripts/player.lua");
+            m_lua.script_file("scripts/asteroids.lua");
+            m_lua.script_file("scripts/enemy.lua");
+            m_enemyRegistry.load(m_lua);
+            std::cout << "Scripts reloaded!" << std::endl;
+            return true;
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Failed to reload Lua script: " << e.what() << std::endl;
+            return false;
+        }
     }
 
     // Accessors for main.cpp (if needed)
@@ -231,6 +262,7 @@ public:
     GameState getState() const { return m_state; }
     MenuSystem& getMenuSystem() { return m_menuSystem; }
     RefitSystem& getRefitSystem() { return m_refitSystem; }
+    DevSystem& getDevSystem() { return m_devSystem; }
 
     /// Called by game.cpp when the menu confirms StartGame/RestartGame.
     void restart() {
@@ -254,15 +286,10 @@ public:
 
         // 4. Re-point every system's context at the NEW worldId/playerEntityId
         //    (systems cached these by value in init(), so they're stale otherwise)
-        SystemContext ctx;
-        ctx.em = &m_entityManager;
-        ctx.ef = &m_entityFactory;
-        ctx.worldId = m_worldId;
-        ctx.playerEntityId = m_playerEntityId;
-        ctx.lua = &m_lua;
-        ctx.window = &m_window;
-        ctx.gameView = &m_gameView;
-        ctx.enemyRegistry = &m_enemyRegistry;
+        //    Dev flags survive the restart; anything keyed by entity id does not,
+        //    because ids restart at 1.
+        m_dev.onRestart();
+        const SystemContext ctx = makeContext();
 
         m_inputSystem.init(ctx);
         m_physicsSystem.init(ctx);
@@ -283,6 +310,7 @@ public:
         m_hudSystem.init(ctx);
         m_debrisSystem.init(ctx);
         m_menuSystem.init(ctx);
+        m_devSystem.init(ctx);
         if (m_shipDesign.mountedGuns().empty() && m_shipDesign.mountedEngines().empty())
             m_shipDesign.autoMount();
 
@@ -343,6 +371,68 @@ public:
 
     void reloadEnemyRegistry() { m_enemyRegistry.load(m_lua); }
 
+private:
+    /// One place builds the context, so init() and restart() cannot drift --
+    /// they had already been two hand-maintained copies of the same block.
+    SystemContext makeContext() {
+        SystemContext ctx;
+        ctx.em = &m_entityManager;
+        ctx.ef = &m_entityFactory;
+        ctx.worldId = m_worldId;
+        ctx.playerEntityId = m_playerEntityId;
+        ctx.lua = &m_lua;
+        ctx.window = &m_window;
+        ctx.gameView = &m_gameView;
+        ctx.enemyRegistry = &m_enemyRegistry;
+        ctx.dev = &m_dev;
+        return ctx;
+    }
+
+    /**
+     * @brief One simulation pass: every logic system, bracketed by the dev
+     *        cheat hooks, then the player-death check.
+     * @param passDt Real-seconds share of this pass. Hitstop scales it.
+     * @return The scaled dt this pass actually simulated.
+     */
+    float runLogicPass(float passDt) {
+        const float dt = m_entityManager.advanceTime(passDt);
+
+        m_devSystem.beginPass();
+
+        m_inputSystem.update(dt);
+        m_physicsSystem.update(dt);
+        m_shipAnimSystem.update(dt);
+        m_effectsSystem.update(dt);
+        m_physicsSystem.cleanup();
+        m_enemySystem.update(dt);
+        m_damageSystem.update(dt);
+        m_ventQTESystem.update(dt);            // must set overdrive before weapon reads it
+        m_weaponSystem.update(dt);
+        m_aiSystem.update(dt);
+        m_turretSystem.update(dt);
+
+        m_devSystem.endPass();
+
+        size_t playerIdx = m_entityManager.getEntityIndex(m_playerEntityId);
+        if (playerIdx == (size_t)-1 && m_state != GameState::GameOver) {
+            // Edge-triggered: this block re-runs every pass while dead,
+            // so anything stateful in here MUST check the transition.
+            m_state = GameState::GameOver;
+            m_hunterLosses++;
+            m_menuSystem.setHunterLosses(m_hunterLosses);
+        }
+        return dt;
+    }
+
+    void serviceDevRequests() {
+        if (m_dev.requestReloadScripts) {
+            m_dev.requestReloadScripts = false;
+            m_devSystem.reportReload(reloadScripts());
+        }
+    }
+
+public:
+
     const enemyarch::EnemyRegistry& getEnemyRegistry() const { return m_enemyRegistry; }
 
 private:
@@ -387,4 +477,8 @@ private:
     HudSystem m_hudSystem;
     DebrisSystem m_debrisSystem;
     MenuSystem m_menuSystem;
+
+    // ---- Dev ----
+    DevState  m_dev;         ///< Declared before DevSystem only for readability; no ctor dependency.
+    DevSystem m_devSystem;
 };

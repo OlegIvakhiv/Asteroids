@@ -64,6 +64,7 @@ public:
         m_playerEntityId = ctx.playerEntityId;
         m_lua = ctx.lua;
         m_registry = ctx.enemyRegistry;
+        m_dev = ctx.dev;
     }
 
     void update(float dt) override {
@@ -82,6 +83,9 @@ public:
             if (!ud || ud->type != BodyType::Enemy) continue;
 
             auto& ec = m_em->enemies[i];
+            // Dev freeze: a frozen hull with a live turret still shoots you.
+            if (m_dev && m_dev->isAIFrozen(ud->entityId)) continue;
+
             const auto& def = m_registry->resolve(ec.archetype);
             if (def.turrets.empty()) continue;
 
@@ -296,4 +300,5 @@ private:
     uint32_t       m_playerEntityId = 0;
     sol::state* m_lua = nullptr;
     const enemyarch::EnemyRegistry* m_registry = nullptr;
+    DevState* m_dev = nullptr;
 };

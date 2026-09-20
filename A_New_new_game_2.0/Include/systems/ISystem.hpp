@@ -1,4 +1,4 @@
-/**
+ï»¿/**
  * @file ISystem.hpp
  * @brief Base interface for all game systems
  *
@@ -15,6 +15,7 @@
 #include "core/EntityManager.hpp"
 #include "core/EntityFactory.hpp"
 #include "core/EnemyArchetypes.hpp"
+#include "utils/DevState.hpp"
 #include <sol/sol.hpp>
 #include <box2d/box2d.h>
 #include <SFML/Graphics.hpp>
@@ -37,11 +38,14 @@ struct SystemContext {
     uint32_t playerEntityId = 0;          ///< Persistent ID of the player entity
     sol::state* lua = nullptr;            ///< Lua scripting state
     sf::RenderWindow* window = nullptr;   ///< SFML render window
-    sf::View* gameView = nullptr;   ///< Shared world view — written by CameraSystem
+    sf::View* gameView = nullptr;   ///< Shared world view ï¿½ written by CameraSystem
     /// Loaded unit and faction tables. Owned by SystemManager, valid for the
     /// lifetime of the game. Passed here rather than made global to match how
     /// every other dependency in this project travels.
     const enemyarch::EnemyRegistry* enemyRegistry = nullptr;
+    /// Dev-menu flags. Owned by SystemManager, survives restarts. Systems
+    /// test `m_dev && m_dev->flag`, so a null pointer means "no cheats".
+    DevState* dev = nullptr;
 };
 
 /**
@@ -51,7 +55,7 @@ struct SystemContext {
  * All systems must derive from this interface. The SystemManager
  * calls init() once after construction, then update() every frame.
  *
- * Systems are stateless in terms of external dependencies – they
+ * Systems are stateless in terms of external dependencies ï¿½ they
  * store only pointers/references to engine components (provided via
  * SystemContext) and their own internal state (member variables).
  */
@@ -68,7 +72,7 @@ public:
      *
      * Called once by SystemManager after all engine components are ready.
      * Systems should store the pointers/references they need for later use.
-     * No heavy allocation should be done here – it's intended for
+     * No heavy allocation should be done here ï¿½ it's intended for
      * storing dependencies and resetting internal state.
      */
     virtual void init(const SystemContext& ctx) = 0;

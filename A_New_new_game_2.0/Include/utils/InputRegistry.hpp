@@ -37,13 +37,30 @@ public:
     }
 
     static bool isPressed(const std::string& name) {
-        if (s_keyMap.count(name)) return sf::Keyboard::isKeyPressed(s_keyMap[name]);
-        if (s_mouseMap.count(name)) return sf::Mouse::isButtonPressed(s_mouseMap[name]);
+        if (s_keyMap.count(name))   return !s_blockKeys && sf::Keyboard::isKeyPressed(s_keyMap[name]);
+        if (s_mouseMap.count(name)) return !s_blockMouse && sf::Mouse::isButtonPressed(s_mouseMap[name]);
         return false;
+    }
+
+    /**
+     * @brief Dev-menu input capture.
+     *
+     * Every gameplay read (move, fire, dash, parry, vent) goes through
+     * isPressed(), so this one chokepoint stops a click on a dev-menu row from
+     * also firing a plasma shot, and stops free-camera WASD from flying the
+     * ship. DevSystem sets both every frame it runs; nothing else should.
+     * Code that polls sf::Keyboard directly (Esc, F-keys, menus) is unaffected
+     * on purpose.
+     */
+    static void setBlocked(bool keys, bool mouse) {
+        s_blockKeys = keys;
+        s_blockMouse = mouse;
     }
 
 private:
     // inline static = defined here, no separate .cpp needed (C++17)
     inline static std::map<std::string, sf::Keyboard::Key> s_keyMap;
     inline static std::map<std::string, sf::Mouse::Button> s_mouseMap;
+    inline static bool s_blockKeys = false;
+    inline static bool s_blockMouse = false;
 };

@@ -228,6 +228,12 @@ public:
     std::vector<int> scoreRewards;                ///< Points awarded when entity dies
     int totalScore = 0;                           ///< Cumulative player score
 
+    // ===== DEV =====
+    /// God mode. Written every frame by DevSystem from DevState and read ONLY
+    /// by damagePlayer(). Deliberately not touched by reset(): DevSystem owns
+    /// it, and a restart must not quietly switch a cheat off.
+    bool godMode = false;
+
     // ===== TIME CONTROL (hitstop / slow-motion) =====
     float timeScale = 1.f;    ///< Read-only for the curious; set by advanceTime()
     float hitstopFreeze = 0.f;    ///< Hard-freeze remaining (REAL seconds)
@@ -600,6 +606,7 @@ public:
   */
     float damagePlayer(size_t playerIdx, float amount) {
         if (playerIdx >= healths.size() || playerIdx >= players.size() || amount <= 0.f) return 0.f;
+        if (godMode) return 0.f;   // dev cheat -- the ONE place it has to live
         const auto& ps = players[playerIdx];
         const float taken = amount * ps.damageTakenScale * (ps.hyperarmor ? ps.hyperarmorDamageScale : 1.f);
         healths[playerIdx].currentHp -= taken;

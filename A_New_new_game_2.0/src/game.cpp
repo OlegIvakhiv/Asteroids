@@ -3,7 +3,7 @@
  * @brief Main game loop and entry point for VOID HUNTER
  *
  * @author Oleg Ivakhiv
- * @version 1.3 (window sizing, fullscreen toggle, refit input routing)
+ * @version 1.4 (dev menu font, F5 routed through SystemManager::reloadScripts)
  */
 
 #define SOL_ALL_SAFETIES_ON 1
@@ -75,6 +75,7 @@ int main() {
     manager.getHudSystem().setFont(&font);
     manager.getMenuSystem().setFont(&font);
     manager.getRefitSystem().setFont(&font);
+    manager.getDevSystem().setFont(&font);
 
     EntityManager& em = manager.getEntityManager();
     uint32_t playerEntityId = manager.getPlayerId();
@@ -131,26 +132,13 @@ int main() {
         }
 
         // ---- HOT RELOAD (F5 key) ----
-        // Reloads ALL THREE scripts. Edge-detected: isKeyPressed is
-        // level-triggered, so holding F5 used to re-parse every frame.
+        // Reloads ALL THREE scripts and the archetype registry. Edge-detected:
+        // isKeyPressed is level-triggered, so holding F5 used to re-parse every
+        // frame. The body lives in SystemManager::reloadScripts() so the dev
+        // menu's RELOAD button runs the exact same code.
         static bool f5WasPressed = false;
         if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::F5)) {
-            if (!f5WasPressed) {
-                try {
-                    lua.script_file("scripts/player.lua");
-                    lua.script_file("scripts/asteroids.lua");
-                    lua.script_file("scripts/enemy.lua");
-
-                    // Rebuild the archetype cache against the NEW tables.
-                    // Without this, enemy.lua edits silently do nothing.
-                    manager.reloadEnemyRegistry();
-
-                    std::cout << "Scripts reloaded!" << std::endl;
-                }
-                catch (const std::exception& e) {
-                    std::cerr << "Failed to reload Lua script: " << e.what() << std::endl;
-                }
-            }
+            if (!f5WasPressed) manager.reloadScripts();
             f5WasPressed = true;
         }
         else {

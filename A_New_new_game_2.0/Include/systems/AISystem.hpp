@@ -133,6 +133,20 @@ public:
         m_playerEntityId = ctx.playerEntityId;
         m_lua = ctx.lua;
         m_registry = ctx.enemyRegistry;
+        m_dev = ctx.dev;
+
+        // Entity ids restart at 1 on every run (EntityManager::reset). A brain
+        // cached for id 12 last run would otherwise be inherited by whatever
+        // spawns as id 12 this run -- personality, suspicion and all.
+        // pruneCache() only sweeps above 64 entries, so it never caught this.
+        m_aiCache.clear();
+    }
+
+    /// Read-only brain lookup for the dev overlay. nullptr if this entity has
+    /// not been through update() yet.
+    const AIState* brainOf(uint32_t entityId) const {
+        auto it = m_aiCache.find(entityId);
+        return (it == m_aiCache.end()) ? nullptr : &it->second;
     }
 
     void update(float dt) override {
@@ -179,6 +193,14 @@ public:
             tf.visualOffsetAngle = 0.f;
             tf.visualPivot = { 0.f, 0.f };
             tf.visualScale = { 1.f, 1.f };
+
+            // ================================================================
+            // DEV FREEZE -- no thinking, no timers, bleed off momentum
+            // ================================================================
+            if (m_dev && m_dev->isAIFrozen(entityId)) {
+                holdFrozen(dt, ec, bodyId);
+                continue;
+            }
 
             tickTimers(dt, ec);
 
@@ -353,6 +375,42 @@ public:
     }
 
 private:
+    // ========================================================================
+    // DEV FREEZE
+    // ========================================================================
+    /**
+     * @brief Park a unit whose AI the dev menu switched off.
+     *
+     * Every COMMITTED attack is cancelled, not paused. A ram frozen in Charge
+     * is still invulnerable and still hurts on contact (DamageSystem reads
+     * ramState, not the AI), so "frozen" would mean "stationary trap". Same
+     * for a telegraph left lit -- it reads as a shot that never comes.
+     *
+     * Frenzy is left alone on purpose: a Thrown Maniac is DamageSystem's
+     * physics bomb, not AI, and yanking its state here would defuse it.
+     *
+     * Velocity is damped rather than zeroed so knockback from your shots is
+     * still visible on a frozen target -- that is half of what you freeze one
+     * to look at.
+     */
+    void holdFrozen(float dt, EnemyComponent& ec, b2BodyId bodyId) {
+        ec.telegraphActive = false;
+        ec.telegraphTimer = 0.f;
+        ec.turretTelegraphActive = false;
+        ec.ramState = RamState::None;
+        ec.bashState = BashState::None;
+        ec.bashStrikePending = false;
+        ec.mineRunState = MineRunState::None;
+        ec.stormActive = false;
+        ec.stormRecoverTimer = 0.f;
+
+        if (!b2Body_IsValid(bodyId)) return;
+        const float k = std::exp(-4.f * dt);
+        const b2Vec2 v = b2Body_GetLinearVelocity(bodyId);
+        b2Body_SetLinearVelocity(bodyId, { v.x * k, v.y * k });
+        b2Body_SetAngularVelocity(bodyId, b2Body_GetAngularVelocity(bodyId) * k);
+    }
+
     // ========================================================================
     // PERSONALITY
     // ========================================================================
@@ -2527,6 +2585,7 @@ private:
     uint32_t m_playerEntityId = 0;
     sol::state* m_lua = nullptr;
     const enemyarch::EnemyRegistry* m_registry = nullptr;
+    DevState* m_dev = nullptr;
 
     float m_noiseTime = 0.f;
     sf::Vector2f m_playerVel;            ///< This frame's player velocity, px/s
