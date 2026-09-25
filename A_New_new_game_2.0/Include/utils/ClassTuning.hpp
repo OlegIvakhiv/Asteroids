@@ -62,6 +62,7 @@
 #pragma once
 
 #include <sol/sol.hpp>
+#include "LuaConfig.hpp"   // luacfg::epoch() -- invalidates the feel cache on F5
 #include "ShipDesign.hpp"
 
 namespace ship {
@@ -158,7 +159,8 @@ namespace ship {
     }
 
     /// Defaults, overlaid with `hull_classes.<class>` from Lua if present.
-    inline ClassFeel classFeel(sol::state& lua, HullClass c) {
+    /// UNCACHED: ~35 Lua reads. Call classFeel() instead.
+    inline ClassFeel loadClassFeel(sol::state& lua, HullClass c) {
         ClassFeel f = defaultFeel(c);
         sol::optional<sol::table> all = lua["hull_classes"];
         if (!all) return f;
@@ -197,6 +199,33 @@ namespace ship {
         f.ramBaseDamage = (*t)["ram_base_damage"].get_or(f.ramBaseDamage);
         f.ramMediumTaken = std::clamp((*t)["ram_medium_taken"].get_or(f.ramMediumTaken), 0.f, 1.f);
         return f;
+    }
+
+    /// Defaults overlaid with Lua, cached per hull class.
+    ///
+    /// This used to run ~35 Lua reads per call, and InputSystem, DamageSystem
+    /// and WeaponSystem each called it every frame for data that only changes
+    /// on F5. The cache is keyed on the config epoch, so a hot-reload is picked
+    /// up on the very next call -- nothing has to remember to invalidate it --
+    /// and on the Lua state, so the sandboxed state ShipFile uses can never
+    /// poison it. A refit that changes hull class just selects another slot.
+    inline ClassFeel classFeel(sol::state& lua, HullClass c) {
+        struct Slot {
+            uint32_t        epoch = 0;
+            const lua_State* state = nullptr;
+            ClassFeel       feel;
+        };
+        static Slot cache[HULL_CLASS_COUNT];
+
+        const int i = std::clamp(static_cast<int>(c), 0, HULL_CLASS_COUNT - 1);
+        Slot& s = cache[i];
+        const uint32_t now = luacfg::epoch();
+        if (s.epoch != now || s.state != lua.lua_state()) {
+            s.feel = loadClassFeel(lua, c);
+            s.epoch = now;
+            s.state = lua.lua_state();
+        }
+        return s.feel;
     }
 
     /// The feel for a player: its kit's class, or MEDIUM for a legacy ship.

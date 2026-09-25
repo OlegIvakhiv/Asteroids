@@ -1,4 +1,4 @@
-/**
+ï»¿/**
  * @file FractureImpl.hpp
  * @brief Out-of-line definition of EntityManager::fractureAsteroid
  *
@@ -6,7 +6,7 @@
  *   EntityManager needs to call EntityFactory::createAsteroid, and
  *   EntityFactory includes EntityManager. Defining the body inside
  *   EntityManager.hpp would be a circular include. Declaring it there and
- *   defining it here — included AFTER EntityFactory.hpp — breaks the cycle
+ *   defining it here ï¿½ included AFTER EntityFactory.hpp ï¿½ breaks the cycle
  *   without a forward-declaration dance or a pointer indirection.
  *
  * Include this ONCE, from SystemManager.hpp, after both headers.
@@ -19,6 +19,7 @@
 
 #include "EntityManager.hpp"
 #include "EntityFactory.hpp"
+#include <iostream>
 #include <cmath>
 #include <algorithm>
 
@@ -32,7 +33,7 @@ inline void EntityManager::fractureAsteroid(size_t idx, sf::Vector2f impactDir,
     const uint8_t tier = healths[idx].asteroidTier;
     const float parentRadius = std::max(6.f, healths[idx].visualRadius);
 
-    // Inherit the parent's momentum — fragments continuing along the original
+    // Inherit the parent's momentum ï¿½ fragments continuing along the original
     // trajectory is most of what makes a break look physical.
     sf::Vector2f parentVel(0.f, 0.f);
     if (b2Body_IsValid(physics[idx].bodyId)) {
@@ -86,7 +87,7 @@ inline void EntityManager::fractureAsteroid(size_t idx, sf::Vector2f impactDir,
 
             const float life = 0.65f + (rand() % 70) / 100.f;
 
-            // Shards are darker than the parent surface — you're seeing the
+            // Shards are darker than the parent surface ï¿½ you're seeing the
             // rock's unweathered interior.
             sf::Color sc(
                 static_cast<uint8_t>(parentCol.r * 0.72f),
@@ -111,7 +112,6 @@ inline void EntityManager::fractureAsteroid(size_t idx, sf::Vector2f impactDir,
         const float sp = 40.f + rand() % 160;
         const float lf = 0.35f + (rand() % 45) / 100.f;
         particles.push_back({
-            nextEntityId++,
             origin + sf::Vector2f(std::cos(a), std::sin(a)) * (parentRadius * 0.6f),
             parentVel * 0.3f + sf::Vector2f(std::cos(a), std::sin(a)) * sp,
             sf::Color(150, 145, 140, 190),
@@ -129,9 +129,32 @@ inline void EntityManager::fractureAsteroid(size_t idx, sf::Vector2f impactDir,
     // ========================================================================
     if (physicalChildren <= 0 || !ef || !lua) return;
 
-    const char* childKey = (tier >= 2) ? "MEDIUM" : "SMALL";
+    // What it breaks into. The parent's own `child_type` wins; otherwise the
+    // original tier rule. Without this a Rakshari hull section shattered into
+    // plain grey MEDIUM rocks -- the cascade is half the time the player
+    // spends looking at a rock, so it has to stay in theme.
+    const char* childKey = (healths[idx].childType[0] != '\0')
+        ? healths[idx].childType
+        : ((tier >= 2) ? "MEDIUM" : "SMALL");
+
+    // An optional second outcome. Rolled ONCE for the whole break and given
+    // to exactly one fragment: a wreck coughing up three live reactors is a
+    // minefield, not a decision. One is the hazard; three is a wall.
+    const char* altKey = (healths[idx].childAlt[0] != '\0') ? healths[idx].childAlt : nullptr;
+    const int   altPct = altKey ? healths[idx].childAltPct : 0;
+    const int   altIndex = (altPct > 0 && (rand() % 100) < altPct)
+        ? (rand() % std::max(1, physicalChildren)) : -1;
+
+    // Colour is inherited from the PARENT, not taken from the child's own
+    // type, when the parent asks for it -- a grey hull breaks into grey.
+    const bool inheritCol = healths[idx].childInheritColor;
+
     sol::optional<sol::table> childCfg = (*lua)["asteroid_types"][childKey];
-    if (!childCfg) return;
+    if (!childCfg) {
+        std::cerr << "[fracture] child_type \"" << childKey
+            << "\" is not in asteroid_types. Nothing spawned.\n";
+        return;
+    }
 
     // Perpendicular to the impact = the crack line.
     const sf::Vector2f perp(-impactDir.y, impactDir.x);
@@ -147,12 +170,23 @@ inline void EntityManager::fractureAsteroid(size_t idx, sf::Vector2f impactDir,
         const float dl = std::sqrt(dir.x * dir.x + dir.y * dir.y);
         if (dl > 0.01f) dir /= dl;
 
-        // Offset far enough that children don't spawn inside each other —
+        // Offset far enough that children don't spawn inside each other ï¿½
         // overlapping bodies get violently separated by Box2D and the burst
         // looks like an explosion instead of a break.
         const sf::Vector2f spawnPos = origin + dir * (parentRadius * 0.62f);
 
+        // Roll the alternate outcome for THIS fragment, before anything reads
+        // the config -- speed range, base size and the explosive flag must all
+        // come from whichever type actually won. A miss, or a key that is not
+        // in asteroid_types, falls through to the ordinary child: never to
+        // nothing, or one bad name would silently eat the whole cascade.
         sol::table cfg = *childCfg;
+        bool isAlt = false;
+        if (i == altIndex) {
+            sol::optional<sol::table> a = (*lua)["asteroid_types"][altKey];
+            if (a) { cfg = *a; isAlt = true; }
+        }
+
         sol::table speedRange = cfg["speed_range"];
         const float lo = speedRange[1].get_or(6.f);
         const float hi = speedRange[2].get_or(8.f);
@@ -173,6 +207,23 @@ inline void EntityManager::fractureAsteroid(size_t idx, sf::Vector2f impactDir,
         if (cIdx != (size_t)-1) {
             b2Body_SetAngularVelocity(physics[cIdx].bodyId,
                 ((rand() % 2) ? 1.f : -1.f) * (2.f + (rand() % 300) / 100.f));
+
+            // The alternate outcome keeps its OWN colour -- a reactor that
+            // came out of a grey hull still has to read as a live reactor.
+            if (inheritCol && !isAlt) {
+                const auto dim = [](std::uint8_t v, float k) {
+                    return static_cast<std::uint8_t>(std::clamp(v * k, 0.f, 255.f));
+                    };
+                // Slightly darker than the parent: a fresh break exposes the
+                // unweathered interior, which is the same logic the debris
+                // shards above already use.
+                renders[cIdx].shape.setFillColor(sf::Color(
+                    dim(parentCol.r, 0.82f), dim(parentCol.g, 0.82f), dim(parentCol.b, 0.82f)));
+                renders[cIdx].shape.setOutlineColor(sf::Color(
+                    std::min(255, parentCol.r + 40),
+                    std::min(255, parentCol.g + 40),
+                    std::min(255, parentCol.b + 42)));
+            }
         }
     }
 }

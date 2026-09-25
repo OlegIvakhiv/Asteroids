@@ -44,6 +44,7 @@
 #include "utils/GameState.hpp"
 #include "utils/ShipDesign.hpp"
 #include "utils/TerminalUI.hpp"
+#include "utils/UiPalette.hpp"
 #include "utils/ClassTuning.hpp"
 #include "utils/ShipLivery.hpp"
 #include "utils/ShipFile.hpp"
@@ -138,22 +139,23 @@ public:
 
 private:
     // ========================================================================
-    // PALETTE  (identical to MenuSystem -- do not let these drift apart)
+    // PALETTE -- aliases to the shared ui:: palette (UiPalette.hpp)
     // ========================================================================
-
-    static inline const sf::Color VOID_BG{ 2,   3,   5 };
-    static inline const sf::Color PANEL_BG{ 6,   8,  12 };
-    static inline const sf::Color CYAN{ 40, 245, 255 };
-    static inline const sf::Color CYAN_MID{ 20, 150, 170 };
-    static inline const sf::Color CYAN_LOW{ 12,  70,  84 };
-    static inline const sf::Color AMBER{ 255, 214,   0 };
-    static inline const sf::Color RED{ 255,  48,   0 };
-    static inline const sf::Color GREEN{ 80, 240, 130 };
-    static inline const sf::Color TEXT{ 214, 222, 232 };
-    static inline const sf::Color TEXT_DIM{ 84,  92, 104 };
-    static inline const sf::Color TEXT_DEAD{ 52,  58,  68 };
+    // Same pattern as MenuSystem: short names for this file, values from the
+    // one source, so the refit bay and the menu cannot drift apart.
+    static inline const sf::Color VOID_BG = ui::VOID_BG;
+    static inline const sf::Color PANEL_BG = ui::PANEL_BG;
+    static inline const sf::Color CYAN = ui::CYAN;
+    static inline const sf::Color CYAN_MID = ui::CYAN_MID;
+    static inline const sf::Color CYAN_LOW = ui::CYAN_LOW;
+    static inline const sf::Color AMBER = ui::AMBER;
+    static inline const sf::Color RED = ui::RED;
+    static inline const sf::Color GREEN = ui::GREEN;
+    static inline const sf::Color TEXT = ui::TEXT;
+    static inline const sf::Color TEXT_DIM = ui::TEXT_DIM;
+    static inline const sf::Color TEXT_DEAD = ui::TEXT_DEAD;
     /// The Rift's own colour -- WeaponSystem's bolt, charge sparks and rings.
-    static inline const sf::Color VIOLET{ 175, 95, 255 };
+    static inline const sf::Color VIOLET = ui::VIOLET;
 
     static constexpr float OPEN_DUR = 0.30f;
     static constexpr float HANDLE_R = 7.f;

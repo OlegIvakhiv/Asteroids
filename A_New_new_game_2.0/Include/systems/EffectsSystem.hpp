@@ -73,7 +73,7 @@ public:
         // Iterate over all physics bodies
         // ====================================================================
         for (size_t i = 0; i < m_em->physics.size(); ++i) {
-            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(m_em->physics[i].bodyId);
+            BodyUserData* ud = bodyUD(m_em->physics[i].bodyId);
             if (!ud) continue;
 
             b2Vec2 vel = b2Body_GetLinearVelocity(m_em->physics[i].bodyId);
@@ -141,7 +141,6 @@ public:
                             float sz = turbo ? 4.f + (rand() % 3) : 2.5f + (rand() % 2);
 
                             m_em->particles.push_back({
-                                m_em->nextEntityId++,
                                 nozzle.pos,
                                 pVel,
                                 col,
@@ -166,7 +165,6 @@ public:
                         sf::Vector2f dir(std::cos(angle), std::sin(angle));
                         float spd = 300.f + rand() % 200;
                         m_em->particles.push_back({
-                            m_em->nextEntityId++,
                             tf.position,
                             dir * spd,
                             playerStats.livery.paint.dodge,
@@ -176,7 +174,6 @@ public:
                     }
                     // Afterimage: bright flash at ship center
                     m_em->particles.push_back({
-                        m_em->nextEntityId++,
                         tf.position,
                         { 0.f, 0.f },
                         sf::Color(std::min(255, playerStats.livery.paint.dodge.r + 90),
@@ -197,7 +194,6 @@ public:
                     );
                     sf::Vector2f rimVel(std::cos(angle) * 80.f, std::sin(angle) * 80.f);
                     m_em->particles.push_back({
-                        m_em->nextEntityId++,
                         rimPos,
                         rimVel,
                         sf::Color(playerStats.livery.paint.parry.r,
@@ -284,7 +280,6 @@ public:
                         }
 
                         m_em->particles.push_back({
-                            m_em->nextEntityId++,
                             nozzle,
                             pVel,
                             col,

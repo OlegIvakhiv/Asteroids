@@ -164,7 +164,7 @@ public:
         updateHomingAsteroids(dt);
 
         for (size_t i = 0; i < m_em->physics.size(); ++i) {
-            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(m_em->physics[i].bodyId);
+            BodyUserData* ud = bodyUD(m_em->physics[i].bodyId);
             if (!ud || ud->type != BodyType::Enemy) continue;
 
             auto& tf = m_em->transforms[i];
@@ -910,8 +910,7 @@ private:
 
             if ((rand() % 100) < static_cast<int>(20 + 60 * ec.ramGlow)) {
                 const sf::Vector2f jet = tf.position - ec.ramDir * (30.f + rand() % 40);
-                m_em->particles.push_back({
-                    m_em->nextEntityId++, jet,
+                m_em->particles.push_back({ jet,
                     ec.ramDir * -(60.f + rand() % 120),
                     sf::Color(255, static_cast<uint8_t>(120 + rand() % 80), 60, 230),
                     0.30f, 0.34f, 3.f + rand() % 4 });
@@ -953,8 +952,7 @@ private:
 
             for (int k = 0; k < 3; ++k) {
                 const sf::Vector2f side((rand() % 60) - 30.f, (rand() % 60) - 30.f);
-                m_em->particles.push_back({
-                    m_em->nextEntityId++, tf.position + side,
+                m_em->particles.push_back({ tf.position + side,
                     -ec.ramDir * (200.f + rand() % 260),
                     sf::Color(255, static_cast<uint8_t>(150 + rand() % 90),
                               static_cast<uint8_t>(60 + rand() % 60), 235),
@@ -1009,7 +1007,7 @@ private:
 
         for (size_t j = 0; j < m_em->physics.size(); ++j) {
             if (j == self) continue;
-            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(m_em->physics[j].bodyId);
+            BodyUserData* ud = bodyUD(m_em->physics[j].bodyId);
             if (!ud || ud->type != BodyType::Asteroid) continue;
 
             const sf::Vector2f d = m_em->transforms[j].position - pos;
@@ -1120,7 +1118,7 @@ private:
             if ((rand() % 100) < 50) {
                 const float r = tf.rotation * 3.14159f / 180.f;
                 const sf::Vector2f aft(-std::sin(r), std::cos(r));
-                m_em->particles.push_back({ m_em->nextEntityId++,
+                m_em->particles.push_back({
                     tf.position + aft * 26.f,
                     aft * (40.f + rand() % 90),
                     sf::Color(255, 180, 90, 225), 0.20f, 0.20f, 2.f + rand() % 2 });
@@ -1277,7 +1275,7 @@ private:
             // to carry on motion and particles alone.
             if ((rand() % 100) < 55) {
                 const float a = (rand() % 360) * 3.14159f / 180.f;
-                m_em->particles.push_back({ m_em->nextEntityId++,
+                m_em->particles.push_back({
                     tf.position + sf::Vector2f(std::cos(a), std::sin(a)) * 20.f,
                     sf::Vector2f(std::cos(a), std::sin(a)) * (90.f + rand() % 160),
                     sf::Color(255, static_cast<uint8_t>(150 + rand() % 100), 40, 235),
@@ -1363,7 +1361,7 @@ private:
                 for (int k = 0; k < n; ++k) {
                     const float lat = ((rand() % 200) - 100) / 100.f;
                     const float life = 0.16f + (rand() % 20) / 100.f;
-                    m_em->particles.push_back({ m_em->nextEntityId++,
+                    m_em->particles.push_back({
                         tf.position + aft * 22.f + side * (lat * 12.f),
                         aft * (220.f + rand() % 320) + side * (lat * 130.f),
                         sf::Color(255, static_cast<uint8_t>(170 + rand() % 85),
@@ -1378,7 +1376,7 @@ private:
             for (int k2 = 0; k2 < sparks; ++k2) {
                 const float a = (rand() % 360) * 3.14159f / 180.f;
                 const sf::Vector2f d(std::cos(a), std::sin(a));
-                m_em->particles.push_back({ m_em->nextEntityId++,
+                m_em->particles.push_back({
                     tf.position + d * 24.f, d * (70.f + rand() % 160),
                     sf::Color(255, static_cast<uint8_t>(60 + rand() % 70), 30, 225),
                     0.22f, 0.22f, 2.f + rand() % 3 });
@@ -1520,7 +1518,7 @@ private:
         for (int k = 0; k < 7; ++k) {
             const float lat = ((rand() % 200) - 100) / 100.f;
             const float life = 0.18f + (rand() % 16) / 100.f;
-            m_em->particles.push_back({ m_em->nextEntityId++, pos,
+            m_em->particles.push_back({ pos,
                 back * (30.f + rand() % 70) + side * (lat * 90.f),
                 sf::Color(255, 190, 110, 230), life, life, 2.f + rand() % 2 });
         }
@@ -1570,14 +1568,14 @@ private:
             const float lat = ((rand() % 200) - 100) / 100.f;
             const float back = 40.f + rand() % 130;
             const float life = 0.30f + (rand() % 40) / 100.f;
-            m_em->particles.push_back({ m_em->nextEntityId++,
+            m_em->particles.push_back({
                 spawn + side * (lat * 6.f),
                 -dir * back + side * (lat * 70.f),
                 sf::Color(190, 170, 160, 190), life, life, 4.f + rand() % 5 });
         }
         for (int k = 0; k < 5; ++k) {
             const float life = 0.16f + (rand() % 14) / 100.f;
-            m_em->particles.push_back({ m_em->nextEntityId++, spawn,
+            m_em->particles.push_back({ spawn,
                 -dir * (110.f + rand() % 160), sf::Color(255, 200, 110, 235),
                 life, life, 3.f });
         }
@@ -1670,8 +1668,7 @@ private:
                 const float side = ((rand() % 200) - 100) / 100.f;
                 const sf::Vector2f at = tf.position + fwd * (adef.radius * 0.85f)
                     + rgt * (side * adef.radius * 0.45f);
-                m_em->particles.push_back({
-                    m_em->nextEntityId++, at,
+                m_em->particles.push_back({ at,
                     fwd * (60.f + rand() % 80) + rgt * (side * 50.f),
                     sf::Color(140, 255, 235, 230),
                     0.18f, 0.20f, 2.f + rand() % 2 });
@@ -1796,7 +1793,7 @@ private:
 
         // Tier 1: ordinary asteroids
         for (size_t j = 0; j < m_em->physics.size(); ++j) {
-            BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(m_em->physics[j].bodyId);
+            BodyUserData* ud2 = bodyUD(m_em->physics[j].bodyId);
             if (!ud2 || ud2->type != BodyType::Asteroid) continue;
             if (m_em->healths[j].isHoming) continue;
 
@@ -1831,7 +1828,7 @@ private:
             sf::Vector2f bestPos, bestVel;
 
             for (size_t j = 0; j < m_em->physics.size(); ++j) {
-                BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(m_em->physics[j].bodyId);
+                BodyUserData* ud2 = bodyUD(m_em->physics[j].bodyId);
                 if (!ud2 || ud2->type != BodyType::Asteroid) continue;
                 if (!m_em->healths[j].isHoming) continue;
                 if (m_em->healths[j].homingTargetEntityId != entityId) continue;
@@ -1900,7 +1897,7 @@ private:
                 && ai.dodgeCooldown <= 0.f && ai.flinchTimer <= 0.f) {
 
                 for (size_t j = 0; j < m_em->physics.size(); ++j) {
-                    BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(m_em->physics[j].bodyId);
+                    BodyUserData* ud2 = bodyUD(m_em->physics[j].bodyId);
                     if (!ud2 || ud2->type != BodyType::Bullet) continue;
                     if (m_em->bullets[j].isEnemyBullet) continue;
 
@@ -2006,7 +2003,6 @@ private:
                     -dir.x * std::cos(a) + dir.y * std::sin(a),
                     -dir.x * std::sin(a) - dir.y * std::cos(a));
                 m_em->particles.push_back({
-                    m_em->nextEntityId++,
                     m_dodgePos + d * 12.f,
                     d * (140.f + rand() % 120),
                     sf::Color(255, static_cast<uint8_t>(180 + rand() % 60), 100, 225),
@@ -2138,7 +2134,7 @@ private:
         movDir /= ml;
 
         for (size_t j = 0; j < m_em->physics.size(); ++j) {
-            BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(m_em->physics[j].bodyId);
+            BodyUserData* ud2 = bodyUD(m_em->physics[j].bodyId);
             if (!ud2 || ud2->type != BodyType::Asteroid) continue;
 
             sf::Vector2f toAst = m_em->transforms[j].position - enemyPos;
@@ -2254,7 +2250,7 @@ private:
         const float r = config["storm_asteroid_radius"].get_or(340.f);
         const float r2 = r * r;
         for (size_t j = 0; j < m_em->physics.size(); ++j) {
-            BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(m_em->physics[j].bodyId);
+            BodyUserData* ud2 = bodyUD(m_em->physics[j].bodyId);
             if (!ud2 || ud2->type != BodyType::Asteroid) continue;
             const sf::Vector2f d = m_em->transforms[j].position - enemyPos;
             if (d.x * d.x + d.y * d.y < r2) ++nearby;
@@ -2317,7 +2313,6 @@ private:
             if ((rand() % 100) < 40) {
                 const float a = (rand() % 360) * 3.14159f / 180.f;
                 m_em->particles.push_back({
-                    m_em->nextEntityId++,
                     tf.position + sf::Vector2f(std::cos(a), std::sin(a)) * 12.f,
                     sf::Vector2f(std::cos(a), std::sin(a)) * 40.f,
                     sf::Color(255, static_cast<uint8_t>(110 + rand() % 60), 40, 190),
@@ -2429,7 +2424,6 @@ private:
             if (u < 0.5f && (rand() % 100) < 55) {
                 const sf::Vector2f vent = tf.position - ai.dodgeBurstDir * 16.f;
                 m_em->particles.push_back({
-                    m_em->nextEntityId++,
                     vent,
                     -ai.dodgeBurstDir * (110.f + rand() % 90),
                     sf::Color(255, static_cast<uint8_t>(170 + rand() % 60), 90, 210),
@@ -2468,7 +2462,7 @@ private:
     void updateHomingAsteroids(float dt) {
         (void)dt;
         for (size_t i = 0; i < m_em->physics.size(); ++i) {
-            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(m_em->physics[i].bodyId);
+            BodyUserData* ud = bodyUD(m_em->physics[i].bodyId);
             if (!ud || ud->type != BodyType::Asteroid) continue;
 
             auto& health = m_em->healths[i];
@@ -2477,7 +2471,7 @@ private:
             const size_t targetIdx = m_em->getEntityIndex(health.homingTargetEntityId);
             if (targetIdx == (size_t)-1) { health.isHoming = false; continue; }
 
-            BodyUserData* tud = (BodyUserData*)b2Body_GetUserData(m_em->physics[targetIdx].bodyId);
+            BodyUserData* tud = bodyUD(m_em->physics[targetIdx].bodyId);
             if (!tud || tud->type != BodyType::Enemy) { health.isHoming = false; continue; }
 
             const sf::Vector2f aPos = m_em->transforms[i].position;

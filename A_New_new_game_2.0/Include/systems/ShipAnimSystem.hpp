@@ -1,4 +1,4 @@
-/**
+ï»¿/**
  * @file ShipAnimSystem.hpp
  * @brief Procedural animation + stagger state machine for the player ship
  *
@@ -7,15 +7,15 @@
  *
  * ...plus ONE gameplay-affecting behaviour: the stagger tumble, which owns
  * tf.rotation outright while the player is knocked out of control. That is
- * deliberate — a stagger that only *looked* like a tumble while the ship
+ * deliberate ï¿½ a stagger that only *looked* like a tumble while the ship
  * still aimed straight would be a lie.
  *
  * Layers, in the order they stack:
- *   1. Stagger tumble      — overrides rotation entirely, blocks everything
- *   2. Turn sway           — damped spring, follow-through on fast rotations
- *   3. Turbo stretch       — continuous, blended
- *   4. Hit shudder         — short, on HP loss
- *   5. Dash animation      — bank / spin / wiggle
+ *   1. Stagger tumble      ï¿½ overrides rotation entirely, blocks everything
+ *   2. Turn sway           ï¿½ damped spring, follow-through on fast rotations
+ *   3. Turbo stretch       ï¿½ continuous, blended
+ *   4. Hit shudder         ï¿½ short, on HP loss
+ *   5. Dash animation      ï¿½ bank / spin / wiggle
  *
  * All tuning lives in the `visuals` table in player.lua.
  *
@@ -26,6 +26,7 @@
 #pragma once
 
 #include "ISystem.hpp"
+#include "utils/LuaConfig.hpp"
 #include "core/EntityManager.hpp"
 #include <cmath>
 #include <cstdlib>
@@ -69,7 +70,7 @@ public:
             ps.parryFlashTimer = std::max(0.f, ps.parryFlashTimer - dt);
 
         // ====================================================================
-        // 1. STAGGER (runs first — it can take over rotation completely)
+        // 1. STAGGER (runs first ï¿½ it can take over rotation completely)
         // ====================================================================
         const bool tumbling = updateStagger(dt, tf, ps);
 
@@ -91,7 +92,7 @@ public:
         tf.visualScale.x *= 1.f - s * 0.45f;
 
         // ====================================================================
-        // 4. HIT SHUDDER (HP-drop edge detection — no coupling to DamageSystem)
+        // 4. HIT SHUDDER (HP-drop edge detection ï¿½ no coupling to DamageSystem)
         // ====================================================================
         if (m_lastHp >= 0.f && hp.currentHp < m_lastHp - 0.01f) {
             m_hitFlashTimer = cfg("hit_shudder_duration", 0.22f);
@@ -175,8 +176,8 @@ private:
     // STAGGER
     //
     // Two phases:
-    //   TUMBLE   — this system owns tf.rotation. Input fully blocked.
-    //   RECOVER  — InputSystem resumes aiming, but with a ramped turn rate so
+    //   TUMBLE   ï¿½ this system owns tf.rotation. Input fully blocked.
+    //   RECOVER  ï¿½ InputSystem resumes aiming, but with a ramped turn rate so
     //              the ship visibly swings back onto target instead of
     //              snapping. Movement / dash / parry / fire stay blocked.
     //
@@ -190,7 +191,7 @@ private:
 
             const float u = 1.f - (ps.staggerTimer / std::max(0.0001f, ps.staggerDuration)); // 0..1
 
-            // Spin bleeds off exponentially — violent at first, drifting at the end.
+            // Spin bleeds off exponentially ï¿½ violent at first, drifting at the end.
             const float decay = std::exp(-cfg("stagger_spin_decay", 2.6f) * u);
             tf.rotation += ps.staggerSpinSpeed * decay * dt;
 
@@ -215,7 +216,6 @@ private:
             if ((rand() % 100) < 45) {
                 const float a = (rand() % 360) * 3.14159f / 180.f;
                 m_em->particles.push_back({
-                    m_em->nextEntityId++,
                     tf.position + sf::Vector2f(std::cos(a) * 14.f, std::sin(a) * 14.f),
                     sf::Vector2f(std::cos(a) * 45.f, std::sin(a) * 45.f),
                     sf::Color(255, static_cast<uint8_t>(120 + rand() % 60), 40, 200),
@@ -247,7 +247,7 @@ private:
     // Measure how fast tf.rotation is actually changing, then drive a spring
     // whose rest target lags OPPOSITE the turn. When the turn stops, the
     // target snaps to zero and the underdamped spring carries the tail past
-    // centre before settling — that overshoot is the whole effect.
+    // centre before settling ï¿½ that overshoot is the whole effect.
     //
     // The gate is the important part. Slow rotations produce literally
     // nothing, and the parry spin / stagger tumble are excluded outright:
@@ -306,10 +306,10 @@ private:
         }
     }
 
+    /// Lua `visuals` table, cached per config epoch (see LuaConfig.hpp).
+    luacfg::Table m_cfgVisuals{ "visuals" };
     float cfg(const char* key, float def) const {
-        sol::optional<sol::table> v = (*m_lua)["visuals"];
-        if (!v) return def;
-        return (*v)[key].get_or(def);
+        return m_cfgVisuals.get(m_lua, key, def);
     }
 
     EntityManager* m_em = nullptr;

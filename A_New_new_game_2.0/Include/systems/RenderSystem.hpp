@@ -30,13 +30,16 @@
  *
  * CHANGED in 1.7 — archetype scars, hull thruster flame, bash crescent tell.
  *
+ * CHANGED in 1.9 — world-space cold starlight rim on ship wrecks (drawColdRim).
+ *
  * @author Oleg Ivakhiv
- * @version 1.8 -- frenzy corona and colour override
+ * @version 1.9 -- wreck starlight rim
  */
 
 #pragma once
 
 #include "ISystem.hpp"
+#include "utils/LuaConfig.hpp"
 #include "core/EntityManager.hpp"
 #include "core/EnemyArchetypes.hpp"        // added for archetype registry and geometry
 #include <SFML/Graphics.hpp>
@@ -72,7 +75,7 @@ public:
             auto& tf = m_em->transforms[i];
             auto& rd = m_em->renders[i];
 
-            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(m_em->physics[i].bodyId);
+            BodyUserData* ud = bodyUD(m_em->physics[i].bodyId);
             BodyType type = ud ? ud->type : BodyType::Asteroid;
 
             sf::Vector2f drawPos = tf.position;
@@ -97,11 +100,113 @@ public:
                 else {
                     rd.shape.setPosition(tf.position);
                     rd.shape.setRotation(sf::degrees(tf.rotation));
+
+                    // Damage flash, the same lerp-to-white enemies use. Set
+                    // and restored around the draw so the stored colour --
+                    // which the fracture path reads back for its shards --
+                    // is never left whitened.
+                    const float hf = m_em->healths[i].hitFlash;
+                    const sf::Color baseFill = rd.shape.getFillColor();
+                    const sf::Color baseLine = rd.shape.getOutlineColor();
+                    if (hf > 0.f) {
+                        const float w = std::clamp(hf / 0.16f, 0.f, 1.f);
+                        const auto up = [&](std::uint8_t v) {
+                            return static_cast<std::uint8_t>(v + (255 - v) * w); };
+                        rd.shape.setFillColor(sf::Color(up(baseFill.r), up(baseFill.g),
+                            up(baseFill.b), baseFill.a));
+                        rd.shape.setOutlineColor(sf::Color(up(baseLine.r), up(baseLine.g),
+                            up(baseLine.b), baseLine.a));
+                    }
+
+                    // Layered detail replaces everything else: plates,
+                    // struts, gaps, craters and facets, each with its own
+                    // colour already baked in at spawn. Transformed here
+                    // rather than through RenderStates so the hit flash can
+                    // tint every vertex on the way past.
+                    if (!rd.detailTris.empty() || !rd.detailLines.empty()) {
+                        const float rad = tf.rotation * 3.14159f / 180.f;
+                        const float ca = std::cos(rad), sa = std::sin(rad);
+                        const float w = (hf > 0.f) ? std::clamp(hf / 0.16f, 0.f, 1.f) : 0.f;
+
+                        const auto emit = [&](const std::vector<sf::Vertex>& src,
+                            sf::PrimitiveType prim)
+                            {
+                                if (src.empty()) return;
+                                m_detailScratch.resize(src.size());
+                                for (size_t k = 0; k < src.size(); ++k) {
+                                    const sf::Vector2f& p = src[k].position;
+                                    m_detailScratch[k].position = {
+                                        tf.position.x + (p.x * ca - p.y * sa),
+                                        tf.position.y + (p.x * sa + p.y * ca) };
+                                    sf::Color c = src[k].color;
+                                    if (w > 0.f) {
+                                        c.r = static_cast<uint8_t>(c.r + (255 - c.r) * w);
+                                        c.g = static_cast<uint8_t>(c.g + (255 - c.g) * w);
+                                        c.b = static_cast<uint8_t>(c.b + (255 - c.b) * w);
+                                    }
+                                    m_detailScratch[k].color = c;
+                                }
+                                m_window->draw(m_detailScratch.data(), m_detailScratch.size(), prim);
+                            };
+
+                        emit(rd.detailTris, sf::PrimitiveType::Triangles);
+                        emit(rd.detailLines, sf::PrimitiveType::Lines);
+
+                        // Ship wrecks: starlight catching the edges that face
+                        // the light, in WORLD space so it stays put while the
+                        // hull tumbles under it.
+                        if (rd.wreckTier >= 0) drawColdRim(tf, rd);
+
+                        if (rd.shape.getOutlineThickness() > 0.01f) {
+                            const sf::Color keep = rd.shape.getFillColor();
+                            rd.shape.setFillColor(sf::Color::Transparent);
+                            m_window->draw(rd.shape);
+                            rd.shape.setFillColor(keep);
+                        }
+                        rd.shape.setFillColor(baseFill);
+                        rd.shape.setOutlineColor(baseLine);
+                        continue;
+                    }
+
+                    // A hull-shaped wreck fills from its own triangles: its
+                    // outline is concave, and ConvexShape would fold it.
+                    // `shape` still draws, for the outline stroke only.
+                    if (!rd.tris.empty()) {
+                        // Fill comes from the triangles; `shape` is only
+                        // drawn when it actually has a stroke to contribute.
+                        sf::Transform xf;
+                        xf.translate(tf.position);
+                        xf.rotate(sf::degrees(tf.rotation));
+
+                        sf::VertexArray body(sf::PrimitiveType::Triangles, rd.tris.size());
+                        const sf::Color fc = rd.shape.getFillColor();
+                        for (size_t k = 0; k < rd.tris.size(); ++k)
+                            body[k] = sf::Vertex{ rd.tris[k], fc };
+
+                        sf::RenderStates st;
+                        st.transform = xf;
+                        m_window->draw(body, st);
+
+                        if (rd.shape.getOutlineThickness() > 0.01f) {
+                            const sf::Color keep = rd.shape.getFillColor();
+                            rd.shape.setFillColor(sf::Color::Transparent);
+                            m_window->draw(rd.shape);
+                            rd.shape.setFillColor(keep);
+                        }
+                        rd.shape.setFillColor(baseFill);
+                        rd.shape.setOutlineColor(baseLine);
+                        continue;
+                    }
+
                     m_window->draw(rd.shape);
 
                     // Optional flat faceting. Off by default; see drawFacets().
                     if (acfg("facets", 0.f) > 0.5f) {
                         drawFacets(rd.shape, detailFor(i, tf.entityId));
+                    }
+                    if (hf > 0.f) {
+                        rd.shape.setFillColor(baseFill);
+                        rd.shape.setOutlineColor(baseLine);
                     }
                 }
                 continue;
@@ -392,6 +497,31 @@ public:
                     for (size_t k = 0; k < adef.visualTris.size(); ++k)
                         body[k] = sf::Vertex{ adef.visualTris[k], fill };
                     m_window->draw(body, states);
+                }
+
+                // ---- Armour plates ----
+                // The whole set goes into ONE vertex array: they share the
+                // ship's transform, and colour is per-vertex, so a patchwork
+                // of differently shaded panels still costs a single draw.
+                if (!adef.plates.empty()) {
+                    size_t n = 0;
+                    for (const auto& pl : adef.plates) n += pl.tris.size();
+                    if (n) {
+                        sf::VertexArray panels(sf::PrimitiveType::Triangles, n);
+                        size_t w = 0;
+                        for (const auto& pl : adef.plates) {
+                            // Shade the LIVE fill, so plates flash, glow and
+                            // ramp with the hull instead of sitting inert
+                            // through every colour effect the unit has.
+                            const sf::Color pc(
+                                static_cast<uint8_t>(std::clamp(fill.r * pl.shade, 0.f, 255.f)),
+                                static_cast<uint8_t>(std::clamp(fill.g * pl.shade, 0.f, 255.f)),
+                                static_cast<uint8_t>(std::clamp(fill.b * pl.shade, 0.f, 255.f)),
+                                fill.a);
+                            for (const auto& v : pl.tris) panels[w++] = sf::Vertex{ v, pc };
+                        }
+                        m_window->draw(panels, states);
+                    }
                 }
 
                 // ---- Scars (in the hull's frame: they bank and squash with it) ----
@@ -1145,7 +1275,9 @@ private:
         // ====================================================================
         // CORE — flat polygon, hard edge, Lua-sized
         // ====================================================================
-        const float coreScale = acfg("magma_core_size", 0.30f);
+        // Per ENTITY, not per global: a reactor burns, an ordinary magmatic
+        // rock does not, and they share this renderer.
+        const float coreScale = m_em->healths[i].magmaCore;
         if (coreScale > 0.01f) {
             const float r = det.minRadius * coreScale * (0.88f + 0.12f * heatN + 0.15f * wounded);
 
@@ -1165,7 +1297,6 @@ private:
             const float a = (rand() % 360) * 3.14159f / 180.f;
             const float r = det.minRadius * 0.8f;
             m_em->particles.push_back({
-                m_em->nextEntityId++,
                 tf.position + sf::Vector2f(std::cos(a), std::sin(a)) * r,
                 sf::Vector2f(std::cos(a), std::sin(a)) * (16.f + rand() % 28),
                 sf::Color(255, static_cast<uint8_t>(130 + rand() % 80), 40, 205),
@@ -1369,12 +1500,97 @@ private:
         }
     }
 
+    /**
+     * @brief Cold starlight rim on a ship wreck's silhouette.
+     *
+     * The design lab stroked the hull with a top-left linear gradient. That
+     * only works on a ship that never turns; a wreck tumbles, and a baked
+     * gradient would carry the sun around with it. So the rim is lit per
+     * edge from the edge's WORLD-space outward normal against a fixed light
+     * direction: whatever faces up-left right now catches the light.
+     *
+     * Brightness is smoothed per vertex (average of the two adjacent edge
+     * normals) so a jagged torn edge shimmers instead of flickering, and a
+     * small ambient floor keeps the dark side of the hull from vanishing
+     * against the background -- a wreck you cannot see is a wreck you fly
+     * into.
+     *
+     * Lua (`asteroid_visuals`): wreck_rim_width, wreck_rim_alpha,
+     * wreck_rim_ambient.
+     */
+    void drawColdRim(const TransformComponent& tf, const RenderComponent& rd) {
+        const size_t n = rd.shape.getPointCount();
+        if (n < 3) return;
+
+        const float rad = tf.rotation * 3.14159265f / 180.f;
+        const float ca = std::cos(rad), sa = std::sin(rad);
+
+        m_rimPts.resize(n);
+        for (size_t k = 0; k < n; ++k) {
+            const sf::Vector2f p = rd.shape.getPoint(k);
+            m_rimPts[k] = { tf.position.x + (p.x * ca - p.y * sa),
+                            tf.position.y + (p.x * sa + p.y * ca) };
+        }
+
+        // Rotation preserves winding, but the sign is checked rather than
+        // assumed: outward is s * (dy, -dx) for signed area of sign s.
+        float area2 = 0.f;
+        for (size_t k = 0; k < n; ++k) {
+            const sf::Vector2f& a = m_rimPts[k];
+            const sf::Vector2f& b = m_rimPts[(k + 1) % n];
+            area2 += a.x * b.y - b.x * a.y;
+        }
+        const float s = (area2 >= 0.f) ? 1.f : -1.f;
+
+        m_rimNormals.resize(n);
+        for (size_t k = 0; k < n; ++k) {
+            const sf::Vector2f d = m_rimPts[(k + 1) % n] - m_rimPts[k];
+            const float l = std::max(1e-4f, std::sqrt(d.x * d.x + d.y * d.y));
+            m_rimNormals[k] = { s * d.y / l, -s * d.x / l };
+        }
+
+        // Light from the top-left of the screen, as in the lab.
+        const sf::Vector2f L{ -0.6f, -0.8f };
+        const float peak = acfg("wreck_rim_alpha", 175.f);
+        const float amb = acfg("wreck_rim_ambient", 22.f);
+        const float half = acfg("wreck_rim_width", 1.6f) * 0.5f;
+
+        m_rimLit.resize(n);
+        for (size_t k = 0; k < n; ++k) {
+            const sf::Vector2f a = m_rimNormals[(k + n - 1) % n];
+            const sf::Vector2f b = m_rimNormals[k];
+            const sf::Vector2f m{ a.x + b.x, a.y + b.y };
+            const float l = std::max(1e-4f, std::sqrt(m.x * m.x + m.y * m.y));
+            const float facing = std::max(0.f, (m.x * L.x + m.y * L.y) / l);
+            m_rimLit[k] = amb + (peak - amb) * std::pow(facing, 1.4f);
+        }
+
+        m_rimScratch.clear();
+        for (size_t k = 0; k < n; ++k) {
+            const size_t j = (k + 1) % n;
+            const sf::Vector2f nn = m_rimNormals[k] * half;
+            const auto col = [](float a) {
+                return sf::Color(190, 212, 240,
+                    static_cast<std::uint8_t>(std::clamp(a, 0.f, 255.f)));
+                };
+            const sf::Color ca0 = col(m_rimLit[k]), cb0 = col(m_rimLit[j]);
+            const sf::Vector2f p0 = m_rimPts[k] + nn, p1 = m_rimPts[j] + nn;
+            const sf::Vector2f p2 = m_rimPts[j] - nn, p3 = m_rimPts[k] - nn;
+            m_rimScratch.push_back(sf::Vertex{ p0, ca0 });
+            m_rimScratch.push_back(sf::Vertex{ p1, cb0 });
+            m_rimScratch.push_back(sf::Vertex{ p2, cb0 });
+            m_rimScratch.push_back(sf::Vertex{ p0, ca0 });
+            m_rimScratch.push_back(sf::Vertex{ p2, cb0 });
+            m_rimScratch.push_back(sf::Vertex{ p3, ca0 });
+        }
+        m_window->draw(m_rimScratch.data(), m_rimScratch.size(), sf::PrimitiveType::Triangles);
+    }
+
     /// Read a float from the `asteroid_visuals` table in Lua.
+    /// Lua `asteroid_visuals` table, cached per config epoch (see LuaConfig.hpp).
+    luacfg::Table m_cfgAsteroidVisuals{ "asteroid_visuals" };
     float acfg(const char* key, float def) const {
-        if (!m_lua) return def;
-        sol::optional<sol::table> v = (*m_lua)["asteroid_visuals"];
-        if (!v) return def;
-        return (*v)[key].get_or(def);
+        return m_cfgAsteroidVisuals.get(m_lua, key, def);
     }
 
     /**
@@ -1481,6 +1697,16 @@ private:
     sf::RenderWindow* m_window = nullptr;
     sol::state* m_lua = nullptr;
     uint32_t m_playerEntityId = 0;
+    /// Scratch for transforming baked detail vertices into world space.
+    /// A member so the per-frame cost is a resize, not an allocation.
+    std::vector<sf::Vertex> m_detailScratch;
+
+    /// Scratch for the wreck rim, same reason.
+    std::vector<sf::Vector2f> m_rimPts;
+    std::vector<sf::Vector2f> m_rimNormals;
+    std::vector<float>        m_rimLit;
+    std::vector<sf::Vertex>   m_rimScratch;
+
     float m_magmaPulseTime = 0.f;
     const enemyarch::EnemyRegistry* m_enemyReg = nullptr;   // added for archetype access
     std::vector<sf::Vector2f> m_outlineScratch;             // reused across enemies

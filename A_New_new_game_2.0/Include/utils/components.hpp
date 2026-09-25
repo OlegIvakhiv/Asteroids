@@ -108,10 +108,7 @@ struct PlayerComponent {
     float parryAnimTimer = 0.f;         // Visual spin duration (longer than the window)
     float parryCooldown = 0.f;
     float parryMaxCooldown = 2.0f;
-    float parrySpinAngle = 0.f;
     float parryStartRotation = 0.f;
-    float parryTargetRotation = 0.f;    // Mouse angle when the parry started
-    float parryTotalDelta = 0.f;        // Total rotation to play out (720° + aim angle)
 
     // ---- Shooting ----
     float shootTimer = 0.f;             // Cooldown before next shot
@@ -265,14 +262,7 @@ struct BulletComponent {
     // or when it runs out of speed.
     float wildDrag = 0.f;               // >0: bleeds speed until it self-detonates
     float wildStallSpeed = 0.f;         // Below this it goes off on its own
-    // Two summed sine terms at incommensurate frequencies, so the path never
-    // repeats and never settles into a readable curve. A parried rocket that
-    // flew straight was just a slower player bullet; this one is a hazard
-    // with a rough heading, which is what makes aiming it a gamble worth
-    // taking rather than a free kill.
-    float wanderAmp = 0.f;              // deg/s of steering authority
-    float wanderFreq = 0.f;
-    float wanderPhase = 0.f;
+    float tumblePhase = 0.f;            // Drives the parried rocket's squash (WeaponSystem)
     float blastRadius = 0.f;
     float blastDamage = 0.f;
     float armTimer = 0.f;               // Contacts ignored this long after launch,
@@ -304,6 +294,38 @@ struct BulletComponent {
 struct RenderComponent {
     uint32_t entityId = 0;
     sf::ConvexShape shape;              // SFML shape: fill, outline, vertices
+
+    /// Ear-clipped triangle list, used ONLY by hull-shaped wrecks.
+    ///
+    /// sf::ConvexShape fills from a fan off point 0, so a concave outline --
+    /// a ship with mandibles, a notched tail -- renders folded and wrong.
+    /// Anything with a real silhouette therefore carries its own triangles
+    /// and skips `shape` for the fill, keeping `shape` purely for the outline
+    /// and the colour the fracture path reads back.
+    ///
+    /// Empty for every ordinary rock, bullet and particle, so the cost to
+    /// them is 24 bytes of empty vector and no allocation.
+    std::vector<sf::Vector2f> tris;
+
+    /// Layered interior detail, generated once at spawn with colours already
+    /// baked in: overlapping chunk plates, welded struts, punched gaps,
+    /// craters and facets. When this is non-empty it REPLACES `shape` and
+    /// `tris` as the thing that gets drawn -- the object is a small scene
+    /// rather than a polygon.
+    ///
+    /// Empty for every bullet, particle and ship, so they pay two empty
+    /// vectors and no allocation.
+    std::vector<sf::Vertex> detailTris;
+    std::vector<sf::Vertex> detailLines;
+
+    /// Damage tier of a ship wreck, or -1 for anything that is not one.
+    ///   0 powered down (pristine -- the ambush disguise)
+    ///   1 light   2 heavy   3 destroyed hulk
+    /// RenderSystem reads it to draw the world-space starlight rim, which
+    /// cannot be baked into detailTris because wrecks spin. Kept on the
+    /// entity so a later ambush system can tell a dormant hull from a dead
+    /// one without re-deriving it.
+    int8_t wreckTier = -1;
 };
 
 // ============================================================================
@@ -322,7 +344,8 @@ struct PhysicsComponent {
 // A single particle (explosion spark, debris, impact flash, etc).
 // Non-colliding, short-lived, purely visual.
 struct Particle {
-    uint32_t entityId = 0;
+    // No entityId: particles are never looked up by id, and giving each one
+    // an id used to burn ~120 of nextEntityId on a single magma explosion.
     sf::Vector2f position;
     sf::Vector2f velocity;
     sf::Color color;                    // Alpha fades out as lifetime runs down
@@ -400,6 +423,54 @@ struct HealthComponent {
     // ---- Size info (cached at spawn, used by fracture / damage scaling) ----
     float   visualRadius = 0.f;         // Rendered radius in pixels, post-variance
     uint8_t asteroidTier = 0;           // 0=SMALL 1=MEDIUM 2=LARGE 3=MAGMATIC
+
+    // ---- What this rock breaks INTO ----
+    // Cached at spawn from `child_type` in asteroids.lua. Empty = the old
+    // rule (tier >= 2 -> MEDIUM, else SMALL), so every existing type is
+    // unaffected. It lives here rather than being looked up at fracture time
+    // because by then the only thing left of the parent is this component --
+    // nothing carries its Lua table, or even its type name.
+    //
+    // A fixed buffer, not std::string: this struct sits in a hot SoA vector
+    // 8192 entries long, and a heap pointer per rock to hold "SCRAP" would be
+    // worse in every way than 16 bytes inline.
+    char childType[16] = { 0 };
+
+    /// A SECOND thing it can break into, and the percent chance per child.
+    /// Rolled independently for each fragment, so a dying Barge can shed one
+    /// reactor and two scrap piles rather than all-or-nothing.
+    ///
+    /// This is what turns clearing a big wreck into a decision instead of a
+    /// chore: the salvage is worth points, and it might hand you a live bomb
+    /// at point-blank range.
+    char    childAlt[16] = { 0 };
+    uint8_t childAltPct = 0;
+
+    /// Children take this rock's colour instead of their own type's.
+    ///
+    /// A grey hull does not shatter into rust, and a rust pile does not
+    /// shatter into steel. Without this the cascade announced the CHILD's
+    /// type rather than the parent's, so every wreck -- whatever colour --
+    /// broke into the same brown scrap.
+    bool childInheritColor = false;
+
+    /// Glowing core radius, as a fraction of the rock's own radius.
+    /// Cached per entity so a Rakshari reactor can burn while an ordinary
+    /// magmatic rock stays dark -- they share the explosive contract and the
+    /// renderer, but not the look.
+    float magmaCore = 0.f;
+
+    /// White damage flash, in seconds. Enemies had one; nothing else did, so
+    /// shooting a rock gave no confirmation that the shot had landed beyond
+    /// the health bar you cannot see. Set at every damage site, decayed once
+    /// per frame in DamageSystem, read by RenderSystem.
+    float hitFlash = 0.f;
+
+    /// Metal, not stone. Decides which impact palette a hit throws: plasma
+    /// on hull sprays the same yellow sparks and red micro-burst as a hit on
+    /// an enemy ship, because it IS the same event -- the only difference is
+    /// that nobody is flying this one.
+    bool metallic = false;
 };
 
 // ============================================================================
@@ -407,7 +478,6 @@ struct HealthComponent {
 // ============================================================================
 
 struct Star {
-    uint32_t entityId = 0;
     sf::Vector2f position;              // Screen-space pixels
     float parallaxFactor;               // Lower = farther away = moves slower
     float size;
@@ -635,24 +705,6 @@ struct EnemyComponent {
     float hitFlashTimer = 0.f;          // White flash when damaged
     float dodgeFlashTimer = 0.f;        // Brief streak when a dodge burst fires
     EnemyState visualState = EnemyState::PATROL;  // Mirrors AI state, for RenderSystem
-};
-
-// ============================================================================
-// EXPLOSION — temporary AoE damage event
-// ============================================================================
-
-// Applied to a dummy entity that just carries this data for one frame while
-// DamageSystem applies the area-of-effect damage. Used for magmatic asteroid
-// deaths and Rift Bolt detonations.
-struct ExplosionComponent {
-    uint32_t entityId = 0;
-    sf::Vector2f position;
-    float mainRadius;               // Large radius: destroys bullets, light damage
-    float coreRadius;                // Small radius: high damage / homing conversion
-    float mainDamage;
-    float coreDamage;
-    bool isRiftExplosion = false;    // True = Rift Bolt, false = Magmatic asteroid
-    float lifetime = 0.2f;           // Lives for a single frame
 };
 
 // Debug-only area-of-effect marker (drawn as a fading ring by DebugSystem).

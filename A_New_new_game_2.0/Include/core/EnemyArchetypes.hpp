@@ -280,7 +280,7 @@ namespace enemyarch {
                 auto unit = [](sf::Vector2f v) {
                     const float l = std::sqrt(v.x * v.x + v.y * v.y);
                     return (l > 1e-5f) ? sf::Vector2f(v.x / l, v.y / l) : sf::Vector2f(0.f, 0.f);
-                };
+                    };
 
                 const sf::Vector2f d0 = unit(cur - prev);
                 const sf::Vector2f d1 = unit(next - cur);
@@ -335,6 +335,34 @@ namespace enemyarch {
         /// here so RenderSystem never walks nested tables at draw time.
         /// Drawn inside the hull transform, so they bank and squash with it.
         std::vector<sf::Vector2f> decalSegs;
+
+        /**
+         * @struct Plate
+         * @brief A bolted-on armour panel, drawn over the hull fill.
+         *
+         * The hull was one flat colour with scar lines scratched into it,
+         * which is fine for a silhouette and thin next to a player ship the
+         * pilot designed and painted themselves. Plates are the answer: a
+         * mismatched patchwork of salvage is the Rakshari read, and it is the
+         * cheapest possible detail because every plate on a ship shares that
+         * ship's transform and vertex colours are per-vertex -- so the whole
+         * set batches into ONE extra draw call per enemy, not one per plate.
+         *
+         * `shade` MULTIPLIES the hull's live fill rather than setting a fixed
+         * colour. That matters: the fill is already being driven by hit flash,
+         * ram glow and the Maniac's frenzy ramp, and a hardcoded plate colour
+         * would sit inert through all of it -- a ship flashing white with
+         * stubbornly maroon panels. Scars already work this way (fill * 0.42).
+         */
+        struct Plate {
+            std::vector<sf::Vector2f> points;  ///< Authored, starboard side
+            std::vector<sf::Vector2f> tris;    ///< Ear-clipped at load
+            float shade = 1.f;                 ///< Multiplies the LIVE hull fill
+            bool  accent = false;              ///< Outline in the unit's accent
+        };
+        /// Mirrored at load: author the starboard side only, unless the plate
+        /// sets `mirror = false` (a centreline plate would double up).
+        std::vector<Plate> plates;
 
         /// Engine nozzle mounts, local space. Empty in Lua means the legacy
         /// single nozzle at (0, 22) -- which is exactly where EffectsSystem
@@ -507,6 +535,78 @@ namespace enemyarch {
             return out;
         }
 
+        /// True when every vertex is inside the hull. A plate that pokes out
+        /// draws past the silhouette and then gets half-covered by the
+        /// outline, which reads as a rendering bug rather than as armour --
+        /// so it is caught here, at load, with the offending unit named.
+        static bool plateInsideHull(const std::vector<sf::Vector2f>& plate,
+            const std::vector<sf::Vector2f>& hull)
+        {
+            for (const auto& q : plate) {
+                bool in = false;
+                for (size_t i = 0, j = hull.size() - 1; i < hull.size(); j = i++) {
+                    const auto& a = hull[i]; const auto& b = hull[j];
+                    if (((a.y > q.y) != (b.y > q.y)) &&
+                        (q.x < (b.x - a.x) * (q.y - a.y) / (b.y - a.y + 1e-6f) + a.x))
+                        in = !in;
+                }
+                if (!in) return false;
+            }
+            return true;
+        }
+
+        static std::vector<ArchetypeDef::Plate> readPlates(const sol::table& t, float scale,
+            const std::string& key, const std::vector<sf::Vector2f>& hull)
+        {
+            std::vector<ArchetypeDef::Plate> out;
+            sol::optional<sol::table> list = t["plates"];
+            if (!list) return out;
+
+            for (size_t i = 1; i <= list->size(); ++i) {
+                sol::optional<sol::table> e = (*list)[i];
+                if (!e) continue;
+
+                ArchetypeDef::Plate base;
+                base.shade = (*e)["shade"].get_or(1.35f);
+                base.accent = (*e)["accent"].get_or(false);
+
+                sol::optional<sol::table> pts = (*e)["points"];
+                if (!pts) continue;
+                for (size_t k = 1; k <= pts->size(); ++k) {
+                    sol::optional<sol::table> v = (*pts)[k];
+                    if (!v) continue;
+                    base.points.push_back({ (*v)[1].get_or(0.f) * scale,
+                                            (*v)[2].get_or(0.f) * scale });
+                }
+                if (base.points.size() < 3) continue;
+
+                const bool mirror = (*e)["mirror"].get_or(true);
+
+                auto emit = [&](std::vector<sf::Vector2f> pts2) {
+                    if (!plateInsideHull(pts2, hull)) {
+                        std::cerr << "[EnemyRegistry] \"" << key << "\" plate " << i
+                            << " has vertices outside the hull. Skipped -- it would "
+                            "spill past the silhouette.\n";
+                        return;
+                    }
+                    ArchetypeDef::Plate pl = base;
+                    if (geom::signedArea(pts2) < 0.f) std::reverse(pts2.begin(), pts2.end());
+                    pl.tris = geom::triangulate(pts2);
+                    pl.points = std::move(pts2);
+                    out.push_back(std::move(pl));
+                    };
+
+                emit(base.points);
+                if (mirror) {
+                    std::vector<sf::Vector2f> m;
+                    m.reserve(base.points.size());
+                    for (const auto& v : base.points) m.push_back({ -v.x, v.y });
+                    emit(std::move(m));
+                }
+            }
+            return out;
+        }
+
         static std::vector<sf::Vector2f> readPoints(const sol::table& t, const char* field) {
             sol::object o = t[field];
             if (!o.valid() || !o.is<sol::table>()) return {};
@@ -585,6 +685,9 @@ namespace enemyarch {
             d.turrets = readPoints(t, "turrets");
             for (auto& v : d.turrets) { v.x *= scale; v.y *= scale; }
 
+            // ---- Armour plates ----
+            d.plates = readPlates(t, scale, key, d.visual);
+
             // ---- Decals ----
             d.decalSegs = readPolylineSegs(t, "scars", scale);
 
@@ -629,6 +732,7 @@ namespace enemyarch {
                 << "  physics=" << d.physics.size() << "pts"
                 << "  hitbox/silhouette=" << ratio
                 << "  turrets=" << d.turrets.size()
+                << "  plates=" << d.plates.size()
                 << "  scars=" << (d.decalSegs.size() / 2)
                 << "  nozzles=" << d.thrusters.size()
                 << "  r=" << d.radius << "\n";

@@ -61,6 +61,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include "UiPalette.hpp"   // the palette values; tui:: re-exports them below
 
 namespace tui {
 
@@ -69,22 +70,25 @@ namespace tui {
     //
     // Greys are DARK, accents are BRIGHT. Contrast comes from the gap between
     // near-black structure and hot cyan/amber values, never from mid-grey text.
-    // Dark future, not hologram. These were duplicated in two files; if a third
-    // screen needs a colour, add it HERE.
+    // Dark future, not hologram.
+    //
+    // The VALUES live in UiPalette.hpp -- the one source. These using-
+    // declarations keep every `tui::CYAN` spelling working. If a screen needs a
+    // new colour, add it to ui:: and pull it in here.
     // ============================================================================
 
-    inline const sf::Color VOID_BG{ 2,   3,   5 };  ///< true ground
-    inline const sf::Color PANEL_BG{ 6,   8,  12 };  ///< panel interior
-    inline const sf::Color CYAN{ 40, 245, 255 };  ///< hot: values, active
-    inline const sf::Color CYAN_MID{ 20, 150, 170 };  ///< borders
-    inline const sf::Color CYAN_LOW{ 12,  70,  84 };  ///< dead structure
-    inline const sf::Color AMBER{ 255, 214,   0 };  ///< selection, confirm
-    inline const sf::Color RED{ 255,  48,   0 };  ///< danger
-    inline const sf::Color GREEN{ 80, 240, 130 };  ///< ok
-    inline const sf::Color TEXT{ 214, 222, 232 };  ///< body
-    inline const sf::Color TEXT_DIM{ 84,  92, 104 };  ///< keys, captions
-    inline const sf::Color TEXT_DEAD{ 52,  58,  68 };  ///< locked / disabled
-    inline const sf::Color INK{ 4,   5,   8 };  ///< knocked-out text
+    using ui::VOID_BG;
+    using ui::PANEL_BG;
+    using ui::CYAN;
+    using ui::CYAN_MID;
+    using ui::CYAN_LOW;
+    using ui::AMBER;
+    using ui::RED;
+    using ui::GREEN;
+    using ui::TEXT;
+    using ui::TEXT_DIM;
+    using ui::TEXT_DEAD;
+    using ui::INK;
 
     inline constexpr float OPEN_DUR = 0.30f;  ///< per-panel CRT reveal length
     inline constexpr float SKEW = 14.f;   ///< the ONE skewed element

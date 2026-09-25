@@ -74,6 +74,11 @@ namespace ui {
     inline const sf::Color BLUE_COOL{ 40, 140, 220 };  ///< Good vent zone
     inline const sf::Color HAZARD{ 255,  70,  30 };  ///< Overheat / lockout
 
+    // ---- Screen extensions (were private copies in TerminalUI / RefitSystem) ----
+    inline const sf::Color GREEN{ 80, 240, 130 };  ///< OK / valid
+    inline const sf::Color INK{ 4,   5,   8 };  ///< Knocked-out text on a lit bar
+    inline const sf::Color VIOLET{ 175, 95, 255 };  ///< The Rift's own colour: bolt, sparks, spinal mount
+
     // ========================================================================
     // METRICS
     // ========================================================================

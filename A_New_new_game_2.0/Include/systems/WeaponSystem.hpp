@@ -44,6 +44,7 @@
 #pragma once
 
 #include "ISystem.hpp"
+#include "utils/LuaConfig.hpp"
 #include "core/EntityManager.hpp"
 #include "core/EntityFactory.hpp"
 #include "utils/InputRegistry.hpp"
@@ -168,7 +169,6 @@ public:
                 if (tl > 0.01f) toward /= tl;
 
                 m_em->particles.push_back({
-                    m_em->nextEntityId++,
                     from,
                     toward * (dist / 0.16f),
                     sf::Color(static_cast<uint8_t>(180 + rand() % 75), 80, 255,
@@ -239,7 +239,6 @@ public:
                         -fwd.x * std::sin(spread) - fwd.y * std::cos(spread)
                     );
                     m_em->particles.push_back({
-                        m_em->nextEntityId++,
                         spawnPos,
                         d * static_cast<float>(250 + rand() % 250),
                         sf::Color(160, 60, 255, 220),
@@ -355,7 +354,6 @@ public:
                 );
                 float spd = 150.f + rand() % 200;
                 m_em->particles.push_back({
-                    m_em->nextEntityId++,
                     spawnPos,
                     sparkDir * spd,
                     heatMix(playerStats.livery.paint.plasma, heatT, 230),
@@ -387,7 +385,7 @@ private:
             b2BodyId bodyId = m_em->physics[i].bodyId;
             if (!b2Body_IsValid(bodyId)) continue;
 
-            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(bodyId);
+            BodyUserData* ud = bodyUD(bodyId);
             BodyType type = ud ? ud->type : BodyType::Asteroid;
             if (type != BodyType::Bullet) continue;
 
@@ -436,7 +434,7 @@ private:
                     const float urgency = 1.f - std::clamp(
                         bullet.mineFuse / std::max(0.1f, bullet.mineFuseTime), 0.f, 1.f);
                     if ((rand() % 100) < static_cast<int>(20 + 65 * urgency)) {
-                        m_em->particles.push_back({ m_em->nextEntityId++, mp,
+                        m_em->particles.push_back({ mp,
                             { (float)((rand() % 120) - 60), (float)((rand() % 120) - 60) },
                             sf::Color(255, static_cast<uint8_t>(90 - 50 * urgency), 45, 240),
                             0.14f, 0.14f, 3.f + 2.f * urgency });
@@ -502,12 +500,13 @@ private:
                     // than as a sprite spinning on the spot.
                     //
                     // The phase has to ADVANCE. It used to be driven by the
-                    // wander term, and when wander was removed the phase froze
-                    // -- leaving every parried rocket pinned at whatever squash
-                    // it happened to start on, usually a thin sliver. That is
-                    // why the parried rocket looked small and washed out.
-                    bullet.wanderPhase += dt * 7.4f;
-                    const float w = std::fabs(std::cos(bullet.wanderPhase));
+                    // (now retired) wander term, and when wander was removed
+                    // the phase froze -- leaving every parried rocket pinned at
+                    // whatever squash it happened to start on, usually a thin
+                    // sliver. That is why the parried rocket looked small and
+                    // washed out.
+                    bullet.tumblePhase += dt * 7.4f;
+                    const float w = std::fabs(std::cos(bullet.tumblePhase));
                     m_em->renders[i].shape.setScale({ 0.40f + 0.60f * w, 1.f });
                 }
                 else if (std::fabs(v.x) + std::fabs(v.y) > 1.f) {
@@ -525,7 +524,6 @@ private:
                     const float jx = ((rand() % 60) - 30);
                     const float jy = ((rand() % 60) - 30);
                     m_em->particles.push_back({
-                        m_em->nextEntityId++,
                         m_em->transforms[i].position,
                         { -v.x * 0.18f + jx, -v.y * 0.18f + jy },
                         bullet.isWild ? sf::Color(255, 220, 60, 235)
@@ -539,7 +537,6 @@ private:
                 // an ambush.
                 if (bullet.lifetime < 0.6f && (rand() % 100) < 45) {
                     m_em->particles.push_back({
-                        m_em->nextEntityId++,
                         m_em->transforms[i].position,
                         { (float)((rand() % 200) - 100), (float)((rand() % 200) - 100) },
                         sf::Color(255, 90, 40, 230), 0.14f, 0.14f, 3.f });
@@ -605,7 +602,6 @@ private:
             // ---- Trails for the loud projectiles ----
             if (bullet.isRiftBolt && (rand() % 2 == 0)) {
                 m_em->particles.push_back({
-                    m_em->nextEntityId++,
                     m_em->transforms[i].position,
                     { 0.f, 0.f },
                     sf::Color(180, 60, 255, 180),
@@ -615,7 +611,6 @@ private:
             }
             else if (bullet.isReflected) {
                 m_em->particles.push_back({
-                    m_em->nextEntityId++,
                     m_em->transforms[i].position,
                     { 0.f, 0.f },
                     sf::Color(255, 215, 90, 200),
@@ -664,7 +659,7 @@ private:
 
         for (size_t j = 0; j < m_em->physics.size(); ++j) {
             if (j == playerIdx || j == boltIdx) continue;
-            BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(m_em->physics[j].bodyId);
+            BodyUserData* ud2 = bodyUD(m_em->physics[j].bodyId);
             if (!ud2 || ud2->type == BodyType::Bullet) continue;
 
             sf::Vector2f diff = boltPos - m_em->transforms[j].position;
@@ -713,7 +708,6 @@ private:
                 float a = n * 10.f * 3.14159f / 180.f;
                 sf::Vector2f d(std::cos(a), std::sin(a));
                 m_em->particles.push_back({
-                    m_em->nextEntityId++,
                     boltPos + d * burstRadius * 0.3f,
                     d * 250.f,
                     sf::Color(120, 60, 255, 200),
@@ -725,7 +719,7 @@ private:
 
             for (size_t j = 0; j < m_em->physics.size(); ++j) {
                 if (j == boltIdx) continue;
-                BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(m_em->physics[j].bodyId);
+                BodyUserData* ud2 = bodyUD(m_em->physics[j].bodyId);
                 if (!ud2) continue;
 
                 sf::Vector2f diff = boltPos - m_em->transforms[j].position;
@@ -771,7 +765,7 @@ private:
             size_t enemyIdx = (size_t)-1;
             float bestDist = FLT_MAX;
             for (size_t j = 0; j < m_em->physics.size(); ++j) {
-                BodyUserData* ud2 = (BodyUserData*)b2Body_GetUserData(m_em->physics[j].bodyId);
+                BodyUserData* ud2 = bodyUD(m_em->physics[j].bodyId);
                 if (!ud2 || ud2->type != BodyType::Enemy) continue;
                 sf::Vector2f d = boltPos - m_em->transforms[j].position;
                 float dist = d.x * d.x + d.y * d.y;
@@ -896,7 +890,6 @@ private:
                     const sf::Vector2f side(-fwd.y, fwd.x);
                     const float s = ((rand() % 2) ? 1.f : -1.f);
                     m_em->particles.push_back({
-                        m_em->nextEntityId++,
                         tf.position + fwd * 18.f + side * (s * 12.f),
                         side * (s * (110.f + rand() % 90)) + fwd * float(rand() % 50),
                         sf::Color(255, 190, 150, 205),
@@ -915,7 +908,6 @@ private:
                 const float s = ((rand() % 2) ? 1.f : -1.f);
                 const sf::Vector2f from = tf.position + fwd * 18.f + side * (s * 12.f);
                 m_em->particles.push_back({
-                    m_em->nextEntityId++,
                     from,
                     side * (s * (90.f + rand() % 70)) + fwd * static_cast<float>(rand() % 40),
                     sf::Color(255, 200, 160, 190),
@@ -947,7 +939,6 @@ private:
             const sf::Vector2f nose = tf.position + fwd * 28.f;
             const float a = (rand() % 360) * 3.14159f / 180.f;
             m_em->particles.push_back({
-                m_em->nextEntityId++,
                 nose + sf::Vector2f(std::cos(a), std::sin(a)) * 6.f,
                 sf::Vector2f(std::cos(a), std::sin(a)) * (25.f + rand() % 35),
                 heatColor(heatT, 200),
@@ -1019,7 +1010,6 @@ private:
         for (int n = 0; n < 6; ++n) {
             const float a = (rand() % 360) * 3.14159f / 180.f;
             m_em->particles.push_back({
-                m_em->nextEntityId++,
                 nose,
                 sf::Vector2f(std::cos(a), std::sin(a)) * (40.f + rand() % 40),
                 sf::Color(150, 150, 160, 160),
@@ -1063,10 +1053,10 @@ private:
         ps.yawDriftVel += (armM * impulse / inertia) * 57.29578f * rcfg("recoil_yaw_scale", 0.35f);
     }
 
+    /// Lua `refit` table, cached per config epoch (see LuaConfig.hpp).
+    luacfg::Table m_cfgRefit{ "refit" };
     float rcfg(const char* key, float def) const {
-        sol::optional<sol::table> v = (*m_lua)["refit"];
-        if (!v) return def;
-        return (*v)[key].get_or(def);
+        return m_cfgRefit.get(m_lua, key, def);
     }
 
     /// Cool end of the muzzle flash is the ship's plasma colour; heat still
@@ -1083,10 +1073,10 @@ private:
             static_cast<std::uint8_t>(a.b + (b.b - a.b) * k), alpha);
     }
 
+    /// Lua `weapon` table, cached per config epoch (see LuaConfig.hpp).
+    luacfg::Table m_cfgWeapon{ "weapon" };
     float wcfg(const char* key, float def) const {
-        sol::optional<sol::table> v = (*m_lua)["weapon"];
-        if (!v) return def;
-        return (*v)[key].get_or(def);
+        return m_cfgWeapon.get(m_lua, key, def);
     }
 
     EntityManager* m_em = nullptr;

@@ -1,4 +1,4 @@
-/**
+ï»¿/**
  * @file SpaceDustSystem.hpp
  * @brief Near-field motion particles that give empty space a speed reference
  *
@@ -9,19 +9,19 @@
  *
  * Key design decisions:
  *
- *  1. WORLD SPACE, TOROIDAL WRAP. The motes don't move — the camera does.
+ *  1. WORLD SPACE, TOROIDAL WRAP. The motes don't move ï¿½ the camera does.
  *     Any mote that leaves the region around the camera is teleported to the
  *     opposite edge, so a fixed-size pool covers infinite space. O(n) per
  *     frame, no allocation, no spawning/despawning.
  *
  *  2. VELOCITY STREAKS, NOT DOTS. Each mote is drawn as a line whose length
  *     scales with the player's speed. At rest they're invisible specks; at
- *     turbo they're long streaks. This is the entire effect — dots alone do
+ *     turbo they're long streaks. This is the entire effect ï¿½ dots alone do
  *     almost nothing.
  *
  *  3. FAKE DEPTH. Each mote has a `depth` factor scaling its size, alpha and
  *     streak length. True parallax would require the motes to move at
- *     different rates, which breaks the world-space assumption — and the
+ *     different rates, which breaks the world-space assumption ï¿½ and the
  *     starfield already covers real parallax anyway.
  *
  *  4. SPEED-GATED ALPHA. Below a threshold the whole field fades out, so
@@ -37,6 +37,7 @@
 #pragma once
 
 #include "ISystem.hpp"
+#include "utils/LuaConfig.hpp"
 #include "core/EntityManager.hpp"
 #include <SFML/Graphics.hpp>
 #include <cmath>
@@ -51,6 +52,7 @@ public:
         m_lua = ctx.lua;
         m_playerEntityId = ctx.playerEntityId;
         m_view = ctx.gameView;
+        m_zone = ctx.zone;
 
         m_rng.seed(std::random_device{}());
 
@@ -123,11 +125,11 @@ public:
 private:
     struct Mote {
         sf::Vector2f position;   ///< World position (pixels)
-        float depth = 1.f;       ///< 0.35..1.0 — scales size, alpha, streak
+        float depth = 1.f;       ///< 0.35..1.0 ï¿½ scales size, alpha, streak
         float size = 2.f;        ///< Unused for lines, kept for a dot fallback
     };
 
-    void draw(const sf::Vector2f& vel, float speed) const {
+    void draw(const sf::Vector2f& vel, float speed) {
         // ---- Speed gate: fade the whole field in as you accelerate ----
         const float fadeIn = cfg("dust_fade_in_speed", 120.f);
         const float fadeFull = cfg("dust_full_speed", 700.f);
@@ -137,7 +139,7 @@ private:
         // ---- Streak geometry ----
         // The motes are static; the CAMERA moves. So on screen a mote appears
         // to travel opposite to the player, and its trail extends BACK along
-        // the player's velocity vector — i.e. where the mote came from.
+        // the player's velocity vector ï¿½ i.e. where the mote came from.
         const float maxStreak = cfg("dust_max_streak", 90.f);
         const float streakPerSpeed = cfg("dust_streak_per_speed", 0.055f);
 
@@ -145,13 +147,25 @@ private:
         if (speed > 0.001f) dir = vel / speed;
         const float streakLen = std::min(speed * streakPerSpeed, maxStreak);
 
-        const auto baseAlpha = cfg("dust_alpha", 150.f);
-        const sf::Color tint(
+        // ---- Tint: the zone owns it when one is loaded ----
+        // Dust is the closest thing this game has to atmosphere, so it carries
+        // more of a zone's identity than anything except the props. Falling
+        // back to `visuals` keeps an install with no zones.lua identical.
+        float baseAlpha = cfg("dust_alpha", 150.f);
+        sf::Color tint(
             static_cast<uint8_t>(cfg("dust_color_r", 170.f)),
             static_cast<uint8_t>(cfg("dust_color_g", 200.f)),
             static_cast<uint8_t>(cfg("dust_color_b", 255.f)));
 
-        sf::VertexArray va(sf::PrimitiveType::Lines, m_motes.size() * 2);
+        if (m_zone) {
+            if (const zonearch::ZoneDef* z = m_zone->def()) {
+                tint = z->dustColor;
+                baseAlpha = z->dustAlpha;
+            }
+        }
+
+        sf::VertexArray& va = m_verts;
+        va.resize(m_motes.size() * 2);   // every vertex is overwritten below
 
         for (size_t i = 0; i < m_motes.size(); ++i) {
             const Mote& m = m_motes[i];
@@ -177,17 +191,21 @@ private:
         return { size.x * 0.5f * pad, size.y * 0.5f * pad };
     }
 
+    /// Lua `visuals` table, cached per config epoch (see LuaConfig.hpp).
+    luacfg::Table m_cfgVisuals{ "visuals" };
     float cfg(const char* key, float def) const {
-        if (!m_lua) return def;
-        sol::optional<sol::table> v = (*m_lua)["visuals"];
-        if (!v) return def;
-        return (*v)[key].get_or(def);
+        return m_cfgVisuals.get(m_lua, key, def);
     }
+
+    /// Reused every frame: resize() keeps capacity, so after the first busy
+    /// frame this never touches the allocator again.
+    sf::VertexArray m_verts{ sf::PrimitiveType::Lines };
 
     EntityManager* m_em = nullptr;
     sf::RenderWindow* m_window = nullptr;
     sol::state* m_lua = nullptr;
     sf::View* m_view = nullptr;
+    zonearch::ZoneState* m_zone = nullptr;
     uint32_t m_playerEntityId = 0;
 
     std::vector<Mote> m_motes;

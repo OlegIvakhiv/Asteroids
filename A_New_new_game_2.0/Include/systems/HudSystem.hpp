@@ -35,6 +35,7 @@
 #pragma once
 
 #include "ISystem.hpp"
+#include "utils/LuaConfig.hpp"
 #include "core/EntityManager.hpp"
 #include "utils/UiPalette.hpp"       
 #include <SFML/Graphics.hpp>
@@ -374,11 +375,10 @@ private:
             static_cast<uint8_t>(b));
     }
 
+    /// Lua `weapon` table, cached per config epoch (see LuaConfig.hpp).
+    luacfg::Table m_cfgWeapon{ "weapon" };
     float wcfg(const char* key, float def) const {
-        if (!m_lua) return def;
-        sol::optional<sol::table> v = (*m_lua)["weapon"];
-        if (!v) return def;
-        return (*v)[key].get_or(def);
+        return m_cfgWeapon.get(m_lua, key, def);
     }
 
     float wcfgLua(const char* key, float fallback) const {

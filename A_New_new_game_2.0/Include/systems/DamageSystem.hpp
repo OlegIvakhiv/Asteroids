@@ -68,6 +68,7 @@
 
 #include "utils/ClassTuning.hpp"
 #include "ISystem.hpp"
+#include "utils/LuaConfig.hpp"
 #include "core/EntityManager.hpp"
 #include "core/EntityFactory.hpp"
 #include "core/EnemyArchetypes.hpp"        // added for archetype registry
@@ -97,6 +98,13 @@ public:
         // ====================================================================
         // 1. UPDATE INVULNERABILITY TIMERS
         // ====================================================================
+        // Damage flash decays for EVERYTHING that has health -- rocks, scrap,
+        // wrecks, enemies, the player. Enemies keep their own
+        // EnemyComponent timer as well, because AI reads it as "was I just
+        // shot"; this one is purely what the renderer whitens by.
+        for (auto& h : m_em->healths)
+            if (h.hitFlash > 0.f) h.hitFlash = std::max(0.f, h.hitFlash - dt);
+
         if (m_em->healths[playerIdx].invulTimer > 0)
             m_em->healths[playerIdx].invulTimer -= dt;
 
@@ -138,8 +146,8 @@ public:
             b2BodyId bodyA = b2Shape_GetBody(event->shapeIdA);
             b2BodyId bodyB = b2Shape_GetBody(event->shapeIdB);
 
-            BodyUserData* udA = (BodyUserData*)b2Body_GetUserData(bodyA);
-            BodyUserData* udB = (BodyUserData*)b2Body_GetUserData(bodyB);
+            BodyUserData* udA = bodyUD(bodyA);
+            BodyUserData* udB = bodyUD(bodyB);
 
             BodyType typeA = udA ? udA->type : BodyType::Asteroid;
             BodyType typeB = udB ? udB->type : BodyType::Asteroid;
@@ -259,8 +267,8 @@ public:
             }
 
             if (b2Body_IsValid(bulletBody) && b2Body_IsValid(targetBody)) {
-                BodyUserData* bulletUD = (BodyUserData*)b2Body_GetUserData(bulletBody);
-                BodyUserData* targetUD = (BodyUserData*)b2Body_GetUserData(targetBody);
+                BodyUserData* bulletUD = bodyUD(bulletBody);
+                BodyUserData* targetUD = bodyUD(targetBody);
                 if (!bulletUD || !targetUD) continue;
 
                 size_t bulletIdx = m_em->getEntityIndex(bulletUD->entityId);
@@ -284,7 +292,21 @@ public:
                     else if (targetType == BodyType::Asteroid) {
                         m_em->healths[targetIdx].currentHp -= dmg;
                         applyKnockback(targetIdx, hitVel, blt.knockback);
-                        m_em->spawnImpact(hitPos, sf::Color(180, 180, 180), hitVel);
+                        m_em->healths[targetIdx].hitFlash = 0.16f;
+
+                        // Plasma on hull plate is the same event as plasma on
+                        // an enemy ship, so it throws the same sparks: yellow
+                        // shower plus a small red burst. Stone keeps the dull
+                        // grey chips -- that contrast is now the fastest way
+                        // to tell salvage from rock mid-fight.
+                        if (m_em->healths[targetIdx].metallic) {
+                            m_em->spawnImpact(hitPos, sf::Color::Yellow, hitVel);
+                            m_em->spawnExplosion(hitPos, sf::Color(220, 60, 30), 4, 1.8f);
+                        }
+                        else {
+                            m_em->spawnImpact(hitPos, sf::Color(180, 180, 180), hitVel);
+                        }
+
                         spawnHitFx(blt, hitPos, targetIdx, false);
                         blt.markedForDestroy = true;
                     }
@@ -302,6 +324,7 @@ public:
                         m_em->healths[targetIdx].currentHp -= dmg;
                         applyKnockback(targetIdx, hitVel, blt.knockback);
                         m_em->enemies[targetIdx].hitFlashTimer = 0.18f;
+                        m_em->healths[targetIdx].hitFlash = 0.18f;
                         m_em->enemies[targetIdx].timesHit++;
 
                         // ---- CAUGHT MID-DODGE ----
@@ -341,16 +364,14 @@ public:
 
             if (isPlayerA || isPlayerB) {
                 b2BodyId otherBody = isPlayerA ? bodyB : bodyA;
-                BodyUserData* otherUD = (BodyUserData*)b2Body_GetUserData(otherBody);
+                BodyUserData* otherUD = bodyUD(otherBody);
                 BodyType otherType = otherUD ? otherUD->type : BodyType::Asteroid;
 
-                size_t otherIdx = (size_t)-1;
-                for (size_t idx = 0; idx < m_em->physics.size(); ++idx) {
-                    if (B2_ID_EQUALS(m_em->physics[idx].bodyId, otherBody)) {
-                        otherIdx = idx;
-                        break;
-                    }
-                }
+                // Every entity body carries its id in BodyUserData, so this is
+                // one hash lookup -- it used to be a linear scan of every
+                // entity, once per player contact.
+                const size_t otherIdx = otherUD
+                    ? m_em->getEntityIndex(otherUD->entityId) : (size_t)-1;
 
                 bool isParryActive = m_em->players[playerIdx].parryTimer > 0;
 
@@ -584,8 +605,8 @@ public:
             // 2c. ENEMY BULLET hits Player / Asteroid
             // ================================================================
             if (b2Body_IsValid(bulletBody) && b2Body_IsValid(targetBody)) {
-                BodyUserData* bulletUD = (BodyUserData*)b2Body_GetUserData(bulletBody);
-                BodyUserData* targetUD = (BodyUserData*)b2Body_GetUserData(targetBody);
+                BodyUserData* bulletUD = bodyUD(bulletBody);
+                BodyUserData* targetUD = bodyUD(targetBody);
                 if (bulletUD && targetUD) {
                     size_t bulletIdx = m_em->getEntityIndex(bulletUD->entityId);
                     size_t targetIdx = m_em->getEntityIndex(targetUD->entityId);
@@ -637,6 +658,8 @@ public:
 
                     m_em->healths[idxA].currentHp -= dmg * multB;
                     m_em->healths[idxB].currentHp -= dmg * multA;
+                    m_em->healths[idxA].hitFlash = 0.12f;
+                    m_em->healths[idxB].hitFlash = 0.12f;
 
                     sf::Vector2f midPos = (m_em->transforms[idxA].position + m_em->transforms[idxB].position) * 0.5f;
                     m_em->spawnImpact(midPos, sf::Color(180, 180, 180),
@@ -768,7 +791,7 @@ public:
             b2BodyId bodyId = m_em->physics[i].bodyId;
             if (!b2Body_IsValid(bodyId)) continue;
 
-            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(bodyId);
+            BodyUserData* ud = bodyUD(bodyId);
             BodyType type = ud ? ud->type : BodyType::Asteroid;
             bool shouldDestroy = false;
 
@@ -824,7 +847,10 @@ public:
                             if (dist < radius) {
                                 float falloff = 1.0f - (dist / radius);
                                 if (j == playerIdx) m_em->damagePlayer(j, damage * falloff);
-                                else                m_em->healths[j].currentHp -= damage * falloff;
+                                else {
+                                    m_em->healths[j].currentHp -= damage * falloff;
+                                    m_em->healths[j].hitFlash = 0.16f;
+                                }
 
                                 if (j == playerIdx && falloff > vcfg("stagger_blast_falloff", 0.45f)) {
                                     m_em->staggerPlayer(playerIdx, otherPos - deathPos,
@@ -925,15 +951,15 @@ private:
 
     ship::ClassFeel m_feel;   ///< This frame's class feel for the player
 
+    /// Lua `visuals` table, cached per config epoch (see LuaConfig.hpp).
+    luacfg::Table m_cfgVisuals{ "visuals" };
     float vcfg(const char* key, float def) const {
-        sol::optional<sol::table> v = (*m_lua)["visuals"];
-        if (!v) return def;
-        return (*v)[key].get_or(def);
+        return m_cfgVisuals.get(m_lua, key, def);
     }
+    /// Lua `weapon` table, cached per config epoch (see LuaConfig.hpp).
+    luacfg::Table m_cfgWeapon{ "weapon" };
     float wcfg(const char* key, float def) const {
-        sol::optional<sol::table> v = (*m_lua)["weapon"];
-        if (!v) return def;
-        return (*v)[key].get_or(def);
+        return m_cfgWeapon.get(m_lua, key, def);
     }
 
     size_t findNearestEnemy(sf::Vector2f pos) {
@@ -942,7 +968,7 @@ private:
 
         for (size_t i = 0; i < m_em->physics.size(); ++i) {
             if (!b2Body_IsValid(m_em->physics[i].bodyId)) continue;
-            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(m_em->physics[i].bodyId);
+            BodyUserData* ud = bodyUD(m_em->physics[i].bodyId);
             if (!ud || ud->type != BodyType::Enemy) continue;
 
             sf::Vector2f enemyPos = m_em->transforms[i].position;
@@ -1131,6 +1157,7 @@ private:
         const float stunResist = std::clamp(acfg(otherIdx, "stun_resist", 0.f), 0.f, 1.f);
 
         m_em->healths[otherIdx].currentHp -= reflectDamage;
+        m_em->healths[otherIdx].hitFlash = 0.2f;
         m_em->healths[otherIdx].stunTimer = stunDuration * (1.f - stunResist);
 
         // ---- FULL STAGGER, not just a shove ----
@@ -1302,7 +1329,7 @@ private:
             const sf::Vector2f d(std::cos(r), std::sin(r));
             const float sp = radius * (2.6f + (rand() % 90) / 100.f);
             const float life = 0.22f + (rand() % 26) / 100.f;
-            m_em->particles.push_back({ m_em->nextEntityId++,
+            m_em->particles.push_back({
                 pos + d * (radius * 0.18f), d * sp,
                 sf::Color(255, static_cast<uint8_t>(150 + rand() % 90), 60, 240),
                 life, life, 2.f + rand() % 3 });
@@ -1311,7 +1338,7 @@ private:
         // Slow smoke that outlives the flash and marks the spot.
         for (int k = 0; k < 8; ++k) {
             const float r = (rand() % 360) * 3.14159f / 180.f;
-            m_em->particles.push_back({ m_em->nextEntityId++, pos,
+            m_em->particles.push_back({ pos,
                 sf::Vector2f(std::cos(r), std::sin(r)) * (25.f + rand() % 55),
                 sf::Color(80, 62, 55, 165), 0.85f, 0.85f, 6.f + rand() % 6 });
         }
@@ -1322,7 +1349,7 @@ private:
             // Bullets in the blast are ignored on purpose: chaining every
             // round in the air turns two rockets into an arena-wide cascade.
             BodyUserData* ud = b2Body_IsValid(m_em->physics[j].bodyId)
-                ? (BodyUserData*)b2Body_GetUserData(m_em->physics[j].bodyId) : nullptr;
+                ? bodyUD(m_em->physics[j].bodyId) : nullptr;
             if (ud && ud->type == BodyType::Bullet) continue;
 
             const sf::Vector2f o = m_em->transforms[j].position;
@@ -1332,7 +1359,10 @@ private:
 
             const float falloff = 1.f - (d / radius);
             if (j == playerIdx) m_em->damagePlayer(j, damage * falloff);
-            else                m_em->healths[j].currentHp -= damage * falloff;
+            else {
+                m_em->healths[j].currentHp -= damage * falloff;
+                m_em->healths[j].hitFlash = 0.16f;
+            }
 
             if (ud && ud->type == BodyType::Enemy && j < m_em->enemies.size()) {
                 m_em->enemies[j].hitFlashTimer = 0.2f;
@@ -1382,7 +1412,6 @@ private:
         // parry-launched asteroid or a staggered ship, so "this is loose now"
         // reads instantly. The PATH stays straight: it goes where you sent it.
         b.spin = ((rand() % 2) ? 1.f : -1.f) * (620.f + rand() % 560);
-        b.wanderAmp = 0.f;
         b.wildDrag = wcfg("parry_rocket_drag", 0.75f);
         b.wildStallSpeed = wcfg("parry_rocket_stall", 170.f);
         b.ownerEntityId = m_playerEntityId;
@@ -1439,7 +1468,7 @@ private:
             // flight, not just as a ragdoll.
             if ((rand() % 100) < 70) {
                 const float a = (rand() % 360) * 3.14159f / 180.f;
-                m_em->particles.push_back({ m_em->nextEntityId++,
+                m_em->particles.push_back({
                     m_em->transforms[i].position +
                         sf::Vector2f(std::cos(a), std::sin(a)) * 18.f,
                     sf::Vector2f(std::cos(a), std::sin(a)) * (70.f + rand() % 140),
@@ -1618,7 +1647,7 @@ private:
         const float cs = std::cos(rr), sn = std::sin(rr);
 
         // 1. The frame the hull splits: one fat, very short white core.
-        m_em->particles.push_back({ m_em->nextEntityId++, pos, shipVel * 0.3f,
+        m_em->particles.push_back({ pos, shipVel * 0.3f,
             sf::Color(255, 245, 225, 255), 0.10f, 0.10f, 34.f });
 
         // 2. Tight, fast pressure ring. Small radius on purpose -- this is a
@@ -1630,7 +1659,7 @@ private:
             const float a = (rand() % 360) * 3.14159f / 180.f;
             const float sp = 180.f + rand() % 340;
             const float life = 0.25f + (rand() % 30) / 100.f;
-            m_em->particles.push_back({ m_em->nextEntityId++, pos,
+            m_em->particles.push_back({ pos,
                 sf::Vector2f(std::cos(a), std::sin(a)) * sp + shipVel * 0.5f,
                 sf::Color(255, static_cast<uint8_t>(110 + rand() % 120), 50, 235),
                 life, life, 2.f + rand() % 4 });
@@ -1673,7 +1702,7 @@ private:
         // 5. A little smoke that stays behind while the rest flies on.
         for (int k = 0; k < 6; ++k) {
             const float a = (rand() % 360) * 3.14159f / 180.f;
-            m_em->particles.push_back({ m_em->nextEntityId++, pos,
+            m_em->particles.push_back({ pos,
                 sf::Vector2f(std::cos(a), std::sin(a)) * (20.f + rand() % 40),
                 sf::Color(70, 55, 50, 170), 0.9f, 0.9f, 7.f + rand() % 5 });
         }

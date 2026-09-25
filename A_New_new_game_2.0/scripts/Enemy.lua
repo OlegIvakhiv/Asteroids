@@ -490,6 +490,17 @@ enemy_archetypes.WARDOG = derive {
         {  0,  12 },
         { -12, 18 }, { -9,   8 }, { -2,  -5 }, { -4, -10 },
     },
+
+    -- Plate COUNT is the tier read: fodder gets one strip, the Barge gets
+    -- eight. Authored starboard-only and mirrored at load unless `mirror =
+    -- false` (a plate that already crosses the centreline would double up --
+    -- which is exactly how the Barge ended up half-plated).
+    -- `shade` multiplies the LIVE hull fill, so panels flash and ramp with it
+    -- instead of sitting inert through hit flash and frenzy.
+    plates = {
+        { points = { { 0, -14 }, { 1.9, -4.3 }, { 0, 5 }, { -1.9, -4.3 } },
+          shade = 1.45, mirror = false, accent = true },     -- one welded strip
+    },
     turrets = {},
 
     scale                = 1.15,   -- WAS 0.85. Still the smallest hull in the
@@ -537,6 +548,13 @@ enemy_archetypes.RAIDER = derive {
         {  0, -10 }, {  8, -25 }, { 12, -10 }, { 25,   5 }, { 25,  15 },
         { 15,  10 }, {  0,  20 },
         { -15, 10 }, { -25, 15 }, { -25,  5 }, { -12, -10 }, { -8, -25 },
+    },
+
+    plates = {
+        { points = { { 0, -6 }, { 6, -18 }, { 9, -8 }, { 0, 12 } },
+          shade = 1.40, accent = true },                     -- prow cheek
+        { points = { { 14, -2 }, { 22, 6 }, { 20, 12 }, { 12, 8 } },
+          shade = 0.55 },                                    -- wing patch
     },
     turrets = {},
 
@@ -597,6 +615,21 @@ enemy_archetypes.BARGE = derive {
 
     -- One mount, slightly forward of amidships, so the sweep covers both
     -- broadsides cleanly and the ship reads as "main battery + hull".
+
+    -- Layered belts rather than one slab: a heavy is armoured in BANDS, and
+    -- the count is what sells it as the anchor of the roster.
+    plates = {
+        { points = { { -7, -58 }, { 7, -58 }, { 10, -10 }, { 9, 30 }, { 5, 56 }, { -5, 56 }, { -9, 30 }, { -10, -10 } },
+          shade = 1.30, mirror = false, accent = true },     -- dorsal spine, full width
+        { points = { { 12, -44 }, { 22, -31 }, { 21, -14 }, { 12, -16 } },
+          shade = 0.55 },                                    -- forward belt
+        { points = { { 13, -6 }, { 29, -4 }, { 28, 14 }, { 13, 12 } },
+          shade = 1.22, accent = true },                     -- mid flank band
+        { points = { { 11, 24 }, { 22.6, 25.7 }, { 20, 48 }, { 10, 44 } },
+          shade = 0.55 },                                    -- aft skirt
+        { points = { { 0, -72 }, { 7, -62 }, { 0, -48 }, { -7, -62 } },
+          shade = 1.60, mirror = false, accent = true },     -- prow wedge
+    },
     turrets = { { x = 0, y = -14 } },
 
     scale                = 0.85,   -- ~130 units long against the Raider's 45.
@@ -728,6 +761,15 @@ enemy_archetypes.BERSERKER = derive {
         {  12,   5 }, {   0,  25 },                         -- engine notch, tail
         { -12,   5 }, { -18,  10 }, { -28,   0 },           -- port wing
         { -16, -10 }, { -18, -40 }, {  -5, -20 },           -- port mandible
+    },
+
+    plates = {
+        { points = { { 0, -30 }, { 3, -18 }, { 7.1, -22.4 }, { 10, -12 } },
+          shade = 1.50, accent = true },                     -- mandible root
+        { points = { { 0, -10 }, { 12, -2 }, { 7.7, 11.3 }, { 0, 20 } },
+          shade = 0.55 },                                    -- body patch
+        { points = { { 0, -18 }, { 3, -8 }, { 0, 14 }, { -3, -8 } },
+          shade = 1.28, mirror = false },                    -- keel strip
     },
     turrets = {},
 
@@ -919,6 +961,15 @@ enemy_archetypes.MANIAC = derive {
         { -10,  15 }, { -20,  22 }, { -26,   8 },         -- left outward flank
         {  -8,  -2 }, { -16, -12 }, { -12, -28 },         -- left jaw + cavity
         {  -3,  -8 },
+    },
+
+    plates = {
+        { points = { { 1.9, -10.9 }, { 12, -24 }, { 13, -12 }, { 6, -4 } },
+          shade = 1.45, accent = true },                     -- open-front prong
+        { points = { { 10, 2 }, { 22, 10 }, { 16, 18 }, { 8, 12 } },
+          shade = 0.55 },                                    -- outrigger patch
+        { points = { { 0, -6 }, { 3, 2 }, { 0, 18 }, { -3, 2 } },
+          shade = 1.28, mirror = false },                    -- keel strip
     },
     turrets = {},
 

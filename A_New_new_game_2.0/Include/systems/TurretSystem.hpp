@@ -79,7 +79,7 @@ public:
         const sf::Vector2f playerVel(pvb.x * SCALE, pvb.y * SCALE);
 
         for (size_t i = 0; i < m_em->physics.size(); ++i) {
-            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(m_em->physics[i].bodyId);
+            BodyUserData* ud = bodyUD(m_em->physics[i].bodyId);
             if (!ud || ud->type != BodyType::Enemy) continue;
 
             auto& ec = m_em->enemies[i];

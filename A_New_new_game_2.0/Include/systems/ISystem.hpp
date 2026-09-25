@@ -16,6 +16,7 @@
 #include "core/EntityFactory.hpp"
 #include "core/EnemyArchetypes.hpp"
 #include "utils/DevState.hpp"
+#include "utils/ZoneArchetypes.hpp"
 #include <sol/sol.hpp>
 #include <box2d/box2d.h>
 #include <SFML/Graphics.hpp>
@@ -46,6 +47,13 @@ struct SystemContext {
     /// Dev-menu flags. Owned by SystemManager, survives restarts. Systems
     /// test `m_dev && m_dev->flag`, so a null pointer means "no cheats".
     DevState* dev = nullptr;
+    /// Which zone is live, and the loaded zone table. Owned by SystemManager.
+    /// Mutable on purpose: the CURRENT zone cannot be a value in this struct,
+    /// because systems cache the context by value in init() and it would
+    /// freeze at whatever was live when the game started.
+    /// def() returning nullptr is the supported "no zones.lua" path -- every
+    /// consumer falls back to its pre-zone behaviour rather than failing.
+    zonearch::ZoneState* zone = nullptr;
 };
 
 /**

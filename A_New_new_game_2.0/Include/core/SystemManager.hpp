@@ -14,6 +14,8 @@
 #include "utils/GameState.hpp"
 #include "utils/ShipDesign.hpp"
 #include "utils/DevState.hpp"
+#include "utils/ZoneArchetypes.hpp"
+#include "utils/LuaConfig.hpp"
 
 // Include all system headers
 #include "systems/ISystem.hpp"
@@ -38,6 +40,7 @@
 #include "systems/TurretSystem.hpp"          // turret AI
 #include "systems/VentQTESystem.hpp"        // vent QTE and overdrive
 #include "systems/DevSystem.hpp"            // tilde dev menu
+#include "systems/ZoneSystem.hpp"           // zone visuals + background props
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -60,6 +63,12 @@ public:
         worldDef.gravity = { 0.0f, 0.0f };
         m_worldId = b2CreateWorld(&worldDef);
         m_enemyRegistry.load(m_lua);
+
+        // Zones are OPTIONAL, and are loaded here rather than in game.cpp so
+        // there is ONE place that runs zones.lua. A failed load leaves
+        // ZoneState::def() null and every consumer falls back to its pre-zone
+        // behaviour, so an install without scripts/zones.lua still runs.
+        reloadZones();
 
         // 2. Create Player
         m_playerEntityId = m_entityFactory.createPlayer(
@@ -105,8 +114,9 @@ public:
         m_entityManager.reserveAll(8192);
         m_debrisSystem.init(ctx);
         m_menuSystem.init(ctx);
+        m_zoneSystem.init(ctx);
         m_devSystem.init(ctx);
-        m_devSystem.setSystems(&m_enemySystem, &m_aiSystem, &m_debugSystem);
+        m_devSystem.setSystems(&m_enemySystem, &m_aiSystem, &m_debugSystem, &m_zoneSystem);
         if (m_shipDesign.mountedGuns().empty() && m_shipDesign.mountedEngines().empty())
             m_shipDesign.autoMount();
 
@@ -118,6 +128,12 @@ public:
     }
 
     void update(float realDt) {
+        // Before anything draws. The starfield is rendered ahead of the
+        // world-space pass, so regenerating it any later would leave one frame
+        // of the old sky under the new zone -- the exact frame the player is
+        // looking at when they switch.
+        m_zoneSystem.applyIfDirty();
+
         m_menuSystem.setState(m_state, m_entityManager.totalScore);
 
         // ====================================================================
@@ -146,6 +162,7 @@ public:
         // ====================================================================
         if (m_state == GameState::Paused) {
             m_window.setView(m_cameraSystem.getWorldView());
+            m_zoneSystem.update(0.f);
             m_particleSystem.update(0.f);
             m_renderSystem.update(0.f);
             m_debugSystem.update(0.f);
@@ -203,6 +220,7 @@ public:
 
         // ----- 3d. WORLD SPACE -----
         m_window.setView(m_cameraSystem.getWorldView());
+        m_zoneSystem.update(dt);      // backdrop: behind dust, debris and ships
         m_spaceDustSystem.update(dt);
         m_debrisSystem.update(dt);
         m_particleSystem.update(dt);
@@ -240,11 +258,22 @@ public:
      * registry reload, enemy.lua edits silently do nothing.
      */
     bool reloadScripts() {
+        // Invalidate every cached Lua table handle (luacfg::Table) and the
+        // ClassFeel cache. Bumped BEFORE running the scripts on purpose: if a
+        // script throws halfway, whatever globals it did replace are picked
+        // up next frame -- the same as the old uncached reads behaved.
+        luacfg::bumpEpoch();
         try {
             m_lua.script_file("scripts/player.lua");
             m_lua.script_file("scripts/asteroids.lua");
             m_lua.script_file("scripts/enemy.lua");
             m_enemyRegistry.load(m_lua);
+
+            // zones.lua is reloaded in the same breath, and the registry MUST
+            // be rebuilt with it: every ZoneDef holds a sol::table into the old
+            // Lua tables and re-running the script replaces those. Same
+            // stale-handle trap the enemy registry has.
+            reloadZones();
             std::cout << "Scripts reloaded!" << std::endl;
             return true;
         }
@@ -263,6 +292,52 @@ public:
     MenuSystem& getMenuSystem() { return m_menuSystem; }
     RefitSystem& getRefitSystem() { return m_refitSystem; }
     DevSystem& getDevSystem() { return m_devSystem; }
+    ZoneSystem& getZoneSystem() { return m_zoneSystem; }
+    zonearch::ZoneState& getZoneState() { return m_zoneState; }
+    const zonearch::ZoneRegistry& getZoneRegistry() const { return m_zoneRegistry; }
+
+    /// What game.cpp clears the window to. Falls back to the original
+    /// near-black when no zone is loaded.
+    sf::Color voidColor() const {
+        const zonearch::ZoneDef* z = m_zoneState.def();
+        return z ? z->voidColor : sf::Color(2, 3, 5);
+    }
+
+    /**
+     * @brief Load (or reload) zones.lua and rebuild the zone table.
+     *
+     * Kept separate from reloadScripts() so init() can call it once at startup,
+     * where a missing file is a warning rather than a fatal error. Holds the
+     * CURRENT zone by KEY across the reload: zone ids come from `zone_order`,
+     * and an edit to that list would otherwise silently move you to a
+     * different zone.
+     */
+    bool reloadZones() {
+        const zonearch::ZoneDef* before = m_zoneState.def();
+        const std::string key = before ? before->key : std::string();
+
+        luacfg::bumpEpoch();   // see reloadScripts()
+        try {
+            m_lua.script_file("scripts/zones.lua");
+        }
+        catch (const std::exception& e) {
+            std::cerr << "[SystemManager] scripts/zones.lua not loaded: "
+                << e.what() << "\n  Running without zones.\n";
+            return false;
+        }
+
+        m_zoneState.registry = &m_zoneRegistry;
+        if (!m_zoneRegistry.load(m_lua)) return false;
+
+        const uint8_t id = key.empty() ? m_zoneRegistry.defaultId()
+            : m_zoneRegistry.idOf(key);
+        m_zoneState.current = (id == zonearch::INVALID_ZONE)
+            ? m_zoneRegistry.defaultId() : id;
+
+        // Live props hold PropDef pointers into the registry just rebuilt.
+        m_zoneState.dirty = true;
+        return true;
+    }
 
     /// Called by game.cpp when the menu confirms StartGame/RestartGame.
     void restart() {
@@ -310,6 +385,7 @@ public:
         m_hudSystem.init(ctx);
         m_debrisSystem.init(ctx);
         m_menuSystem.init(ctx);
+        m_zoneSystem.init(ctx);
         m_devSystem.init(ctx);
         if (m_shipDesign.mountedGuns().empty() && m_shipDesign.mountedEngines().empty())
             m_shipDesign.autoMount();
@@ -385,6 +461,7 @@ private:
         ctx.gameView = &m_gameView;
         ctx.enemyRegistry = &m_enemyRegistry;
         ctx.dev = &m_dev;
+        ctx.zone = &m_zoneState;
         return ctx;
     }
 
@@ -477,6 +554,11 @@ private:
     HudSystem m_hudSystem;
     DebrisSystem m_debrisSystem;
     MenuSystem m_menuSystem;
+
+    // ---- Zones ----
+    zonearch::ZoneRegistry m_zoneRegistry;
+    zonearch::ZoneState    m_zoneState;   ///< Survives restarts, like DevState
+    ZoneSystem             m_zoneSystem;
 
     // ---- Dev ----
     DevState  m_dev;         ///< Declared before DevSystem only for readability; no ctor dependency.

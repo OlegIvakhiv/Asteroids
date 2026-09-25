@@ -53,6 +53,7 @@
 #pragma once
 
 #include "ISystem.hpp"
+#include "utils/LuaConfig.hpp"
 #include "utils/InputRegistry.hpp"
 #include "utils/GameConfig.hpp"
 #include "utils/ClassTuning.hpp"
@@ -499,7 +500,6 @@ public:
             playerStats.parryAnimTimer = parryAnimDuration;
             playerStats.parryCooldown = parryCooldownTime;
             playerStats.parryStartRotation = tf.rotation;
-            playerStats.parrySpinAngle = 0.f;
             playerStats.parryHitSomething = false;   // reset for this attempt
 
             m_em->addTrauma(animCfg("shake_parry_start", 0.18f));
@@ -520,10 +520,10 @@ public:
 
 private:
     /// Lua `refit` table. Every key optional; defaults are the tuned values.
+    /// Lua `refit` table, cached per config epoch (see LuaConfig.hpp).
+    luacfg::Table m_cfgRefit{ "refit" };
     float rcfg(const char* key, float def) const {
-        sol::optional<sol::table> v = (*m_lua)["refit"];
-        if (!v) return def;
-        return (*v)[key].get_or(def);
+        return m_cfgRefit.get(m_lua, key, def);
     }
 
     /**
@@ -558,10 +558,10 @@ private:
         }
     }
 
+    /// Lua `visuals` table, cached per config epoch (see LuaConfig.hpp).
+    luacfg::Table m_cfgVisuals{ "visuals" };
     float animCfg(const char* key, float def) const {
-        sol::optional<sol::table> v = (*m_lua)["visuals"];
-        if (!v) return def;
-        return (*v)[key].get_or(def);
+        return m_cfgVisuals.get(m_lua, key, def);
     }
 
     EntityManager* m_em = nullptr;

@@ -74,13 +74,29 @@ struct BodyUserData {
     uint32_t entityId;
 };
 
-/**
- * @brief Temporary entity data structure (legacy, kept for compatibility)
- */
-struct EntityData {
-    BodyType type;
-    size_t id;
-};
+// ----------------------------------------------------------------------------
+// BodyUserData access -- the ONE place the void* cast lives.
+// Every entity body gets a BodyUserData in EntityFactory; a null result means
+// "not one of ours" (or already destroyed), never "some other type".
+// ----------------------------------------------------------------------------
+
+/// The body's BodyUserData, or nullptr.
+inline BodyUserData* bodyUD(b2BodyId id) {
+    return static_cast<BodyUserData*>(b2Body_GetUserData(id));
+}
+
+/// The body's type, or `fallback` when it has no user data. The fallback
+/// defaults to Asteroid because that is what every existing call site used.
+inline BodyType bodyTypeOf(b2BodyId id, BodyType fallback = BodyType::Asteroid) {
+    const BodyUserData* ud = bodyUD(id);
+    return ud ? ud->type : fallback;
+}
+
+/// True only if the body has user data AND it is of type `t`.
+inline bool isBodyType(b2BodyId id, BodyType t) {
+    const BodyUserData* ud = bodyUD(id);
+    return ud && ud->type == t;
+}
 
 /**
  * @class EntityManager
@@ -159,7 +175,7 @@ public:
         // the world (and the bodies with it) goes away underneath us.
         for (auto& p : physics) {
             if (b2Body_IsValid(p.bodyId)) {
-                delete (BodyUserData*)b2Body_GetUserData(p.bodyId);
+                delete bodyUD(p.bodyId);
             }
         }
 
@@ -339,7 +355,7 @@ public:
         uint32_t entityId = transforms[index].entityId;
 
         // 1.2 Delete BodyUserData
-        delete (BodyUserData*)b2Body_GetUserData(physics[index].bodyId);
+        delete bodyUD(physics[index].bodyId);
 
         // 2. Clean up Box2D physics body
         b2DestroyBody(physics[index].bodyId);
@@ -439,13 +455,7 @@ public:
             float speed = (rand() % 100) / 10.f + 2.f;
             float life = 0.5f + (rand() % 50) / 100.f;
             float pSize = baseSize * (0.5f + (rand() % 100) / 100.f);
-            uint32_t entityId = nextEntityId++;
-
-
-
-
             particles.push_back({
-                entityId,
                 pos,
                 { std::cos(angle) * speed * 20.f, std::sin(angle) * speed * 20.f },
                 color,
@@ -470,7 +480,6 @@ public:
      */
     void spawnImpact(sf::Vector2f pos, sf::Color color, sf::Vector2f bulletVelocity) {
         int count = 5 + (rand() % 4);
-        uint32_t entityId = nextEntityId++;
 
         // Direction opposite to bullet travel
         sf::Vector2f reverseDir = -bulletVelocity;
@@ -496,7 +505,6 @@ public:
             sparkColor.b = std::min(255, sparkColor.b + 50);
 
             particles.push_back({
-                entityId,
                 pos,
                 dir * speed * 25.f,
                 sparkColor,
@@ -509,8 +517,6 @@ public:
 
 
     void spawnShockwave(sf::Vector2f pos, float radius, sf::Color color) {
-        int numParticles = 360 / 15;  // 24 particles
-
         for (int angle = 0; angle < 360; angle += 15) {
             float rad = angle * 3.14159f / 180.f;
             sf::Vector2f dir(std::cos(rad), std::sin(rad));
@@ -518,10 +524,7 @@ public:
             sf::Vector2f particlePos = pos + sf::Vector2f(dir.x * radius, dir.y * radius);
             sf::Vector2f particleVel = sf::Vector2f(dir.x * 400, dir.y * 400);
 
-            uint32_t entityId = nextEntityId++;
-
             particles.push_back({
-                entityId,
                 particlePos,
                 particleVel,
                 color,
@@ -868,7 +871,6 @@ public:
             const float sp = radius * (0.9f + (rand() % 60) / 100.f);
             const float lf = 0.30f + (rand() % 30) / 100.f;
             particles.push_back({
-                nextEntityId++,
                 pos + sf::Vector2f(std::cos(a), std::sin(a)) * (radius * 0.12f),
                 sf::Vector2f(std::cos(a), std::sin(a)) * sp,
                 sf::Color(hot.r, hot.g, hot.b, 235),
@@ -884,7 +886,6 @@ public:
             const float sp = radius * (1.3f + (rand() % 140) / 100.f);
             const float lf = 0.55f + (rand() % 70) / 100.f;
             particles.push_back({
-                nextEntityId++,
                 pos,
                 sf::Vector2f(std::cos(a), std::sin(a)) * sp,
                 sf::Color(255, static_cast<uint8_t>(120 + rand() % 100), 40, 230),
@@ -918,7 +919,6 @@ public:
             const float sp = radius * (0.30f + (rand() % 40) / 100.f);
             const float lf = 0.9f + (rand() % 80) / 100.f;
             particles.push_back({
-                nextEntityId++,
                 pos + sf::Vector2f(std::cos(a), std::sin(a)) * (radius * 0.25f),
                 sf::Vector2f(std::cos(a), std::sin(a)) * sp,
                 sf::Color(deep.r, deep.g, deep.b, 170),

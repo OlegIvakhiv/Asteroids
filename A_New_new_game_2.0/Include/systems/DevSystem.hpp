@@ -53,6 +53,7 @@
 #include "systems/EnemySystem.hpp"
 #include "systems/AISystem.hpp"
 #include "systems/DebugSystem.hpp"
+#include "systems/ZoneSystem.hpp"
 #include <SFML/Graphics.hpp>
 #include <unordered_map>
 #include <vector>
@@ -76,6 +77,7 @@ public:
         m_gameView = ctx.gameView;
         m_registry = ctx.enemyRegistry;
         m_dev = ctx.dev;
+        m_zone = ctx.zone;
 
         m_ui.attach(m_window);
         m_pick = Pick::None;
@@ -91,10 +93,12 @@ public:
 
     /// Systems whose public API the menu drives. All three are owned by
     /// SystemManager and outlive this object.
-    void setSystems(EnemySystem* enemies, AISystem* ai, DebugSystem* debug) {
+    void setSystems(EnemySystem* enemies, AISystem* ai, DebugSystem* debug,
+        ZoneSystem* zones) {
         m_enemySys = enemies;
         m_aiSys = ai;
         m_debugSys = debug;
+        m_zoneSys = zones;
     }
 
     // ========================================================================
@@ -333,13 +337,13 @@ private:
     template <class F>
     void forEachEnemy(F&& fn) {
         for (size_t i = 0; i < m_em->physics.size(); ++i) {
-            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(m_em->physics[i].bodyId);
+            BodyUserData* ud = bodyUD(m_em->physics[i].bodyId);
             if (ud && ud->type == BodyType::Enemy) fn(i);
         }
     }
 
     BodyType typeAt(size_t i) const {
-        BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(m_em->physics[i].bodyId);
+        BodyUserData* ud = bodyUD(m_em->physics[i].bodyId);
         return ud ? ud->type : BodyType::Asteroid;
     }
 
@@ -788,6 +792,27 @@ private:
 
     // ---- WORLD ----
     void tabWorld(float& y) {
+        heading(y, "ZONE");
+        if (!m_zone || !m_zone->registry || m_zone->registry->empty()) {
+            line(y, "NO ZONES LOADED -- CHECK CONSOLE", tui::RED);
+        }
+        else {
+            const auto& all = m_zone->registry->all();
+            const int n = static_cast<int>(all.size());
+            const int cur = (m_zone->current < all.size())
+                ? static_cast<int>(m_zone->current) : 0;
+
+            if (int d = stepper(y, "ZONE", all[static_cast<size_t>(cur)].display)) {
+                const int next = wrap(cur, d, n);
+                m_zone->set(static_cast<uint8_t>(next));
+                toast("ZONE: " + all[static_cast<size_t>(next)].display);
+            }
+            // A switch changes what spawns from now on; it does not sweep the
+            // field. CLEAR ASTEROIDS and KILL ALL below are the sweep, and
+            // keeping them apart means switching zones is never destructive.
+            line(y, "AFFECTS NEW SPAWNS ONLY", tui::TEXT_DIM);
+        }
+
         heading(y, "SPAWNERS");
         toggle(y, "ENEMY DIRECTOR", m_dev->directorOn);
         toggle(y, "ASTEROID SPAWNER", m_dev->asteroidSpawnerOn);
@@ -1073,6 +1098,15 @@ private:
         row(b, tui::TEXT_DIM);
         std::snprintf(b, sizeof(b), "DEBRIS %zu", m_em->debris.size());
         row(b, tui::TEXT_DIM);
+
+        // Props are NOT entities -- no body, no component rows -- so they are
+        // reported apart from the reserve they can never threaten.
+        const zonearch::ZoneDef* z = m_zone ? m_zone->def() : nullptr;
+        std::snprintf(b, sizeof(b), "ZONE %s", z ? z->display.c_str() : "-- none --");
+        row(b, z ? tui::CYAN : tui::TEXT_DIM);
+        std::snprintf(b, sizeof(b), "PROPS %zu (not entities)",
+            m_zoneSys ? m_zoneSys->propCount() : size_t{ 0 });
+        row(b, tui::TEXT_DIM);
         y += 4.f;
 
         // ---- Player ----
@@ -1149,9 +1183,12 @@ private:
     const enemyarch::EnemyRegistry* m_registry = nullptr;
     DevState* m_dev = nullptr;
 
+    zonearch::ZoneState* m_zone = nullptr;
+
     EnemySystem* m_enemySys = nullptr;
     AISystem* m_aiSys = nullptr;
     DebugSystem* m_debugSys = nullptr;
+    ZoneSystem* m_zoneSys = nullptr;
 
     tui::UI m_ui;
     tui::Rect m_panelRect;

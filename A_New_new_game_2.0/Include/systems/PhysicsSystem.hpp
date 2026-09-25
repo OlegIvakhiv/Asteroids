@@ -69,7 +69,7 @@ public:
         // Sync Box2D bodies to TransformComponents
         for (size_t i = 0; i < m_em->physics.size(); ++i) {
             b2BodyId bodyId = m_em->physics[i].bodyId;
-            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(bodyId);
+            BodyUserData* ud = bodyUD(bodyId);
             BodyType type = ud ? ud->type : BodyType::Asteroid; // fallback
 
             // Position: always sync
@@ -120,7 +120,7 @@ public:
             if (i == playerIdx) continue;
 
             b2BodyId bodyId = m_em->physics[i].bodyId;
-            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(bodyId);
+            BodyUserData* ud = bodyUD(bodyId);
             BodyType type = ud ? ud->type : BodyType::Asteroid;
             if (type == BodyType::Bullet) continue;
 

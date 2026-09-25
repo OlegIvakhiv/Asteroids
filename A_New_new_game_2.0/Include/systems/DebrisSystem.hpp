@@ -1,10 +1,10 @@
-/**
+ï»¿/**
  * @file DebrisSystem.hpp
  * @brief Decorative, non-physical rock shards thrown off by fracturing asteroids
  *
  * WHY THIS EXISTS SEPARATELY FROM PARTICLES AND FROM ASTEROIDS:
  *
- *   Particles are dots. They read as dust, sparks and smoke — fine for an
+ *   Particles are dots. They read as dust, sparks and smoke ï¿½ fine for an
  *   impact, useless for conveying that a solid object came apart. What sells a
  *   fracture is seeing angular, tumbling PIECES with straight edges.
  *
@@ -18,7 +18,7 @@
  *   polygon the parent actually had, so they look like genuine pieces of that
  *   specific rock rather than generic confetti.
  *
- * Everything renders as ONE vertex array of triangles — same single-draw-call
+ * Everything renders as ONE vertex array of triangles ï¿½ same single-draw-call
  * convention as ParticleSystem and BackgroundSystem.
  *
  * @author Oleg Ivakhiv
@@ -60,7 +60,7 @@ public:
             d.rotation += d.angularVelocity * dt;
 
             // Light drag so chunks settle instead of flying forever. Space has
-            // none, of course — but a chunk that drifts off-screen at constant
+            // none, of course ï¿½ but a chunk that drifts off-screen at constant
             // speed reads as a bug, and a slight decay reads as "settling".
             const float decay = std::exp(-0.55f * dt);
             d.velocity *= decay;
@@ -70,7 +70,7 @@ public:
         if (m_em->debris.empty()) return;
 
         // ====================================================================
-        // 2. DRAW — fan-triangulate each chunk into one vertex array
+        // 2. DRAW ï¿½ fan-triangulate each chunk into one vertex array
         // ====================================================================
         size_t triCount = 0;
         for (const auto& d : m_em->debris) {
@@ -78,7 +78,8 @@ public:
         }
         if (triCount == 0) return;
 
-        sf::VertexArray va(sf::PrimitiveType::Triangles, triCount * 3);
+        sf::VertexArray& va = m_verts;
+        va.resize(triCount * 3);   // every vertex is overwritten below
         size_t v = 0;
 
         for (const auto& d : m_em->debris) {
@@ -101,7 +102,7 @@ public:
                 return sf::Vector2f(
                     d.position.x + (p.x * cs - p.y * sn),
                     d.position.y + (p.x * sn + p.y * cs));
-            };
+                };
 
             for (int k = 1; k + 1 < d.pointCount; ++k) {
                 va[v++] = sf::Vertex{ worldPt(0),     c };
@@ -114,6 +115,10 @@ public:
     }
 
 private:
+    /// Reused every frame: resize() keeps capacity, so after the first busy
+    /// frame this never touches the allocator again.
+    sf::VertexArray m_verts{ sf::PrimitiveType::Triangles };
+
     EntityManager* m_em = nullptr;
     sf::RenderWindow* m_window = nullptr;
 };

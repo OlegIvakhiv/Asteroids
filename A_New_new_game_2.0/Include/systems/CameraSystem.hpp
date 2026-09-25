@@ -19,6 +19,7 @@
 #pragma once
 
 #include "ISystem.hpp"
+#include "utils/LuaConfig.hpp"
 #include "core/EntityManager.hpp"
 #include <SFML/Graphics.hpp>
 #include <cmath>
@@ -227,26 +228,11 @@ public:
         return v;
     }
 
-    /**
-     * @brief Generic screen-space view inheriting the camera's shake and zoom
-     *
-     * Fine for overlays that genuinely want to be centred on the window.
-     * Do NOT use it for the starfield � see makeStarView().
-     */
-    sf::View makeScreenView(const sf::View& base) const {
-        sf::View v = base;
-        v.setSize(base.getSize() * m_zoom);
-        v.setCenter(base.getCenter() + m_shakeOffset);
-        v.setRotation(sf::degrees(m_shakeAngle));
-        return v;
-    }
-
 private:
+    /// Lua `visuals` table, cached per config epoch (see LuaConfig.hpp).
+    luacfg::Table m_cfgVisuals{ "visuals" };
     float cfg(const char* key, float def) const {
-        if (!m_lua) return def;
-        sol::optional<sol::table> v = (*m_lua)["visuals"];
-        if (!v) return def;
-        return (*v)[key].get_or(def);
+        return m_cfgVisuals.get(m_lua, key, def);
     }
 
     // ---- Smooth 1D value noise ----

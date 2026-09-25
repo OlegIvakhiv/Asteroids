@@ -120,7 +120,6 @@ public:
                 if ((rand() % 100) < 45) {
                     const float a = (rand() % 360) * 3.14159f / 180.f;
                     m_em->particles.push_back({
-                        m_em->nextEntityId++,
                         tf.position + sf::Vector2f(std::cos(a), std::sin(a)) * 22.f,
                         sf::Vector2f(std::cos(a), std::sin(a)) * (40.f + rand() % 60),
                         sf::Color(140, 230, 255, 190),
@@ -272,8 +271,7 @@ private:
 
             for (int k = 0; k < 26; ++k) {
                 const float a = (rand() % 360) * 3.14159f / 180.f;
-                m_em->particles.push_back({
-                    m_em->nextEntityId++, tf.position,
+                m_em->particles.push_back({ tf.position,
                     sf::Vector2f(std::cos(a), std::sin(a)) * (150.f + rand() % 220),
                     ui::alpha(ui::AMBER_HOT, 0.90f), 0.42f, 0.5f, 3.f + rand() % 3 });
             }
@@ -291,8 +289,7 @@ private:
                 ui::BLUE_COOL, 4.f, 230.f);
             for (int k = 0; k < 14; ++k) {
                 const float a = (rand() % 360) * 3.14159f / 180.f;
-                m_em->particles.push_back({
-                    m_em->nextEntityId++, tf.position,
+                m_em->particles.push_back({ tf.position,
                     sf::Vector2f(std::cos(a), std::sin(a)) * (90.f + rand() % 130),
                     ui::alpha(ui::BLUE_COOL, 0.82f), 0.34f, 0.4f, 2.f + rand() % 3 });
             }

@@ -50,7 +50,7 @@ public:
             if (!b2Body_IsValid(bodyId)) continue;
 
             // Get body user data for type
-            BodyUserData* ud = (BodyUserData*)b2Body_GetUserData(bodyId);
+            BodyUserData* ud = bodyUD(bodyId);
             if (!ud) continue;
 
             // Get physics position and rotation

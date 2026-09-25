@@ -238,6 +238,9 @@ weapon = {
     rift_heat          = 52.0,   -- was 34 -> two rifts overheat you
     rift_charge_drain  = 14.0,
     rift_charge_trauma = 0.12,   -- was 0.20
+    rift_cooldown      = 2.0,    -- seconds between Rift shots. Was read by
+                                 -- WeaponSystem but never set here, so it
+                                 -- silently ran on the C++ default (also 2.0).
 
     -- ===== RIFT: shake (all reduced) =====
     rift_fire_trauma       = 0.40,  -- was 0.85

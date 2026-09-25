@@ -105,10 +105,11 @@ public:
      * Particles are drawn in world space (pixel coordinates) using
      * the currently active view.
      */
-    void drawParticles() const {
+    void drawParticles() {
         if (!m_window || m_em->particles.empty()) return;
 
-        sf::VertexArray va(sf::PrimitiveType::Triangles, m_em->particles.size() * 6);
+        sf::VertexArray& va = m_verts;
+        va.resize(m_em->particles.size() * 6);   // every vertex is overwritten below
 
         for (size_t i = 0; i < m_em->particles.size(); ++i) {
             size_t idx = i * 6;
@@ -149,6 +150,10 @@ public:
     }
 
 private:
+    /// Reused every frame: resize() keeps capacity, so after the first busy
+    /// frame this never touches the allocator again.
+    sf::VertexArray m_verts{ sf::PrimitiveType::Triangles };
+
     // ---- System dependencies (set via init) ----
     EntityManager* m_em = nullptr;
     sf::RenderWindow* m_window = nullptr;

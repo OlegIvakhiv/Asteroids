@@ -5,13 +5,18 @@
  * Responsible for creating player, asteroid, bullet, and enemy entities.
  * Uses EntityManager for storage and Box2D/Lua for configuration.
  *
+ * CHANGED in 1.2 -- ship wrecks: `wreck_of` reads the live archetype,
+ * damage tiers (WreckDetail.hpp), wreckTierOverride on createAsteroid.
+ *
  * @author Oleg Ivakhiv
- * @version 1.1
+ * @version 1.2
  */
 
 #pragma once
 
 #include "core/EnemyArchetypes.hpp"
+#include "utils/ScrapDetail.hpp"
+#include "utils/WreckDetail.hpp"
 #include "EntityManager.hpp"
 #include "utils/ShipDesign.hpp"
 #include <sol/sol.hpp>
@@ -278,6 +283,9 @@ public:
      * @param worldId Box2D world identifier
      * @param sizeRollOverride -1 = roll fresh; 0..1 = forced roll (used by
      *        fracture so a shard's size can be derived from its parent)
+     * @param wreckTierOverride -1 = roll from `wreck_damage`; 0..3 = force a
+     *        damage tier on a wreck type (0 = powered-down / ambush hull).
+     *        Ignored by anything that is not a wreck.
      * @return Persistent entity ID
      *
      * ==========================================================================
@@ -301,7 +309,7 @@ public:
      */
     uint32_t createAsteroid(EntityManager& em, sf::Vector2f pos, sf::Vector2f vel,
         float baseSize, sol::table config, b2WorldId worldId,
-        float sizeRollOverride = -1.f)
+        float sizeRollOverride = -1.f, int wreckTierOverride = -1)
     {
         uint32_t entityId = em.nextEntityId++;
         em.transforms.push_back({ entityId, pos, {0.f, 0.f}, {0.f, 0.f}, 0.f });
@@ -353,6 +361,12 @@ public:
         RenderComponent rc;
         std::vector<b2Vec2> physicsPoints;
 
+        // Wreck state. Declared up here because the silhouette code below
+        // jumps to `hull_done`, and a goto may not cross an initialisation.
+        bool isWreck = false;
+        wreckdetail::Source wreckSrc;
+        wreckdetail::Model  wreckModel;
+
         const float pixelRadius = finalSize * SCALE;
         int numPoints = 6;
         if (pixelRadius > 18.f) numPoints = 7;
@@ -364,22 +378,249 @@ public:
         // stay compact so they don't look like torn paper.
         const float jag = config["jaggedness"].get_or(0.40f);
 
-        for (int i = 0; i < numPoints; ++i) {
-            // Jitter the ANGLE as well as the radius. Evenly-spaced angles
-            // give a regular polygon no matter how much you vary the radius,
-            // which is why the old rocks still read as circles.
-            const float baseAngle = (i / (float)numPoints) * 2.f * 3.14159f;
-            const float angleJit = ((rand() % 100) / 100.f - 0.5f) * (1.2f / numPoints);
-            const float angle = baseAngle + angleJit;
+        // ====================================================================
+        // SILHOUETTE CLASS -- what separates a rock from a wreck
+        //
+        // The generator above makes one shape: a jittered circle. At gameplay
+        // distance jaggedness and colour barely register, so every type read
+        // as "rock" no matter how it was tuned. Silhouette is what the eye
+        // actually sorts on, and silhouette is ASPECT RATIO and REGULARITY.
+        //
+        //   elongation   1.0 = round rock. 2.5 = a long ship section. The
+        //                stretch axis is random per entity, so an elongated
+        //                type still fills the screen with varied angles.
+        //   angle_jitter 1.0 = organic (the original). 0.0 = evenly spaced
+        //                vertices, which reads as manufactured plate rather
+        //                than broken stone -- the difference between a rock
+        //                and a hull panel.
+        //
+        // Both default to the old behaviour, so every existing asteroid type
+        // is untouched by this.
+        //
+        // Note the stretch happens BEFORE the hull is built, so the physics
+        // shape is elongated too: a long wreck collides like a long wreck.
+        // ====================================================================
+        // ====================================================================
+        // AUTHORED HULL -- a wreck instead of a rock
+        //
+        // `hull_points` swaps the procedural jitter below for a real ship
+        // silhouette, scaled so its longest radius matches the rolled size.
+        // That is what lets a dead Raider drift through the field looking
+        // like a dead Raider rather than like a lumpy stone.
+        //
+        // `wreck_of = "BARGE"` goes one better: the hull, plates, nozzles,
+        // turret mounts and scars are read from the LIVE archetype in
+        // enemy.lua, so the wreck can never drift out of sync with the ship
+        // it used to be. An explicit `hull_points` (or `plates`, `thrusters`,
+        // `turrets`, `scars`) on the asteroid type still wins, per field.
+        //
+        // Three things have to be kept apart here:
+        //   VISUAL   the full concave outline, triangulated into rc.tris
+        //   OUTLINE  rc.shape, which SFML needs convex -- so it gets the hull
+        //   PHYSICS  the same convex hull, decimated to Box2D's 8-point cap
+        // Ships already make exactly this split (visual / physics); this is
+        // the same trick one layer down.
+        //
+        // WRECK TIERS. A wreck type (`wreck_of` or `wreck_damage` set) rolls
+        // a damage tier and is BITTEN before any of that split happens, so
+        // the torn silhouette is what gets drawn, what the physics hull is
+        // built from, and what the fracture path later cuts into wedges.
+        // See WreckDetail.hpp.
+        // ====================================================================
+        {
+            sol::state_view sv(config.lua_state());
 
-            const float noise = (rand() % 100) / 100.f;
-            const float dist = pixelRadius * (1.f - jag * 0.5f + noise * jag);
+            sol::optional<sol::table> arch;
+            const std::string wreckOf = config["wreck_of"].get_or<std::string>("");
+            if (!wreckOf.empty()) {
+                sol::optional<sol::table> ea = sv["enemy_archetypes"];
+                if (ea) arch = (*ea)[wreckOf].get<sol::optional<sol::table>>();
+                if (!arch)
+                    std::cerr << "[EntityFactory] wreck_of = \"" << wreckOf
+                    << "\" -- no such enemy archetype. Using hull_points if set, else a plain rock.\n";
+            }
+            sol::optional<sol::table> wreckDamage = config["wreck_damage"];
+            isWreck = arch.has_value() || wreckDamage.has_value();
 
-            const float px = std::cos(angle) * dist;
-            const float py = std::sin(angle) * dist;
-            rc.shape.setPoint(i, { px, py });
-            physicsPoints.push_back({ px / SCALE, py / SCALE });
+            sol::optional<sol::table> hp = config["hull_points"];
+            if (!hp && arch) hp = (*arch)["hull"].get<sol::optional<sol::table>>();
+
+            if (hp && hp->size() >= 3) {
+                std::vector<sf::Vector2f> pts = readLuaPoints(*hp);
+                float maxR = 0.f;
+                for (const auto& q : pts) maxR = std::max(maxR, std::sqrt(q.x * q.x + q.y * q.y));
+
+                if (pts.size() >= 3 && maxR > 0.01f) {
+                    const float k = pixelRadius / maxR;
+                    for (auto& q : pts) { q.x *= k; q.y *= k; }
+
+                    if (enemyarch::geom::signedArea(pts) < 0.f)
+                        std::reverse(pts.begin(), pts.end());
+
+                    if (isWreck) {
+                        wreckSrc = readWreckSource(config, arch, pts, k);
+                        const int tier = rollWreckTier(sv, wreckDamage, wreckTierOverride);
+                        const uint32_t seed = (static_cast<uint32_t>(rand()) * 2654435761u)
+                            ^ (entityId * 40503u) ^ 0x9E3779B9u;
+                        wreckModel = wreckdetail::build(wreckSrc, tier, seed);
+                        if (wreckModel.hull.size() >= 3) pts = wreckModel.hull;
+                    }
+
+                    rc.tris = enemyarch::geom::triangulate(pts);
+
+                    std::vector<sf::Vector2f> convex = enemyarch::geom::decimateConvex(
+                        enemyarch::geom::convexHull(pts), 8);
+
+                    // The SHAPE keeps the real silhouette, not the convex
+                    // hull. It previously held the hull, whose outline traced
+                    // a blunt shell around the ship and read as a debug
+                    // hitbox rather than as a wreck. Only PHYSICS needs the
+                    // convex version.
+                    rc.shape.setPointCount(pts.size());
+                    for (size_t i = 0; i < pts.size(); ++i)
+                        rc.shape.setPoint(static_cast<unsigned>(i), pts[i]);
+                    for (const auto& c : convex)
+                        physicsPoints.push_back({ c.x / SCALE, c.y / SCALE });
+                    goto hull_done;   // skip the procedural silhouette below
+                }
+            }
+            isWreck = false;   // opted in, but nothing to build it from
         }
+
+        // ====================================================================
+        // CLUMP -- a pile of junk that got stuck together
+        //
+        // The ordinary generator jitters ONE circle, which always reads as a
+        // rock no matter how the roughness is tuned: one closed convex-ish
+        // blob is what stone looks like. A salvage pile is not one object, it
+        // is several fused, and the giveaway is the SEAM -- the concave valley
+        // where two lumps meet.
+        //
+        // So the silhouette is the union of a few offset discs. Sampling the
+        // outer envelope of that union gives bumps where a disc sticks out and
+        // gaps where two of them meet, which is exactly the lumpy read. More
+        // lobes on the bigger types, so size shows in the shape as well as in
+        // the colour.
+        //
+        // Visual keeps the full concave outline via rc.tris; PHYSICS takes the
+        // convex hull, capped at Box2D's 8 points -- the same split ship-hull
+        // wrecks already use, so a clump costs nothing new.
+        // ====================================================================
+        {
+            int lobes = config["clump_lobes"].get_or(0);
+            if (lobes >= 2) {
+                const auto frand = []() { return (rand() % 1000) / 1000.f; };
+
+                lobes = std::clamp(lobes + (rand() % 3 - 1), 2, 6);
+                const float spread = config["clump_spread"].get_or(0.66f);
+                const float lobeVar = config["clump_lobe_var"].get_or(0.35f);
+                // Lobe radius and core radius are explicit, because they ARE
+                // the seam depth: lobes wide enough to swallow the valleys
+                // give a rock again, and a fat core fills them from inside.
+                const float lobeR = config["clump_lobe_r"].get_or(0.46f);
+                const float coreR = config["clump_core"].get_or(0.36f);
+                const float rough = config["clump_roughness"].get_or(0.10f);
+
+                struct Lobe { float x, y, r; };
+                std::vector<Lobe> L;
+                L.reserve(static_cast<size_t>(lobes) + 1);
+                for (int i = 0; i < lobes; ++i) {
+                    const float a = (i / static_cast<float>(lobes)) * 6.28318f
+                        + (frand() - 0.5f) * (5.2f / lobes);
+                    const float d = pixelRadius * spread * (0.70f + frand() * 0.6f);
+                    const float rr = pixelRadius * lobeR
+                        * (1.f + (frand() * 2.f - 1.f) * lobeVar);
+                    L.push_back({ std::cos(a) * d, std::sin(a) * d, std::max(3.f, rr) });
+                }
+                // A core lobe, so the middle is never hollow and the union
+                // stays a single connected shape.
+                L.push_back({ 0.f, 0.f, pixelRadius * coreR });
+
+                // 20 samples: enough for a seam to be visible as a notch
+                // rather than as a single flat cut.
+                const int N = 20;
+                std::vector<sf::Vector2f> pts;
+                pts.reserve(N);
+                float maxR = 0.001f;
+                for (int k = 0; k < N; ++k) {
+                    const float th = (k / static_cast<float>(N)) * 6.28318f;
+                    const float cx = std::cos(th), cy = std::sin(th);
+
+                    // Distance from the origin to the far side of each disc
+                    // along this ray; the envelope is the largest of them.
+                    float best = 0.f;
+                    for (const auto& lo : L) {
+                        const float proj = lo.x * cx + lo.y * cy;
+                        const float perp2 = (lo.x * lo.x + lo.y * lo.y) - proj * proj;
+                        const float disc = lo.r * lo.r - perp2;
+                        if (disc <= 0.f) continue;          // ray misses this lobe
+                        best = std::max(best, proj + std::sqrt(disc));
+                    }
+                    if (best < pixelRadius * 0.18f) best = pixelRadius * 0.18f;
+                    best *= 1.f + (frand() * 2.f - 1.f) * rough;
+                    maxR = std::max(maxR, best);
+                    pts.push_back({ cx * best, cy * best });
+                }
+
+                // Normalise so the rolled size still means what it says --
+                // the union can overshoot pixelRadius, and the size bands are
+                // what tell small salvage from medium.
+                const float k = pixelRadius / maxR;
+                for (auto& q : pts) { q.x *= k; q.y *= k; }
+
+                if (enemyarch::geom::signedArea(pts) < 0.f)
+                    std::reverse(pts.begin(), pts.end());
+                rc.tris = enemyarch::geom::triangulate(pts);
+
+                rc.shape.setPointCount(pts.size());
+                for (size_t i = 0; i < pts.size(); ++i)
+                    rc.shape.setPoint(static_cast<unsigned>(i), pts[i]);
+
+                for (const auto& c : enemyarch::geom::decimateConvex(
+                    enemyarch::geom::convexHull(pts), 8))
+                    physicsPoints.push_back({ c.x / SCALE, c.y / SCALE });
+
+                goto hull_done;
+            }
+        }
+
+        {
+            const float elong = std::max(0.2f, config["elongation"].get_or(1.0f));
+            const float jitterScale = std::clamp(config["angle_jitter"].get_or(1.0f), 0.f, 2.f);
+            const float stretchAngle = ((rand() % 360) / 180.f) * 3.14159f;
+            const float sCos = std::cos(stretchAngle), sSin = std::sin(stretchAngle);
+
+            // Area is held roughly constant while stretching, so an elongated type
+            // does not also become a heavier type by accident -- density and mass
+            // come from the hull Box2D computes from these points.
+            const float ex = std::sqrt(elong);
+            const float ey = 1.f / ex;
+
+            for (int i = 0; i < numPoints; ++i) {
+                // Jitter the ANGLE as well as the radius. Evenly-spaced angles
+                // give a regular polygon no matter how much you vary the radius,
+                // which is why the old rocks still read as circles.
+                const float baseAngle = (i / (float)numPoints) * 2.f * 3.14159f;
+                const float angleJit = ((rand() % 100) / 100.f - 0.5f)
+                    * (1.2f / numPoints) * jitterScale;
+                const float angle = baseAngle + angleJit;
+
+                const float noise = (rand() % 100) / 100.f;
+                const float dist = pixelRadius * (1.f - jag * 0.5f + noise * jag);
+
+                // Stretch along a random axis: rotate in, scale, rotate back.
+                const float ux = std::cos(angle) * dist;
+                const float uy = std::sin(angle) * dist;
+                const float lx = (ux * sCos + uy * sSin) * ex;
+                const float ly = (-ux * sSin + uy * sCos) * ey;
+                const float px = lx * sCos - ly * sSin;
+                const float py = lx * sSin + ly * sCos;
+
+                rc.shape.setPoint(i, { px, py });
+                physicsPoints.push_back({ px / SCALE, py / SCALE });
+            }
+        }
+    hull_done:
 
         b2ShapeDef shapeDef = b2DefaultShapeDef();
         shapeDef.filter.categoryBits = CATEGORY_ASTEROID;
@@ -434,6 +675,40 @@ public:
         em.healths.back().visualRadius = pixelRadius;
         em.healths.back().asteroidTier = static_cast<uint8_t>(config["tier"].get_or(0));
 
+        // Optional: what this rock breaks into. Truncated rather than
+        // rejected if someone writes a 20-character type name -- the lookup
+        // then fails loudly in FractureImpl instead of corrupting memory here.
+        {
+            em.healths.back().childInheritColor = config["child_inherit_color"].get_or(false);
+            em.healths.back().metallic = config["metallic"].get_or(false);
+
+            // Per-type core, falling back to the global visual so nothing
+            // that relied on `magma_core_size` changes behaviour.
+            {
+                // createAsteroid only receives the config table, so the
+                // global fallback is reached through that table's own state.
+                sol::state_view sv(config.lua_state());
+                sol::optional<sol::table> av = sv["asteroid_visuals"];
+                const float globalCore = av ? (*av)["magma_core_size"].get_or(0.f) : 0.f;
+                em.healths.back().magmaCore = std::max(0.f,
+                    config["core_size"].get_or(globalCore));
+            }
+
+            const std::string ca = config["child_alt"].get_or<std::string>("");
+            auto& adst = em.healths.back().childAlt;
+            const size_t an = std::min(ca.size(), sizeof(adst) - 1);
+            std::memcpy(adst, ca.data(), an);
+            adst[an] = '\0';
+            em.healths.back().childAltPct = static_cast<uint8_t>(
+                std::clamp(config["child_alt_chance"].get_or(0.f), 0.f, 100.f));
+
+            const std::string ct = config["child_type"].get_or<std::string>("");
+            auto& dst = em.healths.back().childType;
+            const size_t n = std::min(ct.size(), sizeof(dst) - 1);
+            std::memcpy(dst, ct.data(), n);
+            dst[n] = '\0';
+        }
+
         em.bullets.push_back({ entityId });
         em.scoreRewards.push_back(config["score_reward"].get_or(10));
         // NOTE: the second `em.players.push_back({})` that used to live here has
@@ -446,12 +721,16 @@ public:
         // COLOUR — tinted per type, with per-rock variation
         // ====================================================================
         sol::table col = config["color"];
-        const int cr = col["r"].get_or(60);
-        const int cg = col["g"].get_or(55);
-        const int cb = col["b"].get_or(50);
+        int cr = col["r"].get_or(60);
+        int cg = col["g"].get_or(55);
+        int cb = col["b"].get_or(50);
 
         // Bigger rocks read slightly darker and denser; chips catch more light.
-        const float lift = (1.15f - 0.35f * std::clamp(pixelRadius / 50.f, 0.f, 1.f));
+        // Not wrecks: their `color` IS the cold hull colour from the design
+        // lab, and the tier ramp in WreckDetail already darkens it -- lifting
+        // it again would bury a Barge in the background.
+        const float lift = isWreck ? 1.f
+            : (1.15f - 0.35f * std::clamp(pixelRadius / 50.f, 0.f, 1.f));
         const int jitter = (rand() % 22) - 8;
 
         auto ch = [&](int base) {
@@ -459,12 +738,111 @@ public:
                 static_cast<int>(base * lift) + jitter, 0, 255));
             };
 
+        // Optional second palette, picked per rock. One salvage field should
+        // hold both rusted iron and bare steel; without this every piece of a
+        // given type came out the same hue and the field read as one material.
+        {
+            sol::optional<sol::table> alt = config["color_alt"];
+            if (alt && (rand() % 100) < 50) {
+                cr = (*alt)["r"].get_or(static_cast<int>(cr));
+                cg = (*alt)["g"].get_or(static_cast<int>(cg));
+                cb = (*alt)["b"].get_or(static_cast<int>(cb));
+            }
+        }
+
         rc.shape.setFillColor(sf::Color(ch(cr), ch(cg), ch(cb)));
         rc.shape.setOutlineColor(sf::Color(
             std::min(255, ch(cr) + 45),
             std::min(255, ch(cg) + 45),
             std::min(255, ch(cb) + 50)));
         rc.shape.setOutlineThickness(pixelRadius > 25.f ? 2.5f : 1.8f);
+
+        // ====================================================================
+        // LAYERED DETAIL
+        //
+        // `detail = "cluster"` rebuilds the object entirely as overlapping
+        // plates; `detail = "rock"` cuts facets and craters into the outline
+        // already generated above. Both bake their colours from the fill just
+        // resolved, so the rust/steel and dark-when-big ramps carry through,
+        // and both roll every feature per object -- two piles of the same type
+        // never come out the same.
+        //
+        // A cluster replaces the silhouette, so its physics points are taken
+        // from the union's hull instead of whatever was built above.
+        // ====================================================================
+        {
+            const std::string detail = config["detail"].get_or<std::string>("");
+            const sf::Color baseCol = rc.shape.getFillColor();
+
+            if (detail == "cluster") {
+                scrapdetail::Detail det = scrapdetail::buildCluster(
+                    pixelRadius, baseCol,
+                    config["cluster_chunks"].get_or(4),
+                    config["cluster_spread"].get_or(0.52f),
+                    config["cluster_gaps"].get_or(2),
+                    config["cluster_struts"].get_or(3));
+
+                if (!det.outline.empty()) {
+                    rc.detailTris = std::move(det.tris);
+                    rc.detailLines = std::move(det.lines);
+                    rc.tris.clear();
+                    rc.shape.setOutlineThickness(0.f);   // plates carry their own
+
+                    physicsPoints.clear();
+                    rc.shape.setPointCount(det.outline.size());
+                    for (size_t i = 0; i < det.outline.size(); ++i) {
+                        rc.shape.setPoint(static_cast<unsigned>(i), det.outline[i]);
+                        physicsPoints.push_back({ det.outline[i].x / SCALE,
+                                                  det.outline[i].y / SCALE });
+                    }
+                }
+            }
+            else if (detail == "rock") {
+                std::vector<sf::Vector2f> body;
+                body.reserve(rc.shape.getPointCount());
+                for (size_t i = 0; i < rc.shape.getPointCount(); ++i)
+                    body.push_back(rc.shape.getPoint(static_cast<unsigned>(i)));
+
+                scrapdetail::Detail det = scrapdetail::buildRock(
+                    body, baseCol, config["rock_craters"].get_or(2),
+                    config["rock_facets"].get_or(true));
+                if (!det.tris.empty()) {
+                    rc.detailTris = std::move(det.tris);
+                    rc.detailLines = std::move(det.lines);
+                    rc.tris.clear();
+                }
+            }
+        }
+
+        // ====================================================================
+        // WRECK DETAIL -- the cold-wreck scene: armour, soot, breaches, pits,
+        // scars, peeled plates, dead nozzles and turrets, dark outline. One
+        // baked triangle list on the existing detail path, so the world
+        // transform and the hit flash come for free.
+        //
+        // The starlit rim is NOT baked: it depends on which way the hull
+        // faces the light, and wrecks spin. RenderSystem draws it per frame
+        // for anything with wreckTier >= 0.
+        //
+        // `shape` keeps the cold colour as its fill: that is what the
+        // fracture path reads back, so scrap from a rust Barge is rust.
+        // ====================================================================
+        if (isWreck) {
+            const sf::Color cold = rc.shape.getFillColor();
+            rc.detailTris = wreckdetail::bake(wreckSrc, wreckModel, cold);
+            rc.detailLines.clear();
+            rc.shape.setOutlineThickness(0.f);   // outline + rim are drawn elsewhere
+            rc.wreckTier = static_cast<int8_t>(wreckModel.tier);
+        }
+
+        // Hull-shaped objects DO get a stroke. They lost it when the outline
+        // was still being traced around the convex HULL, which drew a blunt
+        // shell that read as a debug collider. The shape now holds the true
+        // silhouette, so the stroke follows the real edge -- and without it a
+        // dark wreck on a near-black background has nothing to catch the eye.
+        // `hull_outline = false` opts a type out.
+        if (!rc.tris.empty() && !config["hull_outline"].get_or(true))
+            rc.shape.setOutlineThickness(0.f);
 
         // Small rocks tumble faster — angular momentum for a given impulse
         // scales inversely with moment of inertia.
@@ -1010,5 +1388,113 @@ public:
         em.entityIdMap[entityId] = em.transforms.size() - 1;
 
         return entityId;
+    }
+
+private:
+    // ========================================================================
+    // WRECK HELPERS
+    // ========================================================================
+
+    /// `{ {x,y}, ... }` or `{ {x=..,y=..}, ... }` -- archetype turrets use the
+    /// second form, everything else the first.
+    static std::vector<sf::Vector2f> readLuaPoints(const sol::table& arr) {
+        std::vector<sf::Vector2f> out;
+        for (size_t i = 1; i <= arr.size(); ++i) {
+            sol::optional<sol::table> v = arr[i];
+            if (!v) continue;
+            const float x = (*v)["x"].valid() ? (*v)["x"].get_or(0.f) : (*v)[1].get_or(0.f);
+            const float y = (*v)["y"].valid() ? (*v)["y"].get_or(0.f) : (*v)[2].get_or(0.f);
+            out.push_back({ x, y });
+        }
+        return out;
+    }
+
+    /// Everything authored about the dead ship, scaled by `k` into the same
+    /// pixel space as the hull. Plates mirror exactly as the live archetype
+    /// does: authored starboard-only unless `mirror = false`.
+    static wreckdetail::Source readWreckSource(const sol::table& config,
+        const sol::optional<sol::table>& arch, const std::vector<sf::Vector2f>& hullPx, float k)
+    {
+        // Per field: the asteroid type first, then the live archetype.
+        const auto field = [&](const char* key) -> sol::optional<sol::table> {
+            sol::optional<sol::table> own = config[key];
+            if (own) return own;
+            if (arch) return (*arch)[key].get<sol::optional<sol::table>>();
+            return sol::nullopt;
+            };
+
+        wreckdetail::Source src;
+        src.hull = hullPx;
+        src.unit = k;
+
+        if (auto plates = field("plates")) {
+            for (size_t i = 1; i <= plates->size(); ++i) {
+                sol::optional<sol::table> e = (*plates)[i];
+                if (!e) continue;
+                sol::optional<sol::table> pts = (*e)["points"];
+                if (!pts) continue;
+                wreckdetail::Plate pl;
+                pl.shade = (*e)["shade"].get_or(1.35f);
+                pl.accent = (*e)["accent"].get_or(false);
+                pl.pts = readLuaPoints(*pts);
+                if (pl.pts.size() < 3) continue;
+                for (auto& v : pl.pts) { v.x *= k; v.y *= k; }
+                src.plates.push_back(pl);
+                if ((*e)["mirror"].get_or(true)) {
+                    for (auto& v : pl.pts) v.x = -v.x;
+                    src.plates.push_back(std::move(pl));
+                }
+            }
+        }
+        if (auto t = field("thrusters")) {
+            src.thrusters = readLuaPoints(*t);
+            for (auto& v : src.thrusters) { v.x *= k; v.y *= k; }
+        }
+        if (auto t = field("turrets")) {
+            src.turrets = readLuaPoints(*t);
+            for (auto& v : src.turrets) { v.x *= k; v.y *= k; }
+        }
+        if (auto scars = field("scars")) {
+            for (size_t i = 1; i <= scars->size(); ++i) {
+                sol::optional<sol::table> line = (*scars)[i];
+                if (!line) continue;
+                auto pts = readLuaPoints(*line);
+                for (auto& v : pts) { v.x *= k; v.y *= k; }
+                if (pts.size() >= 2) src.scars.push_back(std::move(pts));
+            }
+        }
+        // A number, not a table, so it gets its own fallback chain. Reading
+        // only the asteroid config would silently hand every Berserker the
+        // 1.6 default instead of its authored width.
+        src.scarWidth = config["scar_width"].get_or(
+            arch ? (*arch)["scar_width"].get_or(1.6f) : 1.6f);
+        return src;
+    }
+
+    /**
+     * @brief Which damage tier a new wreck rolls.
+     *
+     * Priority: the caller's override, then `asteroid_visuals.wreck_force_tier`
+     * (a QA switch -- set it and F5 to see every wreck at one tier), then a
+     * weighted roll over `wreck_damage = { w0, w1, w2, w3 }`.
+     */
+    static int rollWreckTier(sol::state_view sv, const sol::optional<sol::table>& weights,
+        int overrideTier)
+    {
+        if (overrideTier >= 0) return std::clamp(overrideTier, 0, 3);
+
+        sol::optional<sol::table> av = sv["asteroid_visuals"];
+        const int forced = av ? (*av)["wreck_force_tier"].get_or(-1) : -1;
+        if (forced >= 0) return std::clamp(forced, 0, 3);
+
+        float w[4] = { 1.f, 3.f, 4.f, 2.f };
+        if (weights)
+            for (int t = 0; t < 4; ++t) w[t] = std::max(0.f, (*weights)[t + 1].get_or(0.f));
+        const float total = w[0] + w[1] + w[2] + w[3];
+        if (total <= 0.f) return 2;
+
+        float r = (rand() % 10000) / 10000.f * total;
+        for (int t = 0; t < 4; ++t) { if (r < w[t]) return t; r -= w[t]; }
+        return 3;
     }
 };

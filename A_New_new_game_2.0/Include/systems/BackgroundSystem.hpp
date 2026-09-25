@@ -93,13 +93,11 @@ public:
      * The stars are drawn in screen space (pixel coordinates) using
      * the default view, so they stay fixed relative to the screen.
      */
-    void drawStars() const {
+    void drawStars() {
         if (!m_window || m_em->stars.empty()) return;
 
-        sf::VertexArray va(sf::PrimitiveType::Triangles);
-
-        // Reserve memory for better performance (6 vertices per star)
-        va.resize(m_em->stars.size() * 6);
+        sf::VertexArray& va = m_starVerts;
+        va.resize(m_em->stars.size() * 6);   // every vertex is overwritten below
 
         size_t vertexIndex = 0;
         for (const auto& star : m_em->stars) {
@@ -124,6 +122,10 @@ public:
     }
 
 private:
+    /// Reused every frame: resize() keeps capacity, so after the first busy
+    /// frame this never touches the allocator again.
+    sf::VertexArray m_starVerts{ sf::PrimitiveType::Triangles };
+
     // ---- System dependencies (set via init) ----
     EntityManager* m_em = nullptr;
     sf::RenderWindow* m_window = nullptr;

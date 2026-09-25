@@ -3,7 +3,7 @@
  * @brief Main game loop and entry point for VOID HUNTER
  *
  * @author Oleg Ivakhiv
- * @version 1.4 (dev menu font, F5 routed through SystemManager::reloadScripts)
+ * @version 1.5 (zone void colour)
  */
 
 #define SOL_ALL_SAFETIES_ON 1
@@ -76,9 +76,6 @@ int main() {
     manager.getMenuSystem().setFont(&font);
     manager.getRefitSystem().setFont(&font);
     manager.getDevSystem().setFont(&font);
-
-    EntityManager& em = manager.getEntityManager();
-    uint32_t playerEntityId = manager.getPlayerId();
 
     // =========================================================================
     // MAIN GAME LOOP
@@ -242,7 +239,9 @@ int main() {
         // =====================================================================
         // CLEAR THE WINDOW (CRITICAL - prevents ghosting)
         // =====================================================================
-        window.clear(sf::Color(2, 3, 5));
+        // The zone owns the void colour. Falls back to the original near-black
+        // when no zone is loaded.
+        window.clear(manager.voidColor());
 
         // =====================================================================
         // UPDATE ALL GAME SYSTEMS (includes rendering)
