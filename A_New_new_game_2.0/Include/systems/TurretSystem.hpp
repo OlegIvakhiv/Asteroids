@@ -85,6 +85,9 @@ public:
             auto& ec = m_em->enemies[i];
             // Dev freeze: a frozen hull with a live turret still shoots you.
             if (m_dev && m_dev->isAIFrozen(ud->entityId)) continue;
+            // Dormant or rebooting: the gun is as dead as the hull looks.
+            // It holds whatever angle it had; the reboot is the hull's beat.
+            if (!ec.powered()) continue;
 
             const auto& def = m_registry->resolve(ec.archetype);
             if (def.turrets.empty()) continue;

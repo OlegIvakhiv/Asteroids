@@ -57,11 +57,13 @@
 #include "ISystem.hpp"
 #include "core/EntityManager.hpp"
 #include "utils/ZoneArchetypes.hpp"
+#include "utils/CitadelModel.hpp"      // builtin landmark: the Rakshari citadel
 #include <SFML/Graphics.hpp>
 #include <vector>
 #include <random>
 #include <cmath>
 #include <algorithm>
+#include <memory>
 
 class ZoneSystem : public ISystem {
 public:
@@ -97,6 +99,7 @@ public:
         if (!z) return;   // zones.lua missing -- leave the pre-zone look alone
 
         applySky(*z);
+        m_citadelRT.clear();   // landmark slots are about to mean different props
         seedLayer(z->junk, m_junk);
         seedLayer(z->landmarks, m_landmarks);
     }
@@ -247,8 +250,15 @@ private:
         // would read as flickering rather than as machinery breathing.
         const float pulse = 0.82f + 0.18f * std::sin(m_time * 1.7f);
 
-        for (const auto& p : layer) {
+        for (size_t pi = 0; pi < layer.size(); ++pi) {
+            const auto& p = layer[pi];
             if (!p.def || !p.def->valid()) continue;
+
+            // A builtin model draws itself, now, in layer order.
+            if (!p.def->builtin.empty()) {
+                if (p.def->builtin == "RAKSHARI_CITADEL") drawCitadel(p, pi, cam);
+                continue;
+            }
 
             // Far props are smaller and dimmer. Drawing a distant prop at full
             // size but slow motion is the classic broken-parallax look.
@@ -313,6 +323,105 @@ private:
         if (lines.getVertexCount()) m_window->draw(lines);
     }
 
+    // ========================================================================
+    // BUILTIN: RAKSHARI SCRAP CITADEL
+    // ========================================================================
+    /**
+     * @brief Draw one citadel prop through its own render texture.
+     *
+     * WHY A RENDER TEXTURE. The landmark layer fades a prop to 34-50% alpha.
+     * Fading every triangle instead would let each layer show through the
+     * one above it -- the rock through the armour, the chains through the
+     * plates -- and the fortress would read as a pile of glass. So the model
+     * is drawn opaque, then the finished image is faded as one sheet.
+     *
+     * The texture holds PREMULTIPLIED colour (anything drawn with normal
+     * alpha blending onto a transparent clear ends up that way), so it goes
+     * to the window with One / OneMinusSrcAlpha and a (A,A,A,A) tint; plain
+     * alpha blending would darken every soft edge twice.
+     *
+     * Rendered at 2x and filtered down, which is the anti-aliasing: the page
+     * is full of 0.6px detail. Re-rendered at 30 Hz -- it is a distant,
+     * slow thing, and the sprite itself still moves every frame.
+     */
+    void drawCitadel(const Prop& p, size_t slot, sf::Vector2f cam) const {
+        const float sizeF = p.scale * (0.5f + 0.5f * p.depth);
+        const sf::Vector2f origin = p.layerPos + cam * (1.f - p.depth);
+
+        if (!m_citadel) m_citadel = std::make_unique<citadel::Model>();
+        const float radiusPx = m_citadel->extent() * sizeF;
+
+        if (m_citadelRT.size() <= slot) m_citadelRT.resize(slot + 1);
+        auto& cr = m_citadelRT[slot];
+
+        // Off screen: skip it, and give the texture back.
+        const sf::Vector2f vs = m_view ? m_view->getSize() : sf::Vector2f(m_window->getSize());
+        const sf::Vector2f d = origin - cam;
+        if (std::sqrt(d.x * d.x + d.y * d.y) > 0.5f * std::sqrt(vs.x * vs.x + vs.y * vs.y) + radiusPx) {
+            cr.reset();
+            return;
+        }
+
+        const float ss = 2.f;
+        const unsigned need = std::min(4096u, static_cast<unsigned>(std::ceil(radiusPx * 2.f * ss)) + 4u);
+        if (!cr) cr = std::make_unique<CitadelRT>();
+        if (!cr->failed && cr->rt.getSize().x < need) {
+            const unsigned sz = ((need + 255u) / 256u) * 256u;
+            if (cr->rt.resize({ sz, sz })) {
+                cr->rt.setSmooth(true);
+                cr->lastT = -1.f;
+            }
+            else {
+                cr->failed = true;   // no FBO: fall back to direct drawing below
+            }
+        }
+
+        const float alpha = std::clamp(p.alpha, 0.f, 1.f);
+
+        if (cr->failed) {
+            // Correct shapes, slightly glassy layering -- still better than nothing.
+            m_citadelMesh.v.clear();
+            m_citadel->frame(m_time, p.def->builtinGlow, p.def->builtinTrophies, m_citadelMesh);
+            for (auto& v : m_citadelMesh.v) v.color.a = static_cast<std::uint8_t>(v.color.a * alpha);
+            sf::Transform xf;
+            xf.translate(origin).rotate(sf::degrees(p.rotation)).scale({ sizeF, sizeF });
+            m_window->draw(m_citadelMesh.v.data(), m_citadelMesh.v.size(),
+                sf::PrimitiveType::Triangles, sf::RenderStates(xf));
+            return;
+        }
+
+        const sf::Vector2u rs = cr->rt.getSize();
+        if (cr->lastT < 0.f || m_time - cr->lastT >= 1.f / 30.f || std::fabs(cr->lastScale - sizeF) > 1e-4f) {
+            cr->lastT = m_time;
+            cr->lastScale = sizeF;
+            m_citadelMesh.v.clear();
+            m_citadel->frame(m_time, p.def->builtinGlow, p.def->builtinTrophies, m_citadelMesh);
+
+            cr->rt.clear(sf::Color::Transparent);
+            const float k = sizeF * ss;
+            cr->rt.setView(sf::View({ 0.f, 0.f }, { rs.x / k, rs.y / k }));
+            cr->rt.draw(m_citadelMesh.v.data(), m_citadelMesh.v.size(), sf::PrimitiveType::Triangles);
+            cr->rt.display();
+        }
+
+        sf::Sprite spr(cr->rt.getTexture());
+        spr.setOrigin({ rs.x * 0.5f, rs.y * 0.5f });
+        spr.setPosition(origin);
+        spr.setRotation(sf::degrees(p.rotation));
+        spr.setScale({ 1.f / ss, 1.f / ss });
+        const std::uint8_t a8 = static_cast<std::uint8_t>(alpha * 255.f);
+        spr.setColor(sf::Color(a8, a8, a8, a8));
+        m_window->draw(spr, sf::RenderStates(
+            sf::BlendMode(sf::BlendMode::Factor::One, sf::BlendMode::Factor::OneMinusSrcAlpha)));
+    }
+
+    struct CitadelRT {
+        sf::RenderTexture rt;
+        float lastT = -1.f;
+        float lastScale = 0.f;
+        bool  failed = false;
+    };
+
     static sf::Color fade(sf::Color c, float f) {
         return sf::Color(c.r, c.g, c.b,
             static_cast<std::uint8_t>(std::clamp(c.a * f, 0.f, 255.f)));
@@ -335,6 +444,12 @@ private:
 
     std::vector<Prop> m_junk;        ///< Near layer: drifting scrap
     std::vector<Prop> m_landmarks;   ///< Far layer: stations and bases
+
+    // Citadel: one shared model, one texture per on-screen landmark slot.
+    // mutable: draw() is const, and these are caches, not state.
+    mutable std::unique_ptr<citadel::Model>           m_citadel;
+    mutable std::vector<std::unique_ptr<CitadelRT>>   m_citadelRT;
+    mutable fieldgeom::Mesh                           m_citadelMesh;   ///< reused, keeps capacity
     float m_time = 0.f;              ///< Drives the shared glow pulse
     std::mt19937 m_rng;
 };

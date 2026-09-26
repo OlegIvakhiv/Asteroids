@@ -30,10 +30,8 @@
  *
  * CHANGED in 1.7 — archetype scars, hull thruster flame, bash crescent tell.
  *
- * CHANGED in 1.9 — world-space cold starlight rim on ship wrecks (drawColdRim).
- *
  * @author Oleg Ivakhiv
- * @version 1.9 -- wreck starlight rim
+ * @version 1.8 -- frenzy corona and colour override
  */
 
 #pragma once
@@ -42,6 +40,7 @@
 #include "utils/LuaConfig.hpp"
 #include "core/EntityManager.hpp"
 #include "core/EnemyArchetypes.hpp"        // added for archetype registry and geometry
+#include "utils/FieldGeom.hpp"              // radial gradients for the field-object overlays
 #include <SFML/Graphics.hpp>
 #include <unordered_map>
 #include <vector>
@@ -94,7 +93,11 @@ public:
             // ASTEROIDS
             // ================================================================
             if (type == BodyType::Asteroid) {
-                if (m_em->healths[i].isExplosive) {
+                // The unstable core is explosive too, but it is a baked lab
+                // model, not a burning rock: it takes the detail path below.
+                // MAGMATIC has no field style and still lands here, unchanged.
+                if (m_em->healths[i].isExplosive &&
+                    rd.fieldStyle != RenderComponent::FieldStyle::UnstableCore) {
                     drawMagmatic(i, tf, rd, detailFor(i, tf.entityId));
                 }
                 else {
@@ -152,10 +155,9 @@ public:
                         emit(rd.detailTris, sf::PrimitiveType::Triangles);
                         emit(rd.detailLines, sf::PrimitiveType::Lines);
 
-                        // Ship wrecks: starlight catching the edges that face
-                        // the light, in WORLD space so it stays put while the
-                        // hull tumbles under it.
-                        if (rd.wreckTier >= 0) drawColdRim(tf, rd);
+                        // Lab models: the live layer on top of the baked one.
+                        if (rd.fieldStyle != RenderComponent::FieldStyle::None)
+                            drawFieldFx(i, tf, rd, dt);
 
                         if (rd.shape.getOutlineThickness() > 0.01f) {
                             const sf::Color keep = rd.shape.getFillColor();
@@ -326,6 +328,29 @@ public:
 
                 // Resolve the archetype once for this enemy
                 const enemyarch::ArchetypeDef& adef = m_enemyReg->resolve(ec.archetype);
+
+                // ====================================================================
+                // 0. AMBUSH -- the powered-down disguise
+                // ====================================================================
+                // Dormant: drawn EXACTLY like a wreck -- the baked tier-0 hull,
+                // the wreck's own hit flash, and nothing else. No flame, no
+                // turret, no cone, no icon: anything drawn here that a wreck
+                // does not draw would give it away.
+                //
+                // Rebooting: a hard flicker between the cold hull and the live
+                // one. The lit share of each 14 Hz beat grows from 0 to 1 over
+                // the reboot, so it reads as systems catching, not as a fade.
+                bool cold = ec.dormant;
+                if (!cold && ec.wakeTimer > 0.f && ec.wakeDuration > 0.f) {
+                    const float lit = 1.f - ec.wakeTimer / ec.wakeDuration;
+                    cold = std::fmod(m_enemyAnimTime * 14.f, 1.f) >= lit;
+                }
+                if (cold && !rd.detailTris.empty()) {
+                    drawBakedDetail(tf, rd.detailTris, m_em->healths[i].hitFlash);
+                    if (!ec.dormant && ec.alertIconTimer > 0.f && ec.alertIconDuration > 0.f)
+                        drawAlertIcon(tf.position, ec);
+                    continue;
+                }
 
                 // ====================================================================
                 // 1. STATE COLOUR (fill)
@@ -1215,6 +1240,98 @@ private:
     }
 
     // ========================================================================
+    // FIELD OBJECT OVERLAYS -- the animated half of the lab models
+    // ========================================================================
+    /**
+     * Everything static about a rock, scrap pile or unstable core is baked in
+     * detailTris. What is left moves, and is rebuilt here each frame from a
+     * handful of points, straight from the lab's draw code:
+     *
+     *   Rock          ore flecks, alpha 0.22 flickering at 1.2 rad/s
+     *   Scrap         rivets pulsing at 0.8 rad/s; every 2.5-7 s one corner
+     *                 catches a short additive glint
+     *   UnstableCore  an orange radial breath over the whole vessel. The lab
+     *                 pulses at 3.2 rad/s; here it quickens as the core takes
+     *                 damage, which is the "about to go" tell the magmatic
+     *                 rock gets from its embers.
+     *
+     * `asteroid_visuals.field_glow = 0` switches off the two soft effects
+     * (glint and breath) and leaves the flat ones.
+     */
+    void drawFieldFx(size_t i, const TransformComponent& tf, RenderComponent& rd, float dt) {
+        using Style = RenderComponent::FieldStyle;
+        const float t = m_magmaPulseTime;
+        const float rad = tf.rotation * 3.14159265f / 180.f;
+        const float ca = std::cos(rad), sa = std::sin(rad);
+        const auto W = [&](sf::Vector2f p) {
+            return sf::Vector2f(tf.position.x + p.x * ca - p.y * sa, tf.position.y + p.x * sa + p.y * ca);
+            };
+        const bool soft = acfg("field_glow", 1.f) > 0.5f;
+
+        fieldgeom::Mesh m;
+
+        if (rd.fieldStyle == Style::Rock) {
+            for (const auto& o : rd.fieldFx) {
+                const float flicker = 0.6f + 0.4f * std::sin(t * 1.2f + o.phase);
+                fieldgeom::disc(m, W(o.p), o.r, fieldgeom::rgba(190, 190, 195, 0.22f * flicker), 8);
+            }
+            if (!m.empty()) m_window->draw(m.v.data(), m.v.size(), sf::PrimitiveType::Triangles);
+            return;
+        }
+
+        if (rd.fieldStyle == Style::Scrap) {
+            for (const auto& r : rd.fieldFx) {
+                const float pulse = 0.5f + 0.5f * std::sin(t * 0.8f + r.phase);
+                const sf::Color c = fieldgeom::rgba(170.f + pulse * 30.f, 110.f + pulse * 20.f,
+                    70.f + pulse * 15.f, 0.08f + pulse * 0.12f);
+                // The lab's fillRect(x-0.6, y-0.6, 1.6, 1.6), in the pile's frame.
+                const float lo = -0.375f * r.r, hi = 0.625f * r.r;
+                m.quad(W(r.p + sf::Vector2f(lo, lo)), W(r.p + sf::Vector2f(hi, lo)),
+                    W(r.p + sf::Vector2f(hi, hi)), W(r.p + sf::Vector2f(lo, hi)), c);
+            }
+            if (!m.empty()) m_window->draw(m.v.data(), m.v.size(), sf::PrimitiveType::Triangles);
+
+            // ---- Glint: one corner at a time, additive ----
+            if (rd.glintLife > 0.f) {
+                rd.glintLife -= dt;
+            }
+            else if (!rd.glintSpots.empty()) {
+                rd.glintTimer -= dt;
+                if (rd.glintTimer <= 0.f) {
+                    rd.glintPos = rd.glintSpots[static_cast<size_t>(rand()) % rd.glintSpots.size()];
+                    rd.glintLife = rd.glintMax = 0.6f + (rand() % 400) / 1000.f;
+                    rd.glintTimer = 2.5f + (rand() % 4500) / 1000.f;
+                }
+            }
+            if (soft && rd.glintLife > 0.f && rd.fieldGlowR > 0.f) {
+                const float p = rd.glintLife / std::max(0.01f, rd.glintMax);
+                const float a = std::clamp(p < 0.5f ? p * 2.f : (1.f - p) * 2.f, 0.f, 1.f) * 0.55f;
+                fieldgeom::Mesh g;
+                fieldgeom::radialGradient(g, W(rd.glintPos), 0.f, rd.fieldGlowR, rd.fieldGlowR, {
+                    { 0.0f, fieldgeom::rgba(230, 200, 160, a) },
+                    { 0.5f, fieldgeom::rgba(180, 140, 100, a * 0.4f) },
+                    { 1.0f, fieldgeom::rgba(0, 0, 0, 0.f) } }, 12);
+                m_window->draw(g.v.data(), g.v.size(), sf::PrimitiveType::Triangles,
+                    sf::RenderStates(sf::BlendAdd));
+            }
+            return;
+        }
+
+        if (rd.fieldStyle == Style::UnstableCore && soft && rd.fieldGlowR > 0.f) {
+            const auto& h = m_em->healths[i];
+            const float wounded = 1.f - std::clamp(h.currentHp / std::max(1.f, h.maxHp), 0.f, 1.f);
+            // Integrated phase, so the rate can rise without the pulse jumping.
+            rd.fieldPhase += dt * 3.2f * (1.f + 1.6f * wounded);
+            const float pulse = 0.55f + 0.45f * std::sin(rd.fieldPhase);
+            fieldgeom::radialGradient(m, tf.position, 0.f, rd.fieldGlowR, rd.fieldGlowR, {
+                { 0.0f, fieldgeom::rgba(255, 140, 60, 0.32f * pulse) },
+                { 0.5f, fieldgeom::rgba(200, 60, 20, 0.14f * pulse) },
+                { 1.0f, fieldgeom::rgba(0, 0, 0, 0.f) } }, 24);
+            m_window->draw(m.v.data(), m.v.size(), sf::PrimitiveType::Triangles);
+        }
+    }
+
+    // ========================================================================
     // MAGMATIC
     // ========================================================================
     void drawMagmatic(size_t i, const TransformComponent& tf,
@@ -1500,90 +1617,28 @@ private:
         }
     }
 
-    /**
-     * @brief Cold starlight rim on a ship wreck's silhouette.
-     *
-     * The design lab stroked the hull with a top-left linear gradient. That
-     * only works on a ship that never turns; a wreck tumbles, and a baked
-     * gradient would carry the sun around with it. So the rim is lit per
-     * edge from the edge's WORLD-space outward normal against a fixed light
-     * direction: whatever faces up-left right now catches the light.
-     *
-     * Brightness is smoothed per vertex (average of the two adjacent edge
-     * normals) so a jagged torn edge shimmers instead of flickering, and a
-     * small ambient floor keeps the dark side of the hull from vanishing
-     * against the background -- a wreck you cannot see is a wreck you fly
-     * into.
-     *
-     * Lua (`asteroid_visuals`): wreck_rim_width, wreck_rim_alpha,
-     * wreck_rim_ambient.
-     */
-    void drawColdRim(const TransformComponent& tf, const RenderComponent& rd) {
-        const size_t n = rd.shape.getPointCount();
-        if (n < 3) return;
-
-        const float rad = tf.rotation * 3.14159265f / 180.f;
+    /// Baked detail (colours already in the vertices) at an entity's world
+    /// transform, lerped toward white by `flash` -- the same maths the
+    /// asteroid detail path uses, for anything else that carries a bake.
+    void drawBakedDetail(const TransformComponent& tf, const std::vector<sf::Vertex>& src, float flash) {
+        if (src.empty()) return;
+        const float rad = tf.rotation * 3.14159f / 180.f;
         const float ca = std::cos(rad), sa = std::sin(rad);
-
-        m_rimPts.resize(n);
-        for (size_t k = 0; k < n; ++k) {
-            const sf::Vector2f p = rd.shape.getPoint(k);
-            m_rimPts[k] = { tf.position.x + (p.x * ca - p.y * sa),
-                            tf.position.y + (p.x * sa + p.y * ca) };
+        const float w = (flash > 0.f) ? std::clamp(flash / 0.16f, 0.f, 1.f) : 0.f;
+        m_detailScratch.resize(src.size());
+        for (size_t k = 0; k < src.size(); ++k) {
+            const sf::Vector2f& p = src[k].position;
+            m_detailScratch[k].position = { tf.position.x + (p.x * ca - p.y * sa),
+                                            tf.position.y + (p.x * sa + p.y * ca) };
+            sf::Color c = src[k].color;
+            if (w > 0.f) {
+                c.r = static_cast<uint8_t>(c.r + (255 - c.r) * w);
+                c.g = static_cast<uint8_t>(c.g + (255 - c.g) * w);
+                c.b = static_cast<uint8_t>(c.b + (255 - c.b) * w);
+            }
+            m_detailScratch[k].color = c;
         }
-
-        // Rotation preserves winding, but the sign is checked rather than
-        // assumed: outward is s * (dy, -dx) for signed area of sign s.
-        float area2 = 0.f;
-        for (size_t k = 0; k < n; ++k) {
-            const sf::Vector2f& a = m_rimPts[k];
-            const sf::Vector2f& b = m_rimPts[(k + 1) % n];
-            area2 += a.x * b.y - b.x * a.y;
-        }
-        const float s = (area2 >= 0.f) ? 1.f : -1.f;
-
-        m_rimNormals.resize(n);
-        for (size_t k = 0; k < n; ++k) {
-            const sf::Vector2f d = m_rimPts[(k + 1) % n] - m_rimPts[k];
-            const float l = std::max(1e-4f, std::sqrt(d.x * d.x + d.y * d.y));
-            m_rimNormals[k] = { s * d.y / l, -s * d.x / l };
-        }
-
-        // Light from the top-left of the screen, as in the lab.
-        const sf::Vector2f L{ -0.6f, -0.8f };
-        const float peak = acfg("wreck_rim_alpha", 175.f);
-        const float amb = acfg("wreck_rim_ambient", 22.f);
-        const float half = acfg("wreck_rim_width", 1.6f) * 0.5f;
-
-        m_rimLit.resize(n);
-        for (size_t k = 0; k < n; ++k) {
-            const sf::Vector2f a = m_rimNormals[(k + n - 1) % n];
-            const sf::Vector2f b = m_rimNormals[k];
-            const sf::Vector2f m{ a.x + b.x, a.y + b.y };
-            const float l = std::max(1e-4f, std::sqrt(m.x * m.x + m.y * m.y));
-            const float facing = std::max(0.f, (m.x * L.x + m.y * L.y) / l);
-            m_rimLit[k] = amb + (peak - amb) * std::pow(facing, 1.4f);
-        }
-
-        m_rimScratch.clear();
-        for (size_t k = 0; k < n; ++k) {
-            const size_t j = (k + 1) % n;
-            const sf::Vector2f nn = m_rimNormals[k] * half;
-            const auto col = [](float a) {
-                return sf::Color(190, 212, 240,
-                    static_cast<std::uint8_t>(std::clamp(a, 0.f, 255.f)));
-                };
-            const sf::Color ca0 = col(m_rimLit[k]), cb0 = col(m_rimLit[j]);
-            const sf::Vector2f p0 = m_rimPts[k] + nn, p1 = m_rimPts[j] + nn;
-            const sf::Vector2f p2 = m_rimPts[j] - nn, p3 = m_rimPts[k] - nn;
-            m_rimScratch.push_back(sf::Vertex{ p0, ca0 });
-            m_rimScratch.push_back(sf::Vertex{ p1, cb0 });
-            m_rimScratch.push_back(sf::Vertex{ p2, cb0 });
-            m_rimScratch.push_back(sf::Vertex{ p0, ca0 });
-            m_rimScratch.push_back(sf::Vertex{ p2, cb0 });
-            m_rimScratch.push_back(sf::Vertex{ p3, ca0 });
-        }
-        m_window->draw(m_rimScratch.data(), m_rimScratch.size(), sf::PrimitiveType::Triangles);
+        m_window->draw(m_detailScratch.data(), m_detailScratch.size(), sf::PrimitiveType::Triangles);
     }
 
     /// Read a float from the `asteroid_visuals` table in Lua.
@@ -1700,12 +1755,6 @@ private:
     /// Scratch for transforming baked detail vertices into world space.
     /// A member so the per-frame cost is a resize, not an allocation.
     std::vector<sf::Vertex> m_detailScratch;
-
-    /// Scratch for the wreck rim, same reason.
-    std::vector<sf::Vector2f> m_rimPts;
-    std::vector<sf::Vector2f> m_rimNormals;
-    std::vector<float>        m_rimLit;
-    std::vector<sf::Vertex>   m_rimScratch;
 
     float m_magmaPulseTime = 0.f;
     const enemyarch::EnemyRegistry* m_enemyReg = nullptr;   // added for archetype access

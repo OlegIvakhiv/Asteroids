@@ -753,6 +753,7 @@ private:
                     if (ud2->type == BodyType::Enemy) {
                         m_em->enemies[j].hitFlashTimer = 0.22f;
                         m_em->enemies[j].timesHit += 2;   // an AoE is unambiguous
+                        m_em->enemies[j].provoke();
                     }
                 }
             }
@@ -767,6 +768,9 @@ private:
             for (size_t j = 0; j < m_em->physics.size(); ++j) {
                 BodyUserData* ud2 = bodyUD(m_em->physics[j].bodyId);
                 if (!ud2 || ud2->type != BodyType::Enemy) continue;
+                // A dormant hull has no signature: the hijacked rock must not
+                // swerve toward a "wreck" and give the ambush away.
+                if (m_em->enemies[j].dormant) continue;
                 sf::Vector2f d = boltPos - m_em->transforms[j].position;
                 float dist = d.x * d.x + d.y * d.y;
                 if (dist < bestDist) { bestDist = dist; enemyIdx = j; }
@@ -809,6 +813,7 @@ private:
             m_em->healths[nearestIdx].stunTimer = wcfg("rift_overload_stun", 2.5f);
             m_em->enemies[nearestIdx].hitFlashTimer = 0.25f;
             m_em->enemies[nearestIdx].timesHit += 2;
+            m_em->enemies[nearestIdx].provoke();
 
             sf::Vector2f away = m_em->transforms[nearestIdx].position - boltPos;
             float al = std::sqrt(away.x * away.x + away.y * away.y);

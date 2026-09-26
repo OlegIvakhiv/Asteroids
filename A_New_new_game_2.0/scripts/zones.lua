@@ -190,99 +190,32 @@ zone_props = {
     -- ========================================================================
     -- RAKSHARI SCRAP CITADEL -- the far layer
     -- ========================================================================
-    -- From the concept sketch, translated part for part. The canvas version
-    -- was authored close-up; this is seen at roughly a quarter of the screen
-    -- width, behind the junk, at around 60-75% alpha. So the pass is an EDIT,
-    -- not a port:
+    -- Drawn by utils/CitadelModel.hpp, a straight port of the design lab page
+    -- "rust citadel.html" (Redesign Study v2), built from that page's own
+    -- seed -- so the rock, craters, fissures and armour ring are the exact
+    -- shapes that were signed off, not look-alikes.
     --
-    --   KEPT   asteroid core, fissures, mismatched bolted plates, the seven
-    --          perimeter spikes, both gun batteries, the gantry trusses, and
-    --          above all the furnace maw -- the spikes are the silhouette and
-    --          the furnace is the only thing that says anyone is home
-    --   CUT    the 3px bolt heads, the trophy chains, the skull on the chain.
-    --          At this size and alpha they are sub-pixel noise. They are not
-    --          lost: they are the reason this thing deserves to be a POI you
-    --          fly up to later, where every one of them lands.
+    -- The first version of this entry was a hand-translated polygon list,
+    -- and cut the bolts, chains and trophies as "sub-pixel noise at this
+    -- size". At landmark scale (2.2-3.0 below) the citadel lands at roughly
+    -- the page's own 1.42x, so nothing is cut any more: ten spikes, three
+    -- sensor masts, seven swaying trophy chains with their wrecks, the
+    -- furnace, the bolted ring, six hero plates, the hangar and six turrets
+    -- that track.
     --
-    -- The spike and cannon coordinates are BAKED -- the canvas code built them
-    -- with translate/rotate, and the engine has no transform stack, so each is
-    -- a flat polygon here. Edit them as shapes, not as transforms.
+    -- It is a MODEL, not a polygon list, because it moves -- `parts` cannot
+    -- sway a chain. Rendered to its own texture and faded as one image, so
+    -- the landmark alpha does not turn the armour into glass.
+    --
+    --   furnace_glow   the page's "Furnace Glow" button: heat bloom, lit
+    --                  throat, muzzle and engine glows, hangar light
+    --   trophy_chains  the page's "Trophy Chains" button
     -- ========================================================================
     STATION_CITADEL = {
-        scale = 1.0,
-        parts = {
-            -- A. Hollowed-out rock. Asymmetric: nothing here was designed.
-            { points = {
-                { -110, -50 }, { -70, -110 }, {  20, -130 }, { 110, -80 },
-                {  140,  20 }, {  90,  110 }, { -10,  140 }, { -100, 90 },
-                { -130,  20 },
-              },
-              fill = { r = 17, g = 11, b = 10 }, line = { r = 63, g = 29, b = 29 } },
-
-            -- Structural fissures.
-            { points = { { -60, -40 }, { -20, -70 }, { 30, -50 }, { -10, -20 } },
-              fill = { r = 8, g = 4, b = 4 }, line = { r = 69, g = 10, b = 10 } },
-            { points = { { 10, 30 }, { 60, 20 }, { 70, 70 }, { 20, 80 } },
-              fill = { r = 8, g = 4, b = 4 }, line = { r = 69, g = 10, b = 10 } },
-
-            -- G. Scavenger gantries. Drawn before the armour so the plates
-            -- sit on top of where they meet the rock.
-            { points = { { -110, -10 }, { -180, -40 }, { -170, -55 }, { -100, -30 } },
-              fill = { r = 39, g = 39, b = 42 }, line = { r = 153, g = 27, b = 27 } },
-            { points = { { 80, 80 }, { 150, 130 }, { 135, 145 }, { 70, 95 } },
-              fill = { r = 39, g = 39, b = 42 }, line = { r = 153, g = 27, b = 27 } },
-
-            -- B. Mismatched armour bolted over the rock. Four plates, four
-            -- different salvage sources -- that mismatch IS the faction.
-            { points = { { -120, -20 }, { -80, -90 }, { -20, -60 }, { -70, 10 } },
-              fill = { r = 69, g = 10, b = 10 }, line = { r = 220, g = 38, b = 38 } },
-            { points = { { 30, -120 }, { 100, -70 }, { 60, -20 }, { 10, -60 } },
-              fill = { r = 39, g = 39, b = 42 }, line = { r = 153, g = 27, b = 27 } },
-            { points = { { 40, 10 }, { 120, 30 }, { 90, 100 }, { 20, 70 } },
-              fill = { r = 153, g = 27, b = 27 }, line = { r = 220, g = 38, b = 38 } },
-            { points = { { -90, 30 }, { -20, 60 }, { -50, 120 }, { -110, 80 } },
-              fill = { r = 24, g = 24, b = 27 }, line = { r = 82, g = 82, b = 91 } },
-
-            -- C. Perimeter spikes. THE silhouette: read as a black shape
-            -- against the stars this is a mace, and that is the whole point.
-            { points = { { -114.1, -42.0 }, { -181.3, -86.3 }, { -105.9, -58.0 } },
-              fill = { r = 24, g = 24, b = 27 }, line = { r = 220, g = 38, b = 38 } },
-            { points = { { -79.8, -105.0 }, { -115.4, -199.1 }, { -60.2, -115.0 } },
-              fill = { r = 24, g = 24, b = 27 }, line = { r = 220, g = 38, b = 38 } },
-            { points = { { 8.6, -133.7 }, { 54.0, -234.6 }, { 31.4, -126.3 } },
-              fill = { r = 24, g = 24, b = 27 }, line = { r = 220, g = 38, b = 38 } },
-            { points = { { 105.5, -88.9 }, { 190.2, -120.9 }, { 114.5, -71.1 } },
-              fill = { r = 24, g = 24, b = 27 }, line = { r = 220, g = 38, b = 38 } },
-            { points = { { 144.0, 7.6 }, { 254.1, 57.1 }, { 136.0, 32.4 } },
-              fill = { r = 24, g = 24, b = 27 }, line = { r = 220, g = 38, b = 38 } },
-            { points = { { 98.0, 105.9 }, { 128.6, 185.7 }, { 82.0, 114.1 } },
-              fill = { r = 24, g = 24, b = 27 }, line = { r = 220, g = 38, b = 38 } },
-            { points = { { 0.9, 141.7 }, { -24.9, 233.8 }, { -20.9, 138.3 } },
-              fill = { r = 24, g = 24, b = 27 }, line = { r = 220, g = 38, b = 38 } },
-
-            -- D. Gun batteries. Decorative, but they aim OUTWARD, which is
-            -- the difference between a fortress and a pile.
-            { points = { { -68.0, -79.8 }, { -18.5, -113.7 }, { -10.4, -110.7 }, { -64.1, -74.0 } },
-              fill = { r = 24, g = 24, b = 27 }, line = { r = 220, g = 38, b = 38 } },
-            { points = { { -60.7, -69.1 }, { -11.2, -102.9 }, { -3.1, -100.0 }, { -56.7, -63.3 } },
-              fill = { r = 24, g = 24, b = 27 }, line = { r = 220, g = 38, b = 38 } },
-            { points = { { 74.9, -37.3 }, { 150.4, -10.8 }, { 148.1, 13.6 }, { 66.0, -8.6 } },
-              fill = { r = 69, g = 10, b = 10 }, line = { r = 220, g = 38, b = 38 } },
-            { points = { { 101.5, -21.7 }, { 154.0, -5.5 }, { 149.3, 9.8 }, { 96.7, -6.4 } },
-              fill = { r = 24, g = 24, b = 27 }, line = { r = 234, g = 88, b = 12 } },
-
-            -- E. The smelter maw. The one light source in the zone, and the
-            -- reason the whole thing reads as inhabited rather than derelict.
-            { points = { { -35, -15 }, { 25, -25 }, { 45, 15 }, { 10, 45 }, { -30, 30 } },
-              fill = { r = 120, g = 24, b = 22 }, line = { r = 239, g = 68, b = 68 },
-              glow = 1.0 },
-            -- Inner heat. The concept's spark yellow is dimmed here: at full
-            -- value it was brighter than the player's ship, which breaks the
-            -- one contrast rule the whole game reads by.
-            { points = { { -20, -5 }, { 15, -10 }, { 25, 10 }, { -10, 20 } },
-              fill = { r = 196, g = 74, b = 44 }, line = { r = 232, g = 176, b = 88 },
-              glow = 1.3 },
-        },
+        scale         = 1.0,
+        builtin       = "RAKSHARI_CITADEL",
+        furnace_glow  = true,
+        trophy_chains = true,
     },
 }
 
@@ -451,6 +384,12 @@ zones = {
             WRECK_MEDIUM    =  6,
             WRECK_HEAVY     =  3,
             WRECK_BARGE     =  1,
+
+            -- The yard's MAGMATIC: an unstable core adrift in the junk.
+            -- 35 on top of 200 is ~15%, the same share MAGMATIC has in open
+            -- space. It REPLACES the magmatic rock here; MAGMATIC itself stays
+            -- out of this table, and its model is unchanged everywhere else.
+            UNSTABLE_CORE   = 35,
         },
 
         factions = {

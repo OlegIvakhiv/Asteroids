@@ -326,6 +326,7 @@ public:
                         m_em->enemies[targetIdx].hitFlashTimer = 0.18f;
                         m_em->healths[targetIdx].hitFlash = 0.18f;
                         m_em->enemies[targetIdx].timesHit++;
+                        m_em->enemies[targetIdx].provoke();   // player's round, parried ones included
 
                         // ---- CAUGHT MID-DODGE ----
                         // Landing a shot on an enemy that is committed to an
@@ -431,7 +432,9 @@ public:
                     if (otherType == BodyType::Asteroid) {
                         int reward = m_em->scoreRewards[otherIdx];
                         bool isLarge = (reward >= 200);
-                        bool isMagmatic = (reward == 75);
+                        // Any explosive launches like a magmatic rock -- the
+                        // unstable core is its Rakshari-yard counterpart.
+                        bool isMagmatic = (reward == 75) || m_em->healths[otherIdx].isExplosive;
 
                         m_em->spawnExplosion(otherPos, parryColor(), 15, 2.5f);
 
@@ -558,6 +561,7 @@ public:
                         m_em->healths[otherIdx].currentHp -= dealt;
                         m_em->enemies[otherIdx].hitFlashTimer = 0.2f;
                         m_em->enemies[otherIdx].timesHit += 1;
+                        m_em->enemies[otherIdx].provoke();
                         sf::Vector2f dir = op - m_em->transforms[playerIdx].position;
                         staggerEnemy(otherIdx, dir, 380.f + over * 25.f,
                             std::clamp(over / 20.f, 0.15f, 0.5f));
@@ -724,6 +728,7 @@ public:
                                 const float dmg = base * tierMult * speedF;
                                 m_em->healths[enIdx].currentHp -= dmg;
                                 m_em->enemies[enIdx].hitFlashTimer = 0.22f;
+                                m_em->enemies[enIdx].provoke();   // parried or rift-hijacked: the player threw it
 
                                 // ---- Knockback + stagger ----
                                 sf::Vector2f push = enPos - astPos;
@@ -760,6 +765,10 @@ public:
                         else if (relSpd > 8.f) {
                             float dmg = (relSpd - 8.f) * 2.5f;
                             m_em->healths[enIdx].currentHp -= dmg;
+                            // A stray rock does NOT wake a dormant hull -- but
+                            // it must flash the way it would on a real wreck,
+                            // or the missing flash is the tell.
+                            if (m_em->enemies[enIdx].dormant) m_em->healths[enIdx].hitFlash = 0.12f;
                             sf::Vector2f midPos = (astPos + enPos) * 0.5f;
                             m_em->spawnImpact(midPos, sf::Color(180, 120, 60),
                                 sf::Vector2f(vA2.x * SCALE * 0.3f, vA2.y * SCALE * 0.3f));
@@ -818,13 +827,15 @@ public:
                         m_em->addDebugAoE(deathPos, radius, ringColor, 0.4f);
                         m_em->spawnMagmaExplosion(deathPos, radius, wasHoming, homingColor(255));
 
-                        // Magma rocks throw shards too.
+                        // Magma rocks throw shards too. The fracture itself
+                        // runs AFTER the blast below: an unstable core throws
+                        // physical scrap (burst_children), and spawning it
+                        // first would let the blast erase it on the same frame.
                         sf::Vector2f impactDir(0.f, 0.f);
                         if (b2Body_IsValid(m_em->physics[i].bodyId)) {
                             b2Vec2 v = b2Body_GetLinearVelocity(m_em->physics[i].bodyId);
                             impactDir = { v.x, v.y };
                         }
-                        m_em->fractureAsteroid(i, impactDir, 0, m_ef, m_lua, m_worldId);
 
                         if (wasHoming) {
                             m_em->spawnExplosion(deathPos, homingColor(255), 20, 4.0f);
@@ -850,6 +861,10 @@ public:
                                 else {
                                     m_em->healths[j].currentHp -= damage * falloff;
                                     m_em->healths[j].hitFlash = 0.16f;
+                                    // Only a rock the player LAUNCHED counts as
+                                    // the player's blast. A magma rock that just
+                                    // broke carries no record of who broke it.
+                                    if (wasHoming && j < m_em->enemies.size()) m_em->enemies[j].provoke();
                                 }
 
                                 if (j == playerIdx && falloff > vcfg("stagger_blast_falloff", 0.45f)) {
@@ -861,6 +876,11 @@ public:
                                 }
                             }
                         }
+
+                        // Shards always; physical pieces only for types that
+                        // ask for them (0 for MAGMATIC -- unchanged).
+                        m_em->fractureAsteroid(i, impactDir, m_em->healths[i].burstChildren,
+                            m_ef, m_lua, m_worldId);
                     }
                     else {
                         // ---- FRACTURE ----
@@ -970,6 +990,9 @@ private:
             if (!b2Body_IsValid(m_em->physics[i].bodyId)) continue;
             BodyUserData* ud = bodyUD(m_em->physics[i].bodyId);
             if (!ud || ud->type != BodyType::Enemy) continue;
+            // Powered down = no signature to lock onto. A parried round that
+            // curved toward a "wreck" would announce the ambush for free.
+            if (i < m_em->enemies.size() && m_em->enemies[i].dormant) continue;
 
             sf::Vector2f enemyPos = m_em->transforms[i].position;
             float dx = pos.x - enemyPos.x;
@@ -1041,6 +1064,7 @@ private:
         m_em->healths[enIdx].currentHp -= m_feel.shoulderDamage * (breaksCharge ? m_feel.shoulderCounter : 1.f);
         ec.hitFlashTimer = 0.25f;
         ec.timesHit += 2;
+        ec.provoke();
         staggerEnemy(enIdx, ps.dashDir, m_feel.shoulderKnock, breaksCharge ? 1.f : 0.75f);
         m_em->healths[enIdx].stunTimer = std::max(m_em->healths[enIdx].stunTimer, m_feel.shoulderStun);
 
@@ -1159,6 +1183,7 @@ private:
         m_em->healths[otherIdx].currentHp -= reflectDamage;
         m_em->healths[otherIdx].hitFlash = 0.2f;
         m_em->healths[otherIdx].stunTimer = stunDuration * (1.f - stunResist);
+        m_em->enemies[otherIdx].provoke();
 
         // ---- FULL STAGGER, not just a shove ----
         // A melee parry is the highest-risk thing the player can do, so it
@@ -1367,6 +1392,10 @@ private:
             if (ud && ud->type == BodyType::Enemy && j < m_em->enemies.size()) {
                 m_em->enemies[j].hitFlashTimer = 0.2f;
                 m_em->enemies[j].timesHit += 2;   // an AoE is unambiguous
+                // Credited to the player (a parried rocket, a thrown Maniac):
+                // the player's blast. A pirate's own rocket going off next to
+                // a dormant hull is not.
+                if (creditIdx == playerIdx) m_em->enemies[j].provoke();
             }
 
             if (j == playerIdx && j != creditIdx &&

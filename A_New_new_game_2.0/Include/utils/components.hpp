@@ -321,11 +321,30 @@ struct RenderComponent {
     /// Damage tier of a ship wreck, or -1 for anything that is not one.
     ///   0 powered down (pristine -- the ambush disguise)
     ///   1 light   2 heavy   3 destroyed hulk
-    /// RenderSystem reads it to draw the world-space starlight rim, which
-    /// cannot be baked into detailTris because wrecks spin. Kept on the
-    /// entity so a later ambush system can tell a dormant hull from a dead
-    /// one without re-deriving it.
+    /// Kept on the entity so a later ambush system can tell a dormant hull
+    /// from a dead one without re-deriving it.
     int8_t wreckTier = -1;
+
+    // ---- Field object models (utils/FieldObjectModels.hpp) ----
+    /// Which lab model this is. Everything static is already in detailTris;
+    /// the style tells RenderSystem which per-frame layer goes on top:
+    ///   Rock          ore flecks flicker
+    ///   Scrap         rivets shimmer, an occasional glint catches a corner
+    ///   UnstableCore  the vessel breathes orange (and faster when hurt)
+    /// None for everything else, including the MAGMATIC rock, which keeps
+    /// its own renderer untouched.
+    enum class FieldStyle : uint8_t { None = 0, Rock, Scrap, UnstableCore };
+    FieldStyle fieldStyle = FieldStyle::None;
+
+    struct FieldFx { sf::Vector2f p; float r = 1.f; float phase = 0.f; };
+    std::vector<FieldFx>      fieldFx;       ///< ores (rock) / rivets (scrap), local px
+    std::vector<sf::Vector2f> glintSpots;    ///< scrap corners, local px
+    float fieldGlowR = 0.f;                  ///< core pulse radius / glint radius, px
+    float fieldPhase = 0.f;                  ///< per-object pulse phase
+    float glintTimer = 2.f;                  ///< scrap: seconds to the next glint
+    float glintLife = 0.f;                   ///< scrap: >0 while a glint is showing
+    float glintMax = 1.f;
+    sf::Vector2f glintPos;
 };
 
 // ============================================================================
@@ -445,6 +464,13 @@ struct HealthComponent {
     /// at point-blank range.
     char    childAlt[16] = { 0 };
     uint8_t childAltPct = 0;
+
+    /// How many `childType` pieces an EXPLOSIVE object throws when it goes
+    /// off. Ordinary rocks take their child count from their tier; explosives
+    /// used to leave nothing but shards. The unstable core spits out four
+    /// scrap chunks -- spawned AFTER the blast resolves, so the blast does not
+    /// instantly erase its own debris. 0 = the old behaviour.
+    uint8_t burstChildren = 0;
 
     /// Children take this rock's colour instead of their own type's.
     ///
@@ -705,6 +731,28 @@ struct EnemyComponent {
     float hitFlashTimer = 0.f;          // White flash when damaged
     float dodgeFlashTimer = 0.f;        // Brief streak when a dodge burst fires
     EnemyState visualState = EnemyState::PATROL;  // Mirrors AI state, for RenderSystem
+
+    // ---- Ambush: spawned TURNED OFF ----
+    // A dormant unit is an object, not a pilot: no AI, no engines, no turret,
+    // drifting like a wreck and drawn as its own pristine powered-down hull
+    // (wreck tier 0, baked into RenderComponent::detailTris at spawn). It
+    // has no vision cone; it wakes on either of two things, both the
+    // PLAYER's doing:
+    //   - the player inside `ambush_wake_range` of its hull, any direction
+    //   - any damage the player deals it, from any distance (provoke())
+    // Damage from anything else -- a stray rock, another pirate's rocket --
+    // does not count. A wreck does not wake up because a rock hit it.
+    bool  dormant = false;
+    bool  provoked = false;             // Player damage landed; AISystem wakes it
+    float wakeTimer = 0.f;              // >0 = rebooting: visible, turning, cannot attack
+    float wakeDuration = 0.f;
+
+    /// Call at every site where the PLAYER damages this unit. Harmless on an
+    /// awake one, so call sites never need to check.
+    void provoke() { if (dormant) provoked = true; }
+
+    /// Dormant or still rebooting: engines and guns are cold.
+    bool powered() const { return !dormant && wakeTimer <= 0.f; }
 };
 
 // Debug-only area-of-effect marker (drawn as a fading ring by DebugSystem).

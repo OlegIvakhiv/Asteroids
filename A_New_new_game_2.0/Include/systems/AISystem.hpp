@@ -105,11 +105,29 @@
  *     no settled strafe band. Twitchy on purpose -- he is hard to lead, and
  *     that is his defence instead of armour.
  *
+ * ============================================================================
+ * VERSION 2.3 -- AMBUSH
+ * ============================================================================
+ *
+ * 20. DORMANT UNITS (EnemyComponent::dormant). Spawned TURNED OFF by the
+ *     director (`ambush_chance`) or by summon(). No perception, no cone, no
+ *     steering, no timers: the unit is an object drifting with the wrecks.
+ *     It wakes on the player within `ambush_wake_range` of its hull edge --
+ *     360 degrees, no facing -- or on any player damage (DamageSystem and
+ *     WeaponSystem call EnemyComponent::provoke() at every player-sourced
+ *     site). Waking skips PATROL and ALERT entirely: it goes straight to
+ *     COMBAT, knowing exactly where you are.
+ *
+ * 21. REBOOT (`ambush_wake_time`). The first beat after waking: drag back
+ *     on, tumble killed, hull swinging onto the player, no attack of any
+ *     kind. Same principle as the shot telegraph -- an ambush the player can
+ *     react to is a scare; one they cannot is just damage.
+ *
  * State split: this system owns AIState (decisions). Presentation and impact
  * state live on EnemyComponent so DamageSystem and RenderSystem can reach them.
  *
  * @author Oleg Ivakhiv
- * @version 2.2
+ * @version 2.3
  */
 
 #pragma once
@@ -202,7 +220,18 @@ public:
                 continue;
             }
 
+            // ================================================================
+            // AMBUSH -- dormant, then the reboot beat
+            // ================================================================
+            if (ec.dormant && !updateDormant(tf, ec, health, ai, bodyId, config, adef,
+                playerPos, playerVel)) continue;
+
             tickTimers(dt, ec);
+
+            if (ec.wakeTimer > 0.f) {
+                updateReboot(dt, tf, ec, bodyId, playerPos, config);
+                continue;
+            }
 
             // ================================================================
             // STAGGER — owns rotation completely, blocks everything
@@ -409,6 +438,112 @@ private:
         const b2Vec2 v = b2Body_GetLinearVelocity(bodyId);
         b2Body_SetLinearVelocity(bodyId, { v.x * k, v.y * k });
         b2Body_SetAngularVelocity(bodyId, b2Body_GetAngularVelocity(bodyId) * k);
+    }
+
+    // ========================================================================
+    // AMBUSH
+    // ========================================================================
+    /**
+     * @brief One frame of a dormant unit. Returns true if it woke this frame.
+     *
+     * An object has no commitments, so anything the damage side put on it --
+     * a rock's stagger, a stun, a flash -- is dropped rather than saved up
+     * to play out the moment it wakes.
+     */
+    bool updateDormant(TransformComponent& tf, EnemyComponent& ec, HealthComponent& health,
+        AIState& ai, b2BodyId bodyId, sol::table& config, const enemyarch::ArchetypeDef& adef,
+        sf::Vector2f playerPos, sf::Vector2f playerVel)
+    {
+        ec.telegraphActive = false;
+        ec.telegraphTimer = 0.f;
+        ec.turretTelegraphActive = false;
+        ec.staggerTimer = 0.f;
+        ec.staggerRecoverTimer = 0.f;
+        ec.hitFlashTimer = 0.f;
+        ec.alertIconTimer = 0.f;
+        health.stunTimer = 0.f;
+        ec.visualState = EnemyState::PATROL;
+
+        // PhysicsSystem only syncs rotation for bullets and rocks; for an
+        // enemy the AI owns tf.rotation and pushes it INTO the body. A
+        // dormant hull is tumbling under physics instead, so the direction
+        // flips: read it back, or the drawn hull freezes while the hitbox
+        // spins underneath it.
+        if (b2Body_IsValid(bodyId))
+            tf.rotation = b2Rot_GetAngle(b2Body_GetRotation(bodyId)) * 180.f / 3.14159265f;
+
+        // Contact zone: measured from the HULL EDGE, not the centre, so the
+        // same number means the same gap for a Raider and for a Barge.
+        const sf::Vector2f d = playerPos - tf.position;
+        const float gap = std::sqrt(d.x * d.x + d.y * d.y) - adef.radius;
+        const bool inZone = gap <= config["ambush_wake_range"].get_or(220.f);
+
+        if (!inZone && !ec.provoked) return false;
+
+        wakeUp(tf, ec, ai, bodyId, config, adef, playerPos, playerVel);
+        return true;
+    }
+
+    void wakeUp(const TransformComponent& tf, EnemyComponent& ec, AIState& ai, b2BodyId bodyId,
+        sol::table& config, const enemyarch::ArchetypeDef& adef,
+        sf::Vector2f playerPos, sf::Vector2f playerVel)
+    {
+        ec.dormant = false;
+        ec.provoked = false;
+        ec.wakeDuration = std::max(0.f, config["ambush_wake_time"].get_or(0.45f));
+        ec.wakeTimer = ec.wakeDuration;
+
+        // Back under power: the configured drag returns (createEnemy zeroed
+        // it so the hull could drift like a wreck).
+        if (b2Body_IsValid(bodyId)) {
+            b2Body_SetLinearDamping(bodyId, config["lineardrag_factor"].get_or(1.0f));
+            b2Body_SetAngularDamping(bodyId, config["angulardrag_factor"].get_or(2.0f));
+        }
+
+        // It was waiting FOR you. No suspicion ramp, no ALERT search: it
+        // knows exactly where you are, and it is already fighting.
+        ai.suspicion = 1.f;
+        ai.hasSeenPlayer = true;
+        ai.timeSinceSeen = 0.f;
+        ai.lastKnownPlayerPos = playerPos;
+        ai.lastKnownPlayerVel = playerVel;
+        enterState(ai, ec, EnemyState::COMBAT, AlertIcon::Spotted, config);
+
+        // enterState's first-contact move is a startled FALLBACK for ranged
+        // units. An ambusher is not startled -- it holds its ground and
+        // slides into a firing line. Melee keeps its ATTACK_RUN.
+        if (!isMelee(config)) {
+            ai.maneuver = Maneuver::STRAFE;
+            ai.maneuverTimer = 0.6f + (rand() % 30) / 100.f;
+        }
+        ec.visualState = EnemyState::COMBAT;
+
+        // The reveal: one hard ring in the faction colour and a small kick.
+        // Flat, like every other ring in the game.
+        m_em->spawnShockRing(tf.position, adef.radius * 0.6f, adef.radius * 2.6f,
+            0.35f, adef.color, 3.f, 210.f);
+        m_em->addTrauma(0.12f);
+    }
+
+    /// The reboot beat: no thrust, no weapons, tumble killed, hull swinging
+    /// onto the player. Units that fight broadside (facing_mode = "velocity")
+    /// do not turn nose-on here either -- their turret wakes instead.
+    void updateReboot(float dt, TransformComponent& tf, EnemyComponent& ec, b2BodyId bodyId,
+        sf::Vector2f playerPos, sol::table& config)
+    {
+        ec.wakeTimer = std::max(0.f, ec.wakeTimer - dt);
+        ec.telegraphActive = false;
+        ec.telegraphTimer = 0.f;
+        if (!b2Body_IsValid(bodyId)) return;
+
+        b2Body_SetAngularVelocity(bodyId, 0.f);
+        if (config["facing_mode"].get_or<std::string>("target") == "velocity") return;
+
+        sf::Vector2f dir = playerPos - tf.position;
+        const float l = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+        if (l < 0.01f) return;
+        dir /= l;
+        turnToward(tf, bodyId, dir, config["rotation_speed"].get_or(4.f) * 1.5f, dt);
     }
 
     // ========================================================================

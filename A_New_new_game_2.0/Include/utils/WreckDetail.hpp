@@ -8,15 +8,14 @@
  * ============================================================================
  * A wreck used to be the live ship's silhouette with one flat fill and one
  * stroke. At gameplay distance that reads as "ship-shaped rock". What makes a
- * hull read as a DEAD SHIP is everything the design lab layers on top:
+ * hull read as a DEAD SHIP is what the design lab layers on top:
  *
  *   BITES     torn edges -- vertices pulled toward the centre, so a wing or
  *             sponson is visibly missing
- *   BREACHES  holes punched through to space, with a torn lip that catches
- *             starlight and a soot halo bleeding onto the plating
- *   SOOT      cold scorch blooms -- no embers, nothing glowing
- *   ARMOUR    the ship's own plates: attached, missing (soot where they were)
- *             or peeled half off and hanging past the silhouette
+ *   BREACHES  holes punched through to space, with a torn lip
+ *   SOOT      burnt patches; a plate that came off leaves its own outline
+ *   ARMOUR    the ship's own plates: attached, missing or peeled half off
+ *             and hanging past the silhouette
  *   HARDWARE  dead nozzles and a drooping turret -- the unit still reads as
  *             the unit it was
  *   PITTING   micrometeorite dust on anything that has been out here a while
@@ -24,49 +23,62 @@
  * ============================================================================
  * DAMAGE TIERS
  * ============================================================================
- *   0  TURNED OFF   pristine, powered down. Indistinguishable from a live ship
- *                   running dark -- which is exactly what an ambusher needs.
+ *   0  TURNED OFF   pristine, powered down, every plate on. RESERVED FOR
+ *                   AMBUSHERS: a dormant enemy wears this; a plain wreck
+ *                   never rolls it. So a clean dark hull is always a live
+ *                   ship waiting -- the tell is fair, and it is the only one.
  *   1  LIGHT        one bite, one breach, plating mostly attached
- *   2  HEAVY        torn sections, missing and peeled plates
- *   3  DESTROYED    deep bites, most plating gone, five breaches
+ *   2  HEAVY        torn sections, up to three breaches, missing and peeled
+ *                   plates
+ *
+ * There is no fourth tier. A "destroyed hulk" tier was tried and cut: on a
+ * Raider-sized hull, deep bites plus five breaches left nothing that read as
+ * the ship it used to be, and a wreck that cannot be identified is just a
+ * rock with extra steps.
  *
  * ============================================================================
- * WHAT IS DIFFERENT FROM THE HTML LAB, AND WHY
+ * ART DIRECTION: FLAT, NOT THE LAB'S LIGHTING
  * ============================================================================
- *  - NO CANVAS CLIP. The lab clipped soot, halos and plates to the hull with
- *    ctx.clip(). Here every overlay triangle is intersected with the hull's
- *    own triangulation (Sutherland-Hodgman, triangle vs triangle), so nothing
- *    bleeds past the silhouette onto the starfield. Done once at spawn.
+ * The HTML lab lit its wrecks: radial soot gradients, soft halos around
+ * breaches, a starlit rim, cold blue glints on every torn edge. All of that
+ * was cut. It is faked lighting, the same thing that got craters removed
+ * from rocks (RenderSystem 1.6), and next to everything else in the field
+ * it looked like it came from a different game.
  *
- *  - GRADIENTS ARE RINGS. createRadialGradient becomes concentric rings, one
- *    per gradient stop, with the colour at every clipped vertex evaluated
- *    from the same stops. Piecewise-linear along the radius, exactly like the
- *    canvas stops it replaces.
+ * What is left follows ScrapDetail's rules:
+ *   - every surface is ONE flat colour, no per-vertex gradients
+ *   - every stroke is a shade of the object's own colour -- no foreign blue
+ *   - soot is a flat translucent patch, not a bloom
+ *   - the silhouette gets the same hard outline every rock gets (`shape`'s
+ *     stroke, set in EntityFactory), nothing baked here
  *
- *  - THE STARLIGHT RIM IS NOT HERE. It depends on which way the hull faces
- *    the light, and wrecks spin, so baking it would spin the sun with them.
- *    RenderSystem draws it per frame in world space (drawColdRim).
- *
- *  - NO FLOATING DEBRIS FIELD. Baked geometry rotates rigidly with the body,
+ * ============================================================================
+ * NOT PORTED FROM THE LAB
+ * ============================================================================
+ *  - FLOATING DEBRIS FIELD. Baked geometry rotates rigidly with the body,
  *    so an orbiting debris cloud would turn into a spinning halo. Needs its
  *    own tiny system if it is wanted.
+ *  - DROP SHADOW, TILT, DRIFT. Box2D moves the body; nothing else in the
+ *    game casts a shadow.
+ *  - TRUE ALPHA HOLES. A breach is a near-black fill, not a cut; a real cut
+ *    needs a render texture per wreck.
  *
- *  - NO DROP SHADOW, NO TILT, NO DRIFT. Box2D moves the body; nothing else in
- *    the game casts a shadow.
+ * The lab clipped everything to the hull with ctx.clip(). Here overlays are
+ * intersected with the hull's own triangulation once, at spawn, so nothing
+ * spills onto the starfield.
  *
  * ============================================================================
  * OUTPUT
  * ============================================================================
- * Everything lands in ONE triangle list with colours (and alpha) baked in,
- * layered in draw order. Strokes are thin quads rather than sf::Lines so they
- * can sit UNDER later layers -- a plate seam must disappear into a breach,
- * not be drawn across it. The result goes straight into
- * RenderComponent::detailTris and rides the existing detail path: world
- * transform and hit flash included.
+ * Everything lands in ONE triangle list with colours baked in, layered in
+ * draw order. Strokes are thin quads rather than sf::Lines so they can sit
+ * UNDER later layers -- a plate seam must disappear into a breach, not be
+ * drawn across it. The result goes straight into RenderComponent::detailTris
+ * and rides the existing detail path: world transform and hit flash included.
  *
  * All geometry is in PIXELS, local to the body. `Source::unit` is pixels per
- * authored hull unit; widths and hardware sizes from the lab are multiplied
- * by it so a scaled hull keeps its proportions.
+ * authored hull unit; widths and hardware sizes are multiplied by it so a
+ * scaled hull keeps its proportions.
  *
  * @author Oleg Ivakhiv
  * @version 1.0
@@ -85,6 +97,9 @@
 namespace wreckdetail {
 
     inline constexpr float TAU = 6.2831853f;
+
+    /// Tiers are 0 (turned off), 1 (light), 2 (heavy). See the file header.
+    inline constexpr int MAX_TIER = 2;
 
     // ========================================================================
     // DATA
@@ -108,7 +123,7 @@ namespace wreckdetail {
     };
 
     struct Hole { sf::Vector2f c; float r = 0.f; std::vector<sf::Vector2f> pts; };
-    struct Blot { sf::Vector2f c; float r = 0.f; float a = 0.f; };
+    struct Blot { std::vector<sf::Vector2f> pts; float a = 0.f; };   ///< Flat soot patch
     struct Pit { sf::Vector2f c; float r = 0.f; float a = 0.f; };
 
     /// A rolled wreck: geometry only, no colour. Deterministic from the seed.
@@ -201,6 +216,32 @@ namespace wreckdetail {
             return true;
         }
 
+        inline float segDist(sf::Vector2f p, sf::Vector2f a, sf::Vector2f b) {
+            const sf::Vector2f ab{ b.x - a.x, b.y - a.y };
+            const float l2 = ab.x * ab.x + ab.y * ab.y;
+            const float t = (l2 > 1e-9f)
+                ? std::clamp(((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / l2, 0.f, 1.f) : 0.f;
+            return len({ p.x - (a.x + ab.x * t), p.y - (a.y + ab.y * t) });
+        }
+
+        /// Clear distance between two closed polygons; 0 if they touch,
+        /// cross, or one sits inside the other.
+        inline float polyGap(const std::vector<sf::Vector2f>& A, const std::vector<sf::Vector2f>& B) {
+            if (A.empty() || B.empty()) return 1e9f;
+            if (inside(A[0], B) || inside(B[0], A)) return 0.f;
+            float best = 1e9f;
+            for (size_t i = 0; i < A.size(); ++i) {
+                const auto& a0 = A[i]; const auto& a1 = A[(i + 1) % A.size()];
+                for (size_t j = 0; j < B.size(); ++j) {
+                    const auto& b0 = B[j]; const auto& b1 = B[(j + 1) % B.size()];
+                    if (segsCross(a0, a1, b0, b1)) return 0.f;
+                    best = std::min({ best, segDist(a0, b0, b1), segDist(a1, b0, b1),
+                                            segDist(b0, a0, a1), segDist(b1, a0, a1) });
+                }
+            }
+            return best;
+        }
+
         inline sf::Color scale(sf::Color c, float k, std::uint8_t a = 255) {
             const auto ch = [&](std::uint8_t v) {
                 return static_cast<std::uint8_t>(std::clamp(v * k, 0.f, 255.f));
@@ -260,9 +301,9 @@ namespace wreckdetail {
 
             /// Every hull-clipped piece of a convex polygon, as convex polygons.
             /// True when the polygon is wholly on the hull: every vertex
-            /// inside and no hull edge crossing it. Most soot and halo cells
-            /// are, and splitting them against every hull triangle anyway
-            /// multiplied a Barge's vertex count by five for nothing.
+            /// inside and no hull edge crossing it. Most pieces are, and
+            /// splitting them against every hull triangle anyway multiplies
+            /// the vertex count for nothing.
             bool contains(const std::vector<sf::Vector2f>& poly) const {
                 for (const auto& v : poly) if (!inside(v, hull)) return false;
                 for (size_t i = 0; i < poly.size(); ++i) {
@@ -337,8 +378,8 @@ namespace wreckdetail {
         }
 
         /// A stroke as a quad. `cap` extends it by half a width each way so
-        /// joints in a loop close up; left off for translucent glints, where
-        /// the overlap would show as bright dots at every corner.
+        /// joints in a loop close up; left off for translucent strokes, where
+        /// the overlap would show as darker dots at every corner.
         inline void stroke(std::vector<sf::Vertex>& out, sf::Vector2f a, sf::Vector2f b,
             float w, sf::Color c, bool cap)
         {
@@ -372,68 +413,6 @@ namespace wreckdetail {
             float w, sf::Color c, bool cap)
         {
             for (size_t i = 0; i < p.size(); ++i) stroke(out, p[i], p[(i + 1) % p.size()], w, c, cap);
-        }
-
-        // ---- radial gradients ----------------------------------------------
-
-        struct Stop { float t; float a; sf::Color c; };
-
-        /// Colour of a radial gradient at distance `dist`. Stops are over
-        /// [r0, r1]; inside r0 the first stop holds, past r1 the last.
-        template <size_t N>
-        inline sf::Color gradAt(const std::array<Stop, N>& s, float r0, float r1, float dist) {
-            const float t = std::clamp((dist - r0) / std::max(1e-4f, r1 - r0), 0.f, 1.f);
-            size_t i = 0;
-            while (i + 1 < N && t > s[i + 1].t) ++i;
-            if (i + 1 >= N) return sf::Color(s[N - 1].c.r, s[N - 1].c.g, s[N - 1].c.b, a8(s[N - 1].a));
-            const float u = std::clamp((t - s[i].t) / std::max(1e-4f, s[i + 1].t - s[i].t), 0.f, 1.f);
-            const auto L = [&](std::uint8_t x, std::uint8_t y) {
-                return static_cast<std::uint8_t>(x + (static_cast<float>(y) - x) * u);
-                };
-            return sf::Color(L(s[i].c.r, s[i + 1].c.r), L(s[i].c.g, s[i + 1].c.g),
-                L(s[i].c.b, s[i + 1].c.b), a8(s[i].a + (s[i + 1].a - s[i].a) * u));
-        }
-
-        /// A radial gradient disc, clipped to the hull. One ring per stop, so
-        /// the interpolation between rings IS the gradient.
-        template <size_t N>
-        inline void radial(std::vector<sf::Vertex>& out, const Clipper& clip,
-            sf::Vector2f c, float r0, float r1, const std::array<Stop, N>& stops, int seg = 14)
-        {
-            std::vector<float> radii;
-            radii.push_back(0.f);
-            for (const auto& s : stops) {
-                const float r = r0 + s.t * (r1 - r0);
-                if (r > radii.back() + 0.05f) radii.push_back(r);
-            }
-            const auto ring = [&](size_t ri, int k) {
-                const float a = (k % seg) / static_cast<float>(seg) * TAU;
-                return sf::Vector2f{ c.x + std::cos(a) * radii[ri], c.y + std::sin(a) * radii[ri] };
-                };
-            const auto emitPiece = [&](const std::vector<sf::Vector2f>& piece) {
-                std::uint8_t maxA = 0;
-                std::vector<sf::Color> cols;
-                cols.reserve(piece.size());
-                for (const auto& v : piece) {
-                    cols.push_back(gradAt(stops, r0, r1, len({ v.x - c.x, v.y - c.y })));
-                    maxA = std::max(maxA, cols.back().a);
-                }
-                if (maxA < 2) return;                       // invisible, skip it
-                for (size_t i = 1; i + 1 < piece.size(); ++i) {
-                    out.push_back(sf::Vertex{ piece[0], cols[0] });
-                    out.push_back(sf::Vertex{ piece[i], cols[i] });
-                    out.push_back(sf::Vertex{ piece[i + 1], cols[i + 1] });
-                }
-                };
-            for (size_t ri = 1; ri < radii.size(); ++ri) {
-                for (int k = 0; k < seg; ++k) {
-                    std::vector<sf::Vector2f> cell;
-                    if (ri == 1) cell = { c, ring(1, k), ring(1, k + 1) };
-                    else cell = { ring(ri - 1, k), ring(ri, k), ring(ri, k + 1), ring(ri - 1, k + 1) };
-                    if (enemyarch::geom::signedArea(cell) < 0.f) std::reverse(cell.begin(), cell.end());
-                    clip.clipConvex(cell, emitPiece);
-                }
-            }
         }
 
         // ---- lab generators --------------------------------------------------
@@ -522,7 +501,7 @@ namespace wreckdetail {
         using namespace detail;
         Model m;
         Rng rng(seed);
-        m.tier = std::clamp(tier, 0, 3);
+        m.tier = std::clamp(tier, 0, MAX_TIER);
         m.pristine = (m.tier == 0);
         m.hull = src.hull;
         if (src.hull.size() < 3) return m;
@@ -538,18 +517,12 @@ namespace wreckdetail {
 
         // ---- BITES --------------------------------------------------------
         if (!m.pristine) {
-            const int count = dmg;
-            const int gap = (dmg == 3) ? 3 : 2;
             std::vector<Bite> bites;
-            const auto idx = pickIndices(n, count, rng, gap);
+            const auto idx = pickIndices(n, dmg, rng, 2);   // light 1 bite, heavy 2
             for (size_t i = 0; i < idx.size(); ++i) {
                 Bite b{ idx[i], 1, 0.f };
                 if (dmg == 1) { b.radius = 1; b.depth = 0.22f + rng() * 0.16f; }
-                else if (dmg == 2) { b.radius = (i == 0) ? 2 : 1; b.depth = 0.44f + rng() * 0.22f; }
-                else {
-                    b.radius = (i == 0) ? 3 : 2;
-                    b.depth = (i == 0) ? 0.88f + rng() * 0.10f : 0.55f + rng() * 0.30f;
-                }
+                else { b.radius = (i == 0) ? 2 : 1; b.depth = 0.44f + rng() * 0.22f; }
                 bites.push_back(b);
             }
 
@@ -581,54 +554,67 @@ namespace wreckdetail {
             };
 
         // ---- BREACHES ------------------------------------------------------
+        // Two rules, both hard:
+        //   FIT   every lip vertex and edge midpoint on the hull. The lab's
+        //         clip hid a breach that overhung the edge; here it would draw
+        //         a void out in space. Shrink until it fits.
+        //   APART no breach touches another. Two voids that merge read as one
+        //         blob with a seam through it, not as two hits. The gap is a
+        //         few lip-strokes wide so the plating between them stays
+        //         visible at gameplay zoom.
+        // A breach that cannot satisfy both after all its tries is dropped:
+        // a small hull simply gets fewer holes, which is the right outcome.
         if (!m.pristine) {
-            const int holeCount = dmg == 1 ? 1 : dmg == 2 ? 3 : 5;
+            const int holeCount = (dmg == 1) ? 1 : 3;
+            const float gap = std::max(3.f * u, hullR * 0.05f);
             for (int i = 0; i < holeCount; ++i) {
-                sf::Vector2f c;
-                bool ok = false;
-                for (int attempt = 0; attempt < 40 && !ok; ++attempt) {
-                    c = randIn();
-                    ok = inside(c, m.hull);
-                    if (ok) {
-                        float nearest = 1e9f;
-                        for (const auto& v : m.hull) nearest = std::min(nearest, len({ v.x - c.x, v.y - c.y }));
-                        if (nearest < hullR * 0.14f) ok = false;
-                    }
-                }
-                if (!ok) continue;
+                bool placed = false;
+                for (int attempt = 0; attempt < 30 && !placed; ++attempt) {
+                    const sf::Vector2f c = randIn();
+                    if (!inside(c, m.hull)) continue;
+                    float nearest = 1e9f;
+                    for (const auto& v : m.hull) nearest = std::min(nearest, len({ v.x - c.x, v.y - c.y }));
+                    if (nearest < hullR * 0.14f) continue;
 
-                const float rBase = hullR * (0.07f + rng() * 0.10f);
-                float r = (dmg == 3 && i == 0) ? rBase * 1.9f : rBase * (0.8f + dmg * 0.18f);
-                const int verts = 8 + static_cast<int>(rng() * 3);
-
-                // The lab's clip hid a breach that overhung the edge. Here
-                // it would draw a void out in space, so it has to fit: shrink
-                // until every lip vertex is on the hull.
-                for (int shrink = 0; shrink < 4; ++shrink) {
-                    auto pts = makeHole(c, r, rng, verts);
-                    bool fits = true;
-                    for (size_t k = 0; k < pts.size() && fits; ++k) {
-                        const auto& a = pts[k];
-                        const auto& b = pts[(k + 1) % pts.size()];
-                        fits = inside(a, m.hull) && inside({ (a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f }, m.hull);
+                    float r = hullR * (0.07f + rng() * 0.10f) * (0.8f + dmg * 0.18f);
+                    const int verts = 8 + static_cast<int>(rng() * 3);
+                    for (int shrink = 0; shrink < 4 && !placed; ++shrink, r *= 0.75f) {
+                        auto pts = makeHole(c, r, rng, verts);
+                        bool fits = true;
+                        for (size_t k = 0; k < pts.size() && fits; ++k) {
+                            const auto& p0 = pts[k];
+                            const auto& p1 = pts[(k + 1) % pts.size()];
+                            fits = inside(p0, m.hull)
+                                && inside({ (p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f }, m.hull);
+                        }
+                        if (!fits) continue;
+                        bool apart = true;
+                        for (const auto& other : m.holes)
+                            if (polyGap(pts, other.pts) < gap) { apart = false; break; }
+                        // Shrinking cannot fix an overlap with a neighbour
+                        // centred right here -- move on to a new spot.
+                        if (!apart) break;
+                        m.holes.push_back({ c, r, std::move(pts) });
+                        placed = true;
                     }
-                    if (fits) { m.holes.push_back({ c, r, std::move(pts) }); break; }
-                    r *= 0.75f;
                 }
             }
         }
 
         // ---- SOOT ----------------------------------------------------------
+        // Flat patches. Radius is ~0.6 of the lab's bloom radius: a gradient
+        // only reads as dark in its inner half, so a flat patch of the full
+        // radius would be twice the visual size.
         if (!m.pristine) {
             const int scorchCount = 2 + dmg * 2;
             for (int i = 0; i < scorchCount; ++i) {
                 const Hole* h = (i < static_cast<int>(m.holes.size())) ? &m.holes[static_cast<size_t>(i)] : nullptr;
                 sf::Vector2f c;
-                if (h) c = { h->c.x + (rng() - 0.5f) * hullR * 0.6f, h->c.y + (rng() - 0.5f) * hullR * 0.6f };
+                if (h) c = { h->c.x + (rng() - 0.5f) * hullR * 0.3f, h->c.y + (rng() - 0.5f) * hullR * 0.3f };
                 else   c = randIn();
-                m.scorch.push_back({ c,
-                    hullR * (0.14f + rng() * 0.22f) * (1.f + dmg * 0.14f),
-                    (h ? 0.55f : 0.25f) + dmg * 0.08f });
+                const float r = hullR * (0.14f + rng() * 0.22f) * (1.f + dmg * 0.14f) * 0.6f;
+                m.scorch.push_back({ makeHole(c, r, rng, 7 + static_cast<int>(rng() * 3)),
+                    (h ? 0.38f : 0.20f) + dmg * 0.05f });
             }
         }
 
@@ -638,13 +624,15 @@ namespace wreckdetail {
             m.plates = src.plates;
         }
         else {
-            const float dropChance = dmg == 1 ? 0.06f : dmg == 2 ? 0.30f : 0.62f;
+            const float dropChance = (dmg == 1) ? 0.06f : 0.30f;
             for (const auto& pl : src.plates) {
                 const sf::Vector2f pc = centroidOf(pl.pts);
                 if (!inside(pc, m.hull)) continue;              // bitten away
 
-                if (rng() < dropChance) {                       // gone: soot where it sat
-                    m.scorch.push_back({ pc, hullR * 0.28f, 0.45f });
+                if (rng() < dropChance) {
+                    // Gone. It leaves its own outline burnt into the hull,
+                    // so the missing plate still reads as a plate.
+                    m.scorch.push_back({ pl.pts, 0.40f });
                     continue;
                 }
                 // Only small plates peel. A full-length belt like the Barge's
@@ -652,7 +640,7 @@ namespace wreckdetail {
                 // not as loose armour -- a plate that big stays or goes.
                 const float plateArea = std::fabs(enemyarch::geom::signedArea(pl.pts));
                 const bool peelable = plateArea < hullArea * 0.12f;
-                if (peelable && dmg >= 2 && rng() < (dmg == 3 ? 0.38f : 0.16f)) {
+                if (peelable && dmg >= 2 && rng() < 0.16f) {
                     // Peeled: pushed outward from the keel and twisted about
                     // its own centre, so it hangs off the silhouette. The lab
                     // rotated about the hull origin, which on a long hull
@@ -704,10 +692,14 @@ namespace wreckdetail {
     // ========================================================================
 
     /**
-     * @param cold  The type's cold hull colour. Every shade derives from it.
+     * @param cold          The type's cold hull colour. Every shade derives from it.
+     * @param outline       Silhouette stroke colour -- pass the one rocks use.
+     * @param outlineWidth  Silhouette stroke width, px.
      * @return Triangles, colours and alpha baked, in draw order.
      */
-    inline std::vector<sf::Vertex> bake(const Source& src, const Model& m, sf::Color cold) {
+    inline std::vector<sf::Vertex> bake(const Source& src, const Model& m, sf::Color cold,
+        sf::Color outline, float outlineWidth)
+    {
         using namespace detail;
         std::vector<sf::Vertex> out;
         if (m.hull.size() < 3) return out;
@@ -723,26 +715,38 @@ namespace wreckdetail {
             for (const auto& v : clip.tris) out.push_back(sf::Vertex{ v, c });
         }
 
+        // Every stroke is a shade of the hull's own colour, like scrap and
+        // rocks. One helper so the whole wreck shares one palette.
+        const sf::Color edgeLit = scale(cold, 1.55f);     // accent seams, lips, hardware
+        const sf::Color edgeDim = scale(cold, 1.15f);     // ordinary seams
+        const float thin = std::max(1.f, 0.9f * u);
+
+        // Fill a (possibly concave) polygon, clipped to the hull.
+        const auto fillClipped = [&](std::vector<sf::Vector2f> p, sf::Color c) {
+            if (p.size() < 3) return;
+            if (enemyarch::geom::signedArea(p) < 0.f) std::reverse(p.begin(), p.end());
+            const auto tris = enemyarch::geom::triangulate(p);
+            for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+                std::vector<sf::Vector2f> t{ tris[i], tris[i + 1], tris[i + 2] };
+                if (crossv(t[0], t[1], t[2]) < 0.f) std::swap(t[1], t[2]);
+                clip.clipConvex(t, [&](const std::vector<sf::Vector2f>& piece) { fan(out, piece, c); });
+            }
+            };
+
         // ---- 2. armour plates, clipped to the (bitten) hull ---------------
         const float plateK = m.pristine ? 0.88f : 0.72f - dmg * 0.04f;
         for (const auto& pl : m.plates) {
             if (pl.pts.size() < 3) continue;
-            const sf::Color c = scale(cold, pl.shade * plateK);
-            std::vector<sf::Vector2f> p = pl.pts;
-            if (enemyarch::geom::signedArea(p) < 0.f) std::reverse(p.begin(), p.end());
-            const auto ptris = enemyarch::geom::triangulate(p);
-            for (size_t i = 0; i + 2 < ptris.size(); i += 3) {
-                std::vector<sf::Vector2f> t{ ptris[i], ptris[i + 1], ptris[i + 2] };
-                if (crossv(t[0], t[1], t[2]) < 0.f) std::swap(t[1], t[2]);
-                clip.clipConvex(t, [&](const std::vector<sf::Vector2f>& piece) { fan(out, piece, c); });
-            }
-            const sf::Color edge = pl.accent ? sf::Color(150, 170, 200, a8(0.26f))
-                : sf::Color(90, 95, 105, a8(0.16f));
-            for (size_t i = 0; i < p.size(); ++i)
-                strokeClipped(out, clip, p[i], p[(i + 1) % p.size()], std::max(1.f, 0.9f * u), edge, false);
+            fillClipped(pl.pts, scale(cold, pl.shade * plateK));
+            for (size_t i = 0; i < pl.pts.size(); ++i)
+                strokeClipped(out, clip, pl.pts[i], pl.pts[(i + 1) % pl.pts.size()], thin,
+                    pl.accent ? edgeLit : edgeDim, false);
         }
 
-        // ---- 3. micrometeorite pitting --------------------------------------
+        // ---- 3. soot: flat translucent patches -----------------------------
+        for (const auto& s : m.scorch) fillClipped(s.pts, sf::Color(0, 0, 0, a8(s.a)));
+
+        // ---- 4. micrometeorite pitting --------------------------------------
         for (const auto& pt : m.pits) {
             std::vector<sf::Vector2f> hex;
             for (int k = 0; k < 6; ++k) {
@@ -752,81 +756,43 @@ namespace wreckdetail {
             fan(out, hex, sf::Color(0, 0, 0, a8(pt.a)));
         }
 
-        // ---- 4. cold scorch blooms ----------------------------------------
-        for (const auto& s : m.scorch) {
-            const std::array<Stop, 4> stops{ {
-                { 0.00f, s.a,         sf::Color(2, 2, 3) },
-                { 0.45f, s.a * 0.55f, sf::Color(5, 5, 8) },
-                { 0.78f, s.a * 0.20f, sf::Color(8, 9, 13) },
-                { 1.00f, 0.f,         sf::Color(8, 9, 13) } } };
-            radial(out, clip, s.c, 0.f, s.r, stops);
-        }
-
-        // ---- 5. breaches -----------------------------------------------------
+        // ---- 5. breaches: the void and its torn lip --------------------------
         for (const auto& h : m.holes) {
-            // soft dark halo bleeding onto the surrounding plating
-            const std::array<Stop, 4> halo{ {
-                { 0.00f, 0.94f, sf::Color(0, 0, 0) },
-                { 0.42f, 0.58f, sf::Color(6, 7, 10) },
-                { 0.78f, 0.20f, sf::Color(10, 12, 17) },
-                { 1.00f, 0.00f, sf::Color(10, 12, 17) } } };
-            radial(out, clip, h.c, h.r * 0.4f, h.r * 2.6f, halo);
-
-            // interior haze: depth, where the torn lip is wider than the void
-            const std::array<Stop, 3> haze{ {
-                { 0.00f, 0.55f, sf::Color(28, 32, 40) },
-                { 0.70f, 0.20f, sf::Color(12, 14, 18) },
-                { 1.00f, 0.00f, sf::Color(0, 0, 0) } } };
-            radial(out, clip, h.c, 0.f, h.r * 0.9f, haze, 12);
-
-            // the void itself
             fill(out, h.pts, sf::Color(2, 3, 5));
-
-            // dark inner shadow, then the cold glint on the torn lip on top
-            loop(out, h.pts, 2.6f * u, sf::Color(0, 0, 0, a8(0.55f)), true);
-            loop(out, h.pts, std::max(1.f, 1.0f * u), sf::Color(160, 182, 215, a8(0.34f)), false);
+            loop(out, h.pts, thin, edgeLit, true);
         }
 
         // ---- 6. battle scars (damaged hulls only) --------------------------
         if (!m.pristine) {
             const float w = src.scarWidth * u;
-            for (const auto& sc : src.scars) {
+            for (const auto& sc : src.scars)
                 for (size_t k = 0; k + 1 < sc.size(); ++k)
                     strokeClipped(out, clip, sc[k], sc[k + 1], w, sf::Color(2, 3, 5, a8(0.82f)), true);
-                for (size_t k = 0; k + 1 < sc.size(); ++k)
-                    strokeClipped(out, clip, sc[k], sc[k + 1], std::max(0.8f, w * 0.4f),
-                        sf::Color(140, 158, 185, a8(0.16f)), false);
-            }
         }
 
         // ---- 7. peeled plates, hanging past the silhouette ----------------
         for (const auto& pl : m.peeled) {
             fill(out, pl.pts, scale(cold, 0.68f));
-            loop(out, pl.pts, std::max(1.f, 0.9f * u), sf::Color(140, 158, 185, a8(0.32f)), false);
+            loop(out, pl.pts, thin, edgeLit, true);
         }
 
-        // ---- 8. hull outline: dark, cold -------------------------------------
-        // The starlit rim goes on top of this at draw time (RenderSystem).
-        loop(out, m.hull, 2.4f * u, sf::Color(4, 5, 8, a8(0.92f)), true);
-
-        // ---- 9. dead thrusters -----------------------------------------------
+        // ---- 8. dead thrusters -----------------------------------------------
         // Only where the hull still is: a nozzle floating past a bitten-off
         // engine block reads as a bug, not as damage.
         for (const auto& t : src.thrusters) {
             if (!inside(t, m.hull)) continue;
-            const auto rect = [&](float hw, float hh, float ox = 0.f) {
+            const auto rect = [&](float hw, float hh) {
                 return std::vector<sf::Vector2f>{
-                    { t.x + (ox - hw) * u, t.y - hh * u }, { t.x + (ox + hw) * u, t.y - hh * u },
-                    { t.x + (ox + hw) * u, t.y + hh * u }, { t.x + (ox - hw) * u, t.y + hh * u } };
+                    { t.x - hw * u, t.y - hh * u }, { t.x + hw * u, t.y - hh * u },
+                    { t.x + hw * u, t.y + hh * u }, { t.x - hw * u, t.y + hh * u } };
                 };
             const auto housing = rect(3.6f, 3.2f);
-            fan(out, housing, sf::Color(13, 14, 18));
-            loop(out, housing, std::max(0.8f, 0.8f * u), sf::Color(120, 132, 150, a8(0.45f)), false);
-            fan(out, rect(2.1f, 1.6f), sf::Color(2, 3, 5));                         // cold bore
-            fan(out, rect(0.55f, 1.5f, -1.45f), sf::Color(150, 172, 205, a8(0.10f))); // starlight on the lip
+            fan(out, housing, scale(cold, 0.25f));
+            loop(out, housing, thin, edgeLit, true);
+            fan(out, rect(2.1f, 1.6f), sf::Color(2, 3, 5));                     // cold bore
         }
 
-        // ---- 10. dead turrets, barrels drooping ------------------------------
+        // ---- 9. dead turrets, barrels drooping -------------------------------
         static const std::array<sf::Vector2f, 8> BARREL{ {
             { -3.f, 4.f }, { 3.f, 4.f }, { 3.f, -4.f }, { 1.f, -4.f },
             { 1.f, -12.f }, { -1.f, -12.f }, { -1.f, -4.f }, { -3.f, -4.f } } };
@@ -837,8 +803,8 @@ namespace wreckdetail {
                 const float a = k / 14.f * TAU;
                 ring.push_back({ tu.x + std::cos(a) * 5.2f * u, tu.y + std::sin(a) * 5.2f * u });
             }
-            fan(out, ring, sf::Color(14, 16, 20));
-            loop(out, ring, std::max(1.f, u), sf::Color(120, 132, 150, a8(0.42f)), false);
+            fan(out, ring, scale(cold, 0.25f));
+            loop(out, ring, thin, edgeLit, true);
 
             // Slumped off its firing line; the tiny offset per mount keeps two
             // dead turrets from drooping in perfect unison.
@@ -847,13 +813,15 @@ namespace wreckdetail {
             std::vector<sf::Vector2f> barrel;
             for (const auto& p : BARREL)
                 barrel.push_back({ tu.x + (p.x * cr - p.y * sr) * u, tu.y + (p.x * sr + p.y * cr) * u });
-            fill(out, barrel, sf::Color(18, 20, 23));
-            loop(out, barrel, std::max(0.9f, 0.9f * u), sf::Color(140, 152, 172, a8(0.40f)), false);
-            for (int k = 0; k < 3; ++k)                                             // cold glint on the breech
-                stroke(out, barrel[static_cast<size_t>(k)], barrel[static_cast<size_t>(k + 1)],
-                    std::max(0.6f, 0.5f * u), sf::Color(170, 190, 220, a8(0.28f)), false);
+            fill(out, barrel, scale(cold, 0.30f));
+            loop(out, barrel, thin, edgeLit, true);
         }
 
+        // ---- 10. hard outline ------------------------------------------------
+        // The same colour and width every rock's `shape` stroke has, but baked
+        // as capped quads: SFML's outline mitres sharp corners without limit,
+        // and a bitten edge is all sharp corners -- it would throw spikes.
+        loop(out, m.hull, outlineWidth, outline, true);
         return out;
     }
 

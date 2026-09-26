@@ -15,11 +15,12 @@
 #pragma once
 
 #include "core/EnemyArchetypes.hpp"
-#include "utils/ScrapDetail.hpp"
+#include "utils/FieldObjectModels.hpp"   // lab models: rock, scrap template, unstable core
 #include "utils/WreckDetail.hpp"
 #include "EntityManager.hpp"
 #include "utils/ShipDesign.hpp"
 #include <sol/sol.hpp>
+#include <optional>
 
 class EntityFactory {
 public:
@@ -283,9 +284,10 @@ public:
      * @param worldId Box2D world identifier
      * @param sizeRollOverride -1 = roll fresh; 0..1 = forced roll (used by
      *        fracture so a shard's size can be derived from its parent)
-     * @param wreckTierOverride -1 = roll from `wreck_damage`; 0..3 = force a
-     *        damage tier on a wreck type (0 = powered-down / ambush hull).
-     *        Ignored by anything that is not a wreck.
+     * @param wreckTierOverride -1 = roll from `wreck_damage`; 1 = light,
+     *        2 = heavy. Tier 0 (turned off) is refused here: it belongs to
+     *        dormant enemies, never to a plain wreck. Ignored by anything
+     *        that is not a wreck.
      * @return Persistent entity ID
      *
      * ==========================================================================
@@ -364,8 +366,13 @@ public:
         // Wreck state. Declared up here because the silhouette code below
         // jumps to `hull_done`, and a goto may not cross an initialisation.
         bool isWreck = false;
+        float wreckHp = -1.f;              // >0: the dead ship's own HP
         wreckdetail::Source wreckSrc;
         wreckdetail::Model  wreckModel;
+
+        // Lab model state (FieldObjectModels.hpp), for the same reason.
+        fieldmodel::Model fieldModel;
+        RenderComponent::FieldStyle fieldStyle = RenderComponent::FieldStyle::None;
 
         const float pixelRadius = finalSize * SCALE;
         int numPoints = 6;
@@ -409,10 +416,18 @@ public:
         // like a dead Raider rather than like a lumpy stone.
         //
         // `wreck_of = "BARGE"` goes one better: the hull, plates, nozzles,
-        // turret mounts and scars are read from the LIVE archetype in
+        // turret mounts, scars AND HP are read from the LIVE archetype in
         // enemy.lua, so the wreck can never drift out of sync with the ship
         // it used to be. An explicit `hull_points` (or `plates`, `thrusters`,
         // `turrets`, `scars`) on the asteroid type still wins, per field.
+        //
+        // `wreck_of_class = "LIGHT"` is the same idea for the player's three
+        // stock hulls: outline, engine positions and HP come from
+        // ship::ShipDesign::preset(), the hull the refit bay starts you on.
+        //
+        // HP. A wreck has the HP of the ship it was -- a dead Barge soaks
+        // what a live Barge soaks. Not scaled by the size roll either: the
+        // roll is +-8% of drift variety, not a different ship.
         //
         // Three things have to be kept apart here:
         //   VISUAL   the full concave outline, triangulated into rc.tris
@@ -439,14 +454,23 @@ public:
                     std::cerr << "[EntityFactory] wreck_of = \"" << wreckOf
                     << "\" -- no such enemy archetype. Using hull_points if set, else a plain rock.\n";
             }
+            const std::optional<ship::ShipDesign> stock =
+                stockDesignFor(config["wreck_of_class"].get_or<std::string>(""));
+
             sol::optional<sol::table> wreckDamage = config["wreck_damage"];
-            isWreck = arch.has_value() || wreckDamage.has_value();
+            isWreck = arch.has_value() || stock.has_value() || wreckDamage.has_value();
 
-            sol::optional<sol::table> hp = config["hull_points"];
-            if (!hp && arch) hp = (*arch)["hull"].get<sol::optional<sol::table>>();
+            if (arch)       wreckHp = (*arch)["hp"].get_or(250.f);
+            else if (stock) wreckHp = stock->stats().hpMax;
 
-            if (hp && hp->size() >= 3) {
-                std::vector<sf::Vector2f> pts = readLuaPoints(*hp);
+            std::vector<sf::Vector2f> pts;
+            if (sol::optional<sol::table> hp = config["hull_points"]) pts = readLuaPoints(*hp);
+            else if (arch) {
+                if (sol::optional<sol::table> ah = (*arch)["hull"]) pts = readLuaPoints(*ah);
+            }
+            else if (stock) pts = stock->renderOutline();
+
+            if (pts.size() >= 3) {
                 float maxR = 0.f;
                 for (const auto& q : pts) maxR = std::max(maxR, std::sqrt(q.x * q.x + q.y * q.y));
 
@@ -459,6 +483,8 @@ public:
 
                     if (isWreck) {
                         wreckSrc = readWreckSource(config, arch, pts, k);
+                        if (stock && wreckSrc.thrusters.empty())
+                            wreckSrc.thrusters = stockNozzles(*stock, k);
                         const int tier = rollWreckTier(sv, wreckDamage, wreckTierOverride);
                         const uint32_t seed = (static_cast<uint32_t>(rand()) * 2654435761u)
                             ^ (entityId * 40503u) ^ 0x9E3779B9u;
@@ -485,6 +511,67 @@ public:
                 }
             }
             isWreck = false;   // opted in, but nothing to build it from
+            wreckHp = -1.f;
+        }
+
+        // ====================================================================
+        // LAB MODELS -- `detail = "rock" | "cluster" | "unstable_core"`
+        //
+        // The designed field objects from the "Cold Field Objects" page. Each
+        // one builds its OWN silhouette, so it has to happen here, before the
+        // physics body is made: the collider is the convex hull of what you
+        // actually see.
+        //
+        // (The previous cluster path rebuilt the silhouette AFTER the Box2D
+        // shape had already been created from the jittered circle, so scrap
+        // piles collided -- and fractured -- as round rocks. Building first
+        // fixes that for free.)
+        //
+        // A type with no `detail`, like MAGMATIC, never enters this block and
+        // keeps the generator below exactly as it was.
+        // ====================================================================
+        {
+            const std::string detail = config["detail"].get_or<std::string>("");
+            const uint32_t fseed = (static_cast<uint32_t>(rand()) * 2654435761u)
+                ^ (entityId * 2246822519u) ^ 0x85EBCA6Bu;
+
+            if (detail == "rock") {
+                fieldmodel::RockParams rp;
+                rp.designR = config["model_r"].get_or(46.f);
+                rp.verts = config["rock_verts"].get_or(12);
+                rp.crevices = config["rock_crevices"].get_or(5);
+                rp.facets = config["rock_facets"].get_or(9);
+                rp.fractures = config["rock_fractures"].get_or(6);
+                rp.oreChance = config["rock_ore_chance"].get_or(0.45f);
+                fieldModel = fieldmodel::buildAsteroid(pixelRadius, rp, fseed);
+                fieldStyle = RenderComponent::FieldStyle::Rock;
+            }
+            else if (detail == "cluster") {
+                const std::string key = config["scrap_template"].get_or<std::string>("junk_m");
+                const fieldmodel::Template tpl = fieldmodel::readTemplate(
+                    sol::state_view(config.lua_state()), key);
+                fieldModel = fieldmodel::buildScrap(tpl, pixelRadius, fseed,
+                    (rand() % 100000) / 100.f);
+                fieldStyle = RenderComponent::FieldStyle::Scrap;
+            }
+            else if (detail == "unstable_core") {
+                fieldModel = fieldmodel::buildUnstableCore(pixelRadius, fseed);
+                fieldStyle = RenderComponent::FieldStyle::UnstableCore;
+            }
+
+            if (fieldStyle != RenderComponent::FieldStyle::None) {
+                if (fieldModel.ok()) {
+                    rc.shape.setPointCount(fieldModel.outline.size());
+                    for (size_t i = 0; i < fieldModel.outline.size(); ++i)
+                        rc.shape.setPoint(static_cast<unsigned>(i), fieldModel.outline[i]);
+                    for (const auto& c : fieldModel.physics)
+                        physicsPoints.push_back({ c.x / SCALE, c.y / SCALE });
+                    goto hull_done;
+                }
+                std::cerr << "[EntityFactory] detail = \"" << detail
+                    << "\" built nothing usable. Falling back to a plain rock.\n";
+                fieldStyle = RenderComponent::FieldStyle::None;
+            }
         }
 
         // ====================================================================
@@ -647,8 +734,10 @@ public:
         // ====================================================================
         // STATS — HP DERIVED FROM THE ROLLED SIZE
         // ====================================================================
-        const float baseHp = config["hp"].get_or(20.0f);
-        const float hpFromSize = config["hp_follows_size"].get_or(1.0f);
+        // A wreck with a ship behind it takes that ship's HP, flat. Everything
+        // else keeps the old rule.
+        const float baseHp = (wreckHp > 0.f) ? wreckHp : config["hp"].get_or(20.0f);
+        const float hpFromSize = (wreckHp > 0.f) ? 0.f : config["hp_follows_size"].get_or(1.0f);
 
         // roll^2 because HP tracks cross-sectional area, not radius. A rock
         // 20% wider has ~44% more area and should feel proportionally tougher.
@@ -701,6 +790,8 @@ public:
             adst[an] = '\0';
             em.healths.back().childAltPct = static_cast<uint8_t>(
                 std::clamp(config["child_alt_chance"].get_or(0.f), 0.f, 100.f));
+            em.healths.back().burstChildren = static_cast<uint8_t>(
+                std::clamp(config["burst_children"].get_or(0), 0, 8));
 
             const std::string ct = config["child_type"].get_or<std::string>("");
             auto& dst = em.healths.back().childType;
@@ -758,80 +849,52 @@ public:
         rc.shape.setOutlineThickness(pixelRadius > 25.f ? 2.5f : 1.8f);
 
         // ====================================================================
-        // LAYERED DETAIL
+        // LAB MODEL -- install what was built before the physics body
         //
-        // `detail = "cluster"` rebuilds the object entirely as overlapping
-        // plates; `detail = "rock"` cuts facets and craters into the outline
-        // already generated above. Both bake their colours from the fill just
-        // resolved, so the rust/steel and dark-when-big ramps carry through,
-        // and both roll every feature per object -- two piles of the same type
-        // never come out the same.
+        // The model's triangles are already painter-ordered and coloured, so
+        // they go straight onto the existing detail path (world transform and
+        // hit flash for free). The per-frame layer -- ore flicker, rivet
+        // shimmer, glints, the core's pulse -- is keyed off fieldStyle.
         //
-        // A cluster replaces the silhouette, so its physics points are taken
-        // from the union's hull instead of whatever was built above.
+        // `shape` keeps the silhouette and takes the model's DEBRIS colour as
+        // its fill: that is what the fracture path cuts shards from. Its own
+        // stroke is off; the model draws its edge itself.
         // ====================================================================
-        {
-            const std::string detail = config["detail"].get_or<std::string>("");
-            const sf::Color baseCol = rc.shape.getFillColor();
-
-            if (detail == "cluster") {
-                scrapdetail::Detail det = scrapdetail::buildCluster(
-                    pixelRadius, baseCol,
-                    config["cluster_chunks"].get_or(4),
-                    config["cluster_spread"].get_or(0.52f),
-                    config["cluster_gaps"].get_or(2),
-                    config["cluster_struts"].get_or(3));
-
-                if (!det.outline.empty()) {
-                    rc.detailTris = std::move(det.tris);
-                    rc.detailLines = std::move(det.lines);
-                    rc.tris.clear();
-                    rc.shape.setOutlineThickness(0.f);   // plates carry their own
-
-                    physicsPoints.clear();
-                    rc.shape.setPointCount(det.outline.size());
-                    for (size_t i = 0; i < det.outline.size(); ++i) {
-                        rc.shape.setPoint(static_cast<unsigned>(i), det.outline[i]);
-                        physicsPoints.push_back({ det.outline[i].x / SCALE,
-                                                  det.outline[i].y / SCALE });
-                    }
-                }
-            }
-            else if (detail == "rock") {
-                std::vector<sf::Vector2f> body;
-                body.reserve(rc.shape.getPointCount());
-                for (size_t i = 0; i < rc.shape.getPointCount(); ++i)
-                    body.push_back(rc.shape.getPoint(static_cast<unsigned>(i)));
-
-                scrapdetail::Detail det = scrapdetail::buildRock(
-                    body, baseCol, config["rock_craters"].get_or(2),
-                    config["rock_facets"].get_or(true));
-                if (!det.tris.empty()) {
-                    rc.detailTris = std::move(det.tris);
-                    rc.detailLines = std::move(det.lines);
-                    rc.tris.clear();
-                }
-            }
+        if (fieldStyle != RenderComponent::FieldStyle::None) {
+            rc.detailTris = std::move(fieldModel.tris);
+            rc.detailLines.clear();
+            rc.tris.clear();
+            rc.shape.setFillColor(fieldModel.debris);
+            rc.shape.setOutlineThickness(0.f);
+            rc.fieldStyle = fieldStyle;
+            rc.fieldFx.clear();
+            for (const auto& f : fieldModel.fx)
+                rc.fieldFx.push_back({ f.p, f.r, f.phase });
+            rc.glintSpots = std::move(fieldModel.glintSpots);
+            rc.fieldGlowR = fieldModel.glowRadius;
+            rc.fieldPhase = fieldModel.phase;
+            rc.glintTimer = 1.5f + (rand() % 300) / 100.f;   // the lab's first-glint delay
         }
 
         // ====================================================================
-        // WRECK DETAIL -- the cold-wreck scene: armour, soot, breaches, pits,
-        // scars, peeled plates, dead nozzles and turrets, dark outline. One
-        // baked triangle list on the existing detail path, so the world
-        // transform and the hit flash come for free.
+        // WRECK DETAIL -- armour, soot, breaches, pits, scars, peeled plates,
+        // dead nozzles and turrets, and the outline. One baked triangle list
+        // on the existing detail path, so the world transform and the hit
+        // flash come for free. Flat, like everything else in the field: no
+        // gradients, no lighting (see WreckDetail.hpp).
         //
-        // The starlit rim is NOT baked: it depends on which way the hull
-        // faces the light, and wrecks spin. RenderSystem draws it per frame
-        // for anything with wreckTier >= 0.
+        // The outline is the SAME colour and width as every rock's stroke,
+        // just baked -- `shape`'s own stroke is switched off because SFML
+        // mitres the torn corners into spikes.
         //
         // `shape` keeps the cold colour as its fill: that is what the
         // fracture path reads back, so scrap from a rust Barge is rust.
         // ====================================================================
         if (isWreck) {
-            const sf::Color cold = rc.shape.getFillColor();
-            rc.detailTris = wreckdetail::bake(wreckSrc, wreckModel, cold);
+            rc.detailTris = wreckdetail::bake(wreckSrc, wreckModel, rc.shape.getFillColor(),
+                rc.shape.getOutlineColor(), rc.shape.getOutlineThickness());
             rc.detailLines.clear();
-            rc.shape.setOutlineThickness(0.f);   // outline + rim are drawn elsewhere
+            rc.shape.setOutlineThickness(0.f);
             rc.wreckTier = static_cast<int8_t>(wreckModel.tier);
         }
 
@@ -950,11 +1013,18 @@ public:
  * the visual polygon (any point count, may be concave) drives rendering,
  * and a convex <= 8-point reduction of it drives Box2D. Nothing here
  * hardcodes a shape any more.
+ *
+ * @param dormant  Spawn TURNED OFF -- the ambush. The unit drifts like a
+ *        wreck, is drawn as its own tier-0 hull (same recipe, colour and
+ *        hardware as that ship's wreck), and has no AI until AISystem wakes
+ *        it. Physics and hitbox are the live ship's, unchanged: a shot that
+ *        would hit the ship hits the ambusher.
  */
     uint32_t createEnemy(EntityManager& em, sf::Vector2f pos, sol::state& lua,
         b2WorldId worldId,
         const enemyarch::EnemyRegistry& registry,
-        uint8_t archetypeId)
+        uint8_t archetypeId,
+        bool dormant = false)
     {
         const enemyarch::ArchetypeDef* defPtr = registry.byId(archetypeId);
         if (!defPtr) {
@@ -987,6 +1057,50 @@ public:
         rc.shape.setOutlineThickness(1.5f);
         rc.shape.setOutlineColor(sf::Color(255, 255, 255, 150));
 
+        // ---- Ambush: the powered-down disguise ----
+        //
+        // Built by the SAME calls a wreck of this ship is built with --
+        // readWreckSource over the matching wreck type, then build() at tier
+        // 0 and bake() -- so the disguise cannot drift away from the real
+        // thing. The only way to tell it apart is that it is undamaged:
+        // wrecks never roll tier 0, so a clean dark hull is always this.
+        float spawnRotDeg = 0.f;
+        b2Vec2 driftVel{ 0.f, 0.f };
+        float driftSpin = 0.f;
+        if (dormant) {
+            sol::state_view sv(lua);
+            const sol::optional<sol::table> wtype = wreckTypeFor(sv, def.key);
+            const float unit = config["scale"].get_or(1.0f);
+            const wreckdetail::Source src = readWreckSource(
+                wtype ? *wtype : config, sol::optional<sol::table>(config), def.visual, unit);
+            const uint32_t seed = (static_cast<uint32_t>(rand()) * 2654435761u) ^ (entityId * 40503u);
+            const wreckdetail::Model model = wreckdetail::build(src, 0, seed);
+
+            const sf::Color cold = coldColorFor(config, wtype, def.color);
+            const sf::Color outline(
+                static_cast<uint8_t>(std::min(255, cold.r + 45)),
+                static_cast<uint8_t>(std::min(255, cold.g + 45)),
+                static_cast<uint8_t>(std::min(255, cold.b + 50)));
+            rc.detailTris = wreckdetail::bake(src, model, cold, outline,
+                def.radius > 25.f ? 2.5f : 1.8f);
+            rc.wreckTier = 0;
+
+            // Adrift like the wrecks around it: random heading, slow drift,
+            // slow tumble. A ship holding perfectly still in a field where
+            // everything else moves is its own tell.
+            const auto frand = []() { return (rand() % 1000) / 1000.f; };
+            spawnRotDeg = frand() * 360.f;
+            float vmin = 0.6f, vmax = 1.8f;
+            if (sol::optional<sol::table> ds = config["ambush_drift_speed"]) {
+                vmin = (*ds)[1].get_or(vmin);
+                vmax = (*ds)[2].get_or(vmax);
+            }
+            const float sp = vmin + (vmax - vmin) * frand();
+            const float da = frand() * 6.2831853f;
+            driftVel = { std::cos(da) * sp, std::sin(da) * sp };
+            driftSpin = (frand() * 2.f - 1.f) * config["ambush_spin"].get_or(0.35f);
+        }
+
         // ---- Physics body ----
         b2BodyDef bodyDef = b2DefaultBodyDef();
         bodyDef.type = b2_dynamicBody;
@@ -998,6 +1112,17 @@ public:
         // matched anything in enemy.lua, so every pirate has silently been
         // using get_or's 0.5 default instead of the configured 2.0.
         bodyDef.angularDamping = config["angulardrag_factor"].get_or(2.0f);
+
+        // A dormant hull is an object: no drag, so it keeps drifting the way
+        // a wreck does. AISystem puts the configured drag back on waking.
+        if (dormant) {
+            bodyDef.linearDamping = 0.f;
+            bodyDef.angularDamping = 0.05f;
+            bodyDef.rotation = b2MakeRot(spawnRotDeg * 3.14159265f / 180.f);
+            bodyDef.linearVelocity = driftVel;
+            bodyDef.angularVelocity = driftSpin;
+            em.transforms.back().rotation = spawnRotDeg;
+        }
 
         const b2BodyId bid = b2CreateBody(worldId, &bodyDef);
 
@@ -1038,6 +1163,7 @@ public:
         ec.archetype = archetypeId;
         ec.fireRate = config["fire_rate"].get_or(1.8f);
         ec.attackRange = config["attack_range"].get_or(480.f);
+        ec.dormant = dormant;
 
         const float hp = config["hp"].get_or(250.f);
 
@@ -1471,30 +1597,97 @@ private:
         return src;
     }
 
+    /// `wreck_of_class = "LIGHT" | "MEDIUM" | "HEAVY"` -> that class's
+    /// stock preset. Anything else -> nothing.
+    static std::optional<ship::ShipDesign> stockDesignFor(const std::string& cls) {
+        if (cls.empty()) return std::nullopt;
+        if (cls == "LIGHT")  return ship::ShipDesign::preset(ship::HullClass::Light);
+        if (cls == "MEDIUM") return ship::ShipDesign::preset(ship::HullClass::Medium);
+        if (cls == "HEAVY")  return ship::ShipDesign::preset(ship::HullClass::Heavy);
+        std::cerr << "[EntityFactory] wreck_of_class = \"" << cls
+            << "\" -- expected LIGHT, MEDIUM or HEAVY. Ignored.\n";
+        return std::nullopt;
+    }
+
+    /// Dead nozzles where the preset mounts its drives. Mounts sit on the
+    /// hitbox edge; they are pulled a few units inside so the housing reads
+    /// as part of the hull rather than hanging off it.
+    static std::vector<sf::Vector2f> stockNozzles(const ship::ShipDesign& d, float k) {
+        std::vector<sf::Vector2f> out;
+        for (int idx : d.mountedEngines())
+            for (const auto& slot : d.engineSlots())
+                if (slot.index == idx) {
+                    out.push_back({ (slot.position.x - slot.outward.x * 3.5f) * k,
+                                    (slot.position.y - slot.outward.y * 3.5f) * k });
+                    break;
+                }
+        return out;
+    }
+
+    /// Cold hull colour for a dormant unit: `ambush_cold_color` on the
+    /// archetype if set, else its wreck type's `color`, else the live colour
+    /// drained to a cold grey-brown.
+    static sf::Color coldColorFor(const sol::table& arch, const sol::optional<sol::table>& wreckType,
+        sf::Color live)
+    {
+        const auto read = [](const sol::table& t, sf::Color fb) {
+            return sf::Color(
+                static_cast<uint8_t>(std::clamp(t["r"].get_or(static_cast<float>(fb.r)), 0.f, 255.f)),
+                static_cast<uint8_t>(std::clamp(t["g"].get_or(static_cast<float>(fb.g)), 0.f, 255.f)),
+                static_cast<uint8_t>(std::clamp(t["b"].get_or(static_cast<float>(fb.b)), 0.f, 255.f)));
+            };
+        const sf::Color drained(
+            static_cast<uint8_t>(live.r * 0.22f + 44.f),
+            static_cast<uint8_t>(live.g * 0.22f + 42.f),
+            static_cast<uint8_t>(live.b * 0.22f + 42.f));
+        if (sol::optional<sol::table> c = arch["ambush_cold_color"]) return read(*c, drained);
+        if (wreckType)
+            if (sol::optional<sol::table> c = (*wreckType)["color"]) return read(*c, drained);
+        return drained;
+    }
+
+    /// The asteroid type whose `wreck_of` names this archetype, if any.
+    /// A dormant ambusher borrows its look from here -- colour, nozzle
+    /// overrides -- so it is exactly what that ship's wreck would be at
+    /// tier 0, and nothing about it says "different object".
+    static sol::optional<sol::table> wreckTypeFor(sol::state_view sv, const std::string& archKey) {
+        sol::optional<sol::table> types = sv["asteroid_types"];
+        if (!types) return sol::nullopt;
+        for (const auto& kv : *types) {
+            if (!kv.second.is<sol::table>()) continue;
+            sol::table t = kv.second.as<sol::table>();
+            if (t["wreck_of"].get_or<std::string>("") == archKey) return t;
+        }
+        return sol::nullopt;
+    }
+
     /**
-     * @brief Which damage tier a new wreck rolls.
+     * @brief Which damage tier a new wreck rolls: 1 (light) or 2 (heavy).
+     *
+     * NEVER 0. The pristine turned-off hull is the ambusher's disguise, so a
+     * plain wreck must not wear it -- otherwise a clean dark hull would mean
+     * "maybe a trap" instead of "a trap". Every path here clamps to 1..2,
+     * the QA switch included.
      *
      * Priority: the caller's override, then `asteroid_visuals.wreck_force_tier`
-     * (a QA switch -- set it and F5 to see every wreck at one tier), then a
-     * weighted roll over `wreck_damage = { w0, w1, w2, w3 }`.
+     * (set it and F5 to see every new wreck at one tier), then a weighted
+     * roll over `wreck_damage = { light = w1, heavy = w2 }`.
      */
     static int rollWreckTier(sol::state_view sv, const sol::optional<sol::table>& weights,
         int overrideTier)
     {
-        if (overrideTier >= 0) return std::clamp(overrideTier, 0, 3);
+        if (overrideTier >= 0) return std::clamp(overrideTier, 1, wreckdetail::MAX_TIER);
 
         sol::optional<sol::table> av = sv["asteroid_visuals"];
         const int forced = av ? (*av)["wreck_force_tier"].get_or(-1) : -1;
-        if (forced >= 0) return std::clamp(forced, 0, 3);
+        if (forced >= 0) return std::clamp(forced, 1, wreckdetail::MAX_TIER);
 
-        float w[4] = { 1.f, 3.f, 4.f, 2.f };
-        if (weights)
-            for (int t = 0; t < 4; ++t) w[t] = std::max(0.f, (*weights)[t + 1].get_or(0.f));
-        const float total = w[0] + w[1] + w[2] + w[3];
-        if (total <= 0.f) return 2;
-
-        float r = (rand() % 10000) / 10000.f * total;
-        for (int t = 0; t < 4; ++t) { if (r < w[t]) return t; r -= w[t]; }
-        return 3;
+        float light = 3.f, heavy = 4.f;
+        if (weights) {
+            light = std::max(0.f, (*weights)["light"].get_or(light));
+            heavy = std::max(0.f, (*weights)["heavy"].get_or(heavy));
+        }
+        if (light + heavy <= 0.f) return 2;
+        return ((rand() % 10000) / 10000.f * (light + heavy) < light) ? 1 : 2;
     }
 };

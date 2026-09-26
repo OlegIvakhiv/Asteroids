@@ -215,6 +215,9 @@ public:
 
                 auto& tf = m_em->transforms[i];
                 const auto& ec = m_em->enemies[i];
+                // A dormant hull drifts, it does not fly: no exhaust until
+                // the reboot is over and the engines are actually lit.
+                if (!ec.powered()) continue;
                 float rot = tf.rotation * 3.14159f / 180.f;
                 sf::Vector2f forward(std::sin(rot), -std::cos(rot));
                 sf::Vector2f right(std::cos(rot), std::sin(rot));

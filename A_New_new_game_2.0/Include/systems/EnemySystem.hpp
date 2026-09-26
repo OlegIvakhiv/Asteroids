@@ -121,9 +121,12 @@ public:
      * scripted POI dropping a squad, goes through here -- NOT through the
      * director, which would refuse them.
      *
+     * @param dormant  Spawn TURNED OFF -- an ambusher (see AISystem 2.3). The
+     *                 director rolls this itself from `ambush_chance`; this
+     *                 door is for POIs and the dev menu.
      * @return The new entity id, or 0 if the archetype does not exist.
      */
-    uint32_t summon(const std::string& archetypeKey, sf::Vector2f pos) {
+    uint32_t summon(const std::string& archetypeKey, sf::Vector2f pos, bool dormant = false) {
         if (!m_registry) return 0;
         const uint8_t id = m_registry->idOf(archetypeKey);
         if (id == enemyarch::INVALID_ARCHETYPE) {
@@ -131,7 +134,7 @@ public:
                 << "\") -- no such archetype.\n";
             return 0;
         }
-        return m_ef->createEnemy(*m_em, pos, *m_lua, m_worldId, *m_registry, id);
+        return m_ef->createEnemy(*m_em, pos, *m_lua, m_worldId, *m_registry, id, dormant);
     }
 
 private:
@@ -326,12 +329,33 @@ private:
         // buys the approach time its silhouette is supposed to be doing work
         // during.
         const auto& def = archetypes[chosen];
-        const float dist = 1200.f + def.threatCost * 60.f;
-        const float angle = (rand() % 360) * 3.14159f / 180.f;
+
+        // ---- Ambush roll ----
+        // A dormant unit is useless behind the player: nobody turns round to
+        // inspect a wreck. It goes AHEAD, inside a cone around the direction
+        // of travel, far enough out to arrive off-screen and near enough that
+        // the player's own course brings them to it. Standing still, there is
+        // no "ahead", so it falls back to a random bearing like everything
+        // else.
+        const float ambushChance = def.config["ambush_chance"].get_or(0.f);
+        const bool dormant = ambushChance > 0.f
+            && (rand() % 10000) < static_cast<int>(ambushChance * 10000.f);
+
+        float dist = 1200.f + def.threatCost * 60.f;
+        float angle = (rand() % 360) * 3.14159f / 180.f;
+        if (dormant) {
+            dist = def.config["ambush_spawn_distance"].get_or(1250.f);
+            const size_t pIdx = m_em->getEntityIndex(m_playerEntityId);
+            if (pIdx != (size_t)-1) {
+                const b2Vec2 v = b2Body_GetLinearVelocity(m_em->physics[pIdx].bodyId);
+                if (v.x * v.x + v.y * v.y > 1.f)   // > 1 m/s: actually going somewhere
+                    angle = std::atan2(v.y, v.x) + ((rand() % 1000) / 1000.f - 0.5f) * 1.2f;   // +-34 deg
+            }
+        }
         const sf::Vector2f spawnPos = playerPos +
             sf::Vector2f(std::cos(angle) * dist, std::sin(angle) * dist);
 
-        m_ef->createEnemy(*m_em, spawnPos, *m_lua, m_worldId, *m_registry, chosen);
+        m_ef->createEnemy(*m_em, spawnPos, *m_lua, m_worldId, *m_registry, chosen, dormant);
     }
 
     // ---- Dependencies ----

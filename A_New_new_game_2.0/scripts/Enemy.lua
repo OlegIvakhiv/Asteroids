@@ -424,6 +424,31 @@ enemy_defaults = {
     threat_cost           = 3,
     summon_only           = false,
 
+    -- ===== AMBUSH (spawned TURNED OFF) =====
+    -- A director spawn can arrive powered down: drifting like a wreck, drawn
+    -- as this ship's own undamaged wreck (tier 0), no AI, no engines, no
+    -- vision cone. Plain wrecks never look like that, so a clean dark hull
+    -- is always one of these -- the only tell, and a fair one.
+    --
+    -- It wakes, straight into COMBAT, on either:
+    --   * the player within ambush_wake_range of its HULL EDGE -- any
+    --     direction, 360 degrees
+    --   * any damage the PLAYER deals it, from any range (bullets, rift,
+    --     ram, parried rounds/rocks, blasts the player caused). Stray rocks
+    --     and other pirates' fire do NOT wake it.
+    --
+    -- Waking is a short reboot (ambush_wake_time): the hull flickers from
+    -- cold to live and swings toward you, and cannot fire or lunge yet.
+    -- Set it to 0 for a zero-warning wake.
+    ambush_chance         = 0.0,     -- share of this unit's director spawns
+    ambush_wake_range     = 220.0,   -- px beyond the hull edge
+    ambush_wake_time      = 0.45,    -- s of reboot before it may attack
+    ambush_spawn_distance = 1250.0,  -- px, placed AHEAD of the player's heading
+    ambush_drift_speed    = { 0.6, 1.8 },   -- m/s while dormant
+    ambush_spin           = 0.35,    -- rad/s max tumble while dormant
+    -- ambush_cold_color = { r=, g=, b= }   -- optional; default is the colour
+    --                                         of this unit's wreck type
+
     -- ===== COLOUR =====
     -- One palette for the whole faction. Hue carries STATE (patrol / alert /
     -- combat); silhouette carries IDENTITY. Giving each unit its own base
@@ -561,6 +586,7 @@ enemy_archetypes.RAIDER = derive {
     spawn_weight = 150.0,
     max_active   = 6,
     threat_cost  = 3,
+    ambush_chance = 0.15,
 
     color = { r = 200, g = 70, b = 55 },
 }
@@ -721,6 +747,8 @@ enemy_archetypes.BARGE = derive {
     spawn_weight         = 120.0,
     max_active           = 2,
     threat_cost          = 6,
+    ambush_chance        = 0.20,   -- a "dead" capital ship whose turret swings
+                                   -- round is the ambush worth the most
 
     color = { r = 200, g = 70, b = 55 },
 }
@@ -920,6 +948,7 @@ enemy_archetypes.BERSERKER = derive {
     spawn_weight         = 70.0,
     max_active           = 3,
     threat_cost          = 4,      -- Three of them fill the 12 budget
+    ambush_chance        = 0.30,   -- melee: waking at arm's length is the point
 
     color = { r = 200, g = 70, b = 55 },
 }
@@ -1115,6 +1144,7 @@ enemy_archetypes.MANIAC = derive {
     spawn_weight         = 50.0,
     max_active           = 2,
     threat_cost          = 4,
+    ambush_chance        = 0.20,
 
     -- Standard Rakshari red. He is identified by SHAPE -- split jaws, outward
     -- flanks, three uneven engines -- and by the frenzy shift when it matters,

@@ -259,8 +259,9 @@ private:
     enum class Where { Cursor, NearPlayer, Random };
     enum class Pick { None, SpawnEnemy, SpawnAsteroid, TeleportPlayer, SelectEnemy, TeleportEnemy };
 
-    static constexpr const char* AST_TYPES[] = { "SMALL", "MEDIUM", "LARGE", "MAGMATIC" };
-    static constexpr int   AST_TYPE_COUNT = 4;
+    static constexpr const char* AST_TYPES[] = { "SMALL", "MEDIUM", "LARGE", "MAGMATIC",
+        "SCRAP_CHUNK", "SCRAP", "SCRAP_LARGE", "UNSTABLE_CORE" };
+    static constexpr int   AST_TYPE_COUNT = 8;
     static constexpr int   COUNTS[] = { 1, 3, 5, 10 };
     static constexpr int   COUNT_N = 4;
     static constexpr float SPEEDS[] = { 0.25f, 0.5f, 0.75f, 1.f, 1.5f, 2.f, 3.f, 4.f };
@@ -284,6 +285,13 @@ private:
         case EnemyState::ALERT:  return "ALERT";
         default:                 return "COMBAT";
         }
+    }
+
+    /// stateName, but a dormant hull says so instead of "PATROL".
+    static std::string stateLabel(const EnemyComponent& ec) {
+        if (ec.dormant) return "DORMANT";
+        if (ec.wakeTimer > 0.f) return "REBOOT";
+        return stateName(ec.visualState);
     }
 
     static sf::Color stateColor(EnemyState s) {
@@ -445,10 +453,11 @@ private:
             // Spread a group on a small ring. Stacking them on one point makes
             // Box2D resolve the overlap as an explosion.
             const sf::Vector2f pos = (k == 0) ? base : base + ring(90.f + 25.f * k);
-            if (m_enemySys->summon(key, pos) != 0) ++made;
+            if (m_enemySys->summon(key, pos, m_spawnDormant) != 0) ++made;
         }
         char b[96];
-        std::snprintf(b, sizeof(b), "SPAWNED %d x %s", made, all[static_cast<size_t>(m_archIdx)].display.c_str());
+        std::snprintf(b, sizeof(b), "SPAWNED %d x %s%s", made, all[static_cast<size_t>(m_archIdx)].display.c_str(),
+            m_spawnDormant ? " (DORMANT)" : "");
         toast(b);
     }
 
@@ -679,6 +688,7 @@ private:
             if (int d = stepper(y, "COUNT", std::to_string(COUNTS[m_countIdx]))) m_countIdx = wrap(m_countIdx, d, COUNT_N);
             if (int d = stepper(y, "WHERE", whereName(m_enemyWhere)))
                 m_enemyWhere = static_cast<Where>(wrap(static_cast<int>(m_enemyWhere), d, 3));
+            toggle(y, "SPAWN DORMANT (AMBUSH)", m_spawnDormant);
 
             const bool armed = m_pick == Pick::SpawnEnemy;
             const tui::Rect r{ m_cx, y, m_cw, 26.f };
@@ -767,12 +777,13 @@ private:
         char b[128];
         std::snprintf(b, sizeof(b), "%s  #%u", def.display.c_str(), id);
         line(y, b, tui::CYAN);
-        std::snprintf(b, sizeof(b), "HP %.0f / %.0f   %s", hp.currentHp, hp.maxHp, stateName(ec.visualState));
+        std::snprintf(b, sizeof(b), "HP %.0f / %.0f   %s", hp.currentHp, hp.maxHp, stateLabel(ec).c_str());
         line(y, b);
 
         if (action(y, "DAMAGE 25%")) {
             m_em->healths[i].currentHp -= hp.maxHp * 0.25f;
             m_em->enemies[i].hitFlashTimer = 0.12f;   // reads as a hit to the AI, as a real shot would
+            m_em->enemies[i].provoke();               // ...and wakes a dormant one, as a real shot would
         }
         if (action(y, "KILL")) m_em->healths[i].currentHp = 0.f;
         {
@@ -895,7 +906,25 @@ private:
         forEachEnemy([&](size_t i) {
             const auto& tf = m_em->transforms[i];
             const auto& ec = m_em->enemies[i];
-            sol::table cfg = m_registry->resolve(ec.archetype).config;
+            const auto& adefV = m_registry->resolve(ec.archetype);
+            sol::table cfg = adefV.config;
+
+            // Dormant: no cone at all. Its only sense is the 360-degree wake
+            // ring, measured from the hull edge -- same test as
+            // AISystem::updateDormant.
+            if (ec.dormant) {
+                const float wr = adefV.radius + cfg["ambush_wake_range"].get_or(220.f);
+                const bool inside = alive && len(pp - tf.position) <= wr;
+                const sf::Color c = inside ? tui::RED : tui::TEXT_DIM;
+                sf::CircleShape wake(wr, 48);
+                wake.setOrigin({ wr, wr });
+                wake.setPosition(tf.position);
+                wake.setFillColor(tui::UI::withAlpha(c, 18));
+                wake.setOutlineThickness(1.f);
+                wake.setOutlineColor(tui::UI::withAlpha(c, 110));
+                m_window->draw(wake);
+                return;
+            }
 
             // Same numbers and the same test as AISystem::canSee. If that
             // function changes, this must follow, or the overlay lies.
@@ -1034,7 +1063,7 @@ private:
             y += 14.f;
 
             const std::string commit = commitName(ec);
-            std::string st = stateName(ec.visualState);
+            std::string st = stateLabel(ec);
             if (!commit.empty())                                   st += " / " + commit;
             else if (ai && ec.visualState == EnemyState::COMBAT)   st += std::string(" / ") + maneuverName(ai->maneuver);
             m_ui.text({ x, y }, st, 11, stateColor(ec.visualState));
@@ -1141,7 +1170,7 @@ private:
                     m_registry->resolve(ec.archetype).display.c_str(), best);
                 row(b, stateColor(ec.visualState));
                 std::snprintf(b, sizeof(b), "  HP %.0f/%.0f  %s", m_em->healths[bi].currentHp,
-                    m_em->healths[bi].maxHp, stateName(ec.visualState));
+                    m_em->healths[bi].maxHp, stateLabel(ec).c_str());
                 row(b, stateColor(ec.visualState));
             }
         }
@@ -1199,6 +1228,7 @@ private:
     int   m_archIdx = 0;
     int   m_countIdx = 0;
     Where m_enemyWhere = Where::Cursor;
+    bool  m_spawnDormant = false;
     int   m_astTypeIdx = 2;         ///< LARGE: the one that shows off the cascade
     Where m_astWhere = Where::Cursor;
 

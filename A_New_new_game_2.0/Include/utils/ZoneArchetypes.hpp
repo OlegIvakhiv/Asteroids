@@ -119,7 +119,15 @@ namespace zonearch {
         /// them apart at all. A chunk is always small, a hulk is always big.
         float scale = 1.f;
 
-        bool valid() const { return !parts.empty(); }
+        /// A prop drawn by a C++ model instead of `parts`. Some landmarks
+        /// move -- chains sway, turrets track, a furnace breathes -- and a
+        /// static polygon list cannot. Currently: "RAKSHARI_CITADEL"
+        /// (utils/CitadelModel.hpp). Empty = an ordinary parts prop.
+        std::string builtin;
+        bool builtinGlow = true;       ///< `furnace_glow`  -- the lab's glow toggle
+        bool builtinTrophies = true;   ///< `trophy_chains` -- the lab's chains toggle
+
+        bool valid() const { return !parts.empty() || !builtin.empty(); }
     };
 
     // ========================================================================
@@ -384,6 +392,9 @@ namespace zonearch {
                 p.key = kv.first.as<std::string>();
                 sol::table t = kv.second.as<sol::table>();
                 p.scale = std::max(0.05f, t["scale"].get_or(1.f));
+                p.builtin = t["builtin"].get_or<std::string>("");
+                p.builtinGlow = t["furnace_glow"].get_or(true);
+                p.builtinTrophies = t["trophy_chains"].get_or(true);
 
                 // Two shapes: a `parts` list for anything built, or a bare
                 // `points` list for a single-polygon prop. The short form is
