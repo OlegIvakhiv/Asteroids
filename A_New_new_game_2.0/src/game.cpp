@@ -105,6 +105,20 @@ int main() {
                     { static_cast<float>(rs->size.x),
                       static_cast<float>(rs->size.y) })));
             }
+            // The mouse wheel only exists as an event in SFML 3 -- there is no
+            // isWheel() to poll -- so the refit bay gets it from here.
+            if (const auto* mw = event->getIf<sf::Event::MouseWheelScrolled>()) {
+                if (mw->wheel == sf::Mouse::Wheel::Vertical
+                    && manager.getState() == GameState::Refit)
+                    manager.getRefitSystem().onMouseWheel(mw->delta);
+            }
+            // Typed text, for the refit hangar's ship-name field. Only events
+            // carry characters (with the keyboard layout applied), so it is
+            // routed from here like the wheel.
+            if (const auto* te = event->getIf<sf::Event::TextEntered>()) {
+                if (manager.getState() == GameState::Refit)
+                    manager.getRefitSystem().onTextEntered(te->unicode);
+            }
         }
 
         // ---- F11: toggle real fullscreen ----

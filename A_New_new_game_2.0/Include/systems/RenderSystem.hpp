@@ -257,13 +257,17 @@ public:
                     std::max(1.f, playerStats.maxWeaponHeat);
 
                 const float br = paint.hull.r, bg = paint.hull.g, bb = paint.hull.b;
+                // Painted alpha: a see-through hull (the refit bay floors it,
+                // and the outline stays opaque, so the silhouette still reads).
+                const float ba = paint.hull.a;
 
                 if (playerStats.parryFlashTimer > 0.f) {
                     const float w = std::clamp(playerStats.parryFlashTimer / 0.25f, 0.f, 1.f);
                     rd.shape.setFillColor(sf::Color(
                         static_cast<uint8_t>(br + (255.f - br) * w),
                         static_cast<uint8_t>(bg + (255.f - bg) * w),
-                        static_cast<uint8_t>(bb + (255.f - bb) * w)));
+                        static_cast<uint8_t>(bb + (255.f - bb) * w),
+                        static_cast<uint8_t>(ba + (255.f - ba) * w)));   // the flash goes solid
                     rd.shape.setOutlineThickness(2.5f + 6.f * w);
                     rd.shape.setOutlineColor(sf::Color(255, 255, 255,
                         static_cast<uint8_t>(255 * w)));
@@ -273,7 +277,8 @@ public:
                     rd.shape.setFillColor(sf::Color(
                         static_cast<uint8_t>(140 * flicker),
                         static_cast<uint8_t>(60 * flicker),
-                        static_cast<uint8_t>(60 * flicker)));
+                        static_cast<uint8_t>(60 * flicker),
+                        static_cast<uint8_t>(ba)));
                 }
                 else if (playerStats.dashCooldown > (playerStats.dashMaxCooldown - 0.15f)) {
                     rd.shape.setFillColor(sf::Color(paint.dodge.r, paint.dodge.g, paint.dodge.b, 210));
@@ -283,7 +288,8 @@ public:
                     rd.shape.setFillColor(sf::Color(
                         static_cast<uint8_t>(br + (200.f - br) * k),
                         static_cast<uint8_t>(bg + (90.f - bg) * k),
-                        static_cast<uint8_t>(bb + (60.f - bb) * k)));
+                        static_cast<uint8_t>(bb + (60.f - bb) * k),
+                        static_cast<uint8_t>(ba)));
                 }
 
                 // ---- Parry arcs ----
@@ -1442,37 +1448,32 @@ private:
      * hence the pre-triangulated mesh and hand-built outline.
      */
      /**
-      * @brief Decals and canopy, through the hull's transform.
+      * @brief Plates, figures and canopy, through the hull's transform.
       *
       * @param over false = the pass under the hull, true = the pass above it
-      *             plus the cockpit. Geometry comes from ShipLivery, the same
-      *             call the refit bay makes, so the editor cannot lie.
+      *             plus the cockpit. The mesh comes from ship::liveryPass(),
+      *             the same call the refit bay makes, so the editor cannot lie.
+      *
+      * TONE-inked parts take the hull's fill AS IT IS THIS FRAME -- parry
+      * flash, heat tint, stagger flicker -- which is why this reads the
+      * shape's current colours rather than the paint.
       */
     void drawLivery(const sf::ConvexShape& hull, const PlayerComponent& ps, bool over) {
         const auto& lv = ps.livery;
-        if (lv.decals.empty() && (!over || lv.cockpit.style == ship::CockpitStyle::None)) return;
+        if (lv.decals.empty() && lv.plates.empty()
+            && (!over || lv.cockpit.style == ship::CockpitStyle::None)) return;
+
+        m_liveryScratch.clear();
+        ship::liveryPass(lv, { hull.getFillColor(), hull.getOutlineColor() }, over, m_liveryScratch);
+        if (m_liveryScratch.empty()) return;
 
         const sf::Transform& tr = hull.getTransform();
-        std::vector<sf::Vector2f> tris;
-        sf::VertexArray va(sf::PrimitiveType::Triangles);
-
-        for (const auto& d : lv.decals) {
-            if (d.over != over) continue;
-            tris.clear();
-            ship::decalGeometry(d, tris, false);
-            if (d.mirrored) ship::decalGeometry(d, tris, true);
-            for (const auto& p : tris) va.append({ tr.transformPoint(p), d.color });
-        }
-
-        if (over && lv.cockpit.style != ship::CockpitStyle::None) {
-            std::vector<sf::Vector2f> glass, rim;
-            ship::cockpitGeometry(lv.cockpit, glass, rim);
-            const sf::Color rimCol(14, 18, 26, 235);
-            for (const auto& p : rim)   va.append({ tr.transformPoint(p), rimCol });
-            for (const auto& p : glass) va.append({ tr.transformPoint(p), lv.paint.cockpit });
-        }
-        if (va.getVertexCount() > 0) m_window->draw(va);
+        for (auto& v : m_liveryScratch) v.position = tr.transformPoint(v.position);
+        m_window->draw(m_liveryScratch.data(), m_liveryScratch.size(), sf::PrimitiveType::Triangles);
     }
+
+    /// Reused every frame by drawLivery: no allocation once warmed up.
+    std::vector<sf::Vertex> m_liveryScratch;
 
     /// Outline miter cap, in multiples of thickness. ~11 degree spikes stay sharp.
     static constexpr float MITER_LIMIT = 10.f;

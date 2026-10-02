@@ -18,9 +18,16 @@
  *       model  = { {0,-56}, {10,-30}, ... },   -- optional: the decorative outline
  *       paint  = { hull = "#2864FFFF", outline = "#FFFFFFFF", ... },
  *       decals = { { kind="bar", x=0, y=-4, w=18, h=5, angle=0,
- *                    thickness=0, color="#28F5FFFF", over=true, mirror=true }, ... },
+ *                    thickness=0, color="#28F5FFFF", over=true, mirror=true,
+ *                    ink="tone", shade=0.6 }, ... },          -- ink/shade: v1.2, optional
+ *       plates = { { shape = { {-0.5,-0.5}, {0.5,-0.5}, ... },  -- normalised to the box
+ *                    x=0, y=6, w=18, h=10, angle=0, ink="tone", shade=0.72,
+ *                    color="#28F5FFFF", accent=false, over=true, mirror=false }, ... },
  *       cockpit = { style = "bubble", x = 0, y = -6, w = 13, h = 17 },
  *   }
+ *
+ * The format tag stays v1: every new field is optional, so an older game
+ * reads a newer file (ignoring plates) and this one reads older files.
  *
  * Loading is defensive: the file is data from the internet. Anything missing
  * falls back to a default, anything malformed is rejected with a reason, and
@@ -31,7 +38,8 @@
  * downloaded "ship" cannot do anything but describe a ship.
  *
  * @author Oleg Ivakhiv
- * @version 1.0
+ * @version 1.2 -- save(overwrite), pathFor(), guarded remove() for the hangar
+ *          1.1 -- plates, TONE/COLOUR ink, see-through hull (alpha floored)
  */
 
 #pragma once
@@ -157,7 +165,21 @@ namespace ship {
                     << ", w = " << dc.w << ", h = " << dc.h << ", angle = " << dc.angle
                     << ", thickness = " << dc.thickness << ", color = \"" << colorToHex(dc.color)
                     << "\", over = " << (dc.over ? "true" : "false")
-                    << ", mirror = " << (dc.mirrored ? "true" : "false") << " },\n";
+                    << ", mirror = " << (dc.mirrored ? "true" : "false")
+                    << ", ink = \"" << (dc.tonal ? "tone" : "color") << "\", shade = " << dc.shade << " },\n";
+            }
+            o << "    },\n";
+
+            o << "    plates = {\n";
+            for (const auto& pl : lv.plates) {
+                o << "        { shape = { ";
+                for (const auto& q : pl.shape) o << "{" << q.x << "," << q.y << "}, ";
+                o << "}, x = " << pl.pos.x << ", y = " << pl.pos.y << ", w = " << pl.w << ", h = " << pl.h
+                    << ", angle = " << pl.angle << ", ink = \"" << (pl.tonal ? "tone" : "color")
+                    << "\", shade = " << pl.shade << ", color = \"" << colorToHex(pl.color)
+                    << "\", accent = " << (pl.accent ? "true" : "false")
+                    << ", over = " << (pl.over ? "true" : "false")
+                    << ", mirror = " << (pl.mirrored ? "true" : "false") << " },\n";
             }
             o << "    },\n";
 
@@ -168,22 +190,59 @@ namespace ship {
             return o.str();
         }
 
-        /// @return written path, or empty on failure (reason in `err`).
+        /// Write a ship to an exact path (the hangar's OVERWRITE). @return success.
+        inline bool writeFile(const std::filesystem::path& path, const ShipDesign& d,
+            const Livery& lv, const std::string& name, std::string& err) {
+            std::ofstream f(path);
+            if (!f) { err = "CANNOT WRITE ships/"; return false; }
+            f << toLua(d, lv, name);
+            if (!f.good()) { err = "WRITE FAILED"; return false; }
+            return true;
+        }
+
+        /// Where a ship of this display name lives (whether or not it exists yet).
+        inline std::filesystem::path pathFor(const std::string& name) {
+            return shipDir() / (slug(name) + ".lua");
+        }
+
+        /**
+         * @return written path, or empty on failure (reason in `err`).
+         * @param overwrite replace a file of the same name; otherwise a free
+         *        name is found by appending -2, -3 ...
+         */
         inline std::string save(const ShipDesign& d, const Livery& lv,
-            const std::string& name, std::string& err) {
+            const std::string& name, std::string& err, bool overwrite = false) {
             std::error_code ec;
             std::filesystem::create_directories(shipDir(), ec);
 
             const std::string base = slug(name);
             std::filesystem::path path = shipDir() / (base + ".lua");
-            for (int n = 2; std::filesystem::exists(path) && n < 100; ++n)
-                path = shipDir() / (base + "-" + std::to_string(n) + ".lua");
+            if (!overwrite)
+                for (int n = 2; std::filesystem::exists(path) && n < 100; ++n)
+                    path = shipDir() / (base + "-" + std::to_string(n) + ".lua");
 
-            std::ofstream f(path);
-            if (!f) { err = "CANNOT WRITE ships/"; return {}; }
-            f << toLua(d, lv, base);
-            if (!f.good()) { err = "WRITE FAILED"; return {}; }
+            if (!writeFile(path, d, lv, base, err)) return {};
             return path.string();
+        }
+
+        /**
+         * @brief Delete a ship file -- only a .lua file directly inside ships/.
+         *
+         * The path comes from the hangar list, but it is checked anyway: this
+         * must never be able to delete anything else on the player's disk.
+         */
+        inline bool remove(const std::string& path, std::string& err) {
+            std::error_code ec;
+            const std::filesystem::path p(path);
+            const auto dir = std::filesystem::weakly_canonical(shipDir(), ec);
+            const auto parent = std::filesystem::weakly_canonical(p.parent_path(), ec);
+            if (ec || parent != dir || p.extension() != ".lua"
+                || !std::filesystem::is_regular_file(p, ec)) {
+                err = "NOT A SHIP FILE";
+                return false;
+            }
+            if (!std::filesystem::remove(p, ec) || ec) { err = "DELETE FAILED"; return false; }
+            return true;
         }
 
         inline std::vector<std::string> list() {
@@ -279,7 +338,9 @@ namespace ship {
                     return colorFromHex((*paint)[k].get_or(std::string()), def);
                     };
                 lv.paint.hull = col("hull", lv.paint.hull);
+                lv.paint.hull.a = std::max(lv.paint.hull.a, HULL_MIN_ALPHA);   // see-through, never invisible
                 lv.paint.outline = col("outline", lv.paint.outline);
+                lv.paint.outline.a = 255;                                      // the silhouette always reads
                 lv.paint.plasma = col("plasma", lv.paint.plasma);
                 lv.paint.thrust = col("thrust", lv.paint.thrust);
                 lv.paint.turbo = col("turbo", lv.paint.turbo);
@@ -306,8 +367,39 @@ namespace ship {
                     dc.color = colorFromHex((*e)["color"].get_or(std::string()), sf::Color(40, 245, 255));
                     dc.over = (*e)["over"].get_or(true);
                     dc.mirrored = (*e)["mirror"].get_or(false);
+                    dc.tonal = (*e)["ink"].get_or(std::string("color")) == "tone";
+                    dc.shade = std::clamp((*e)["shade"].get_or(0.6f), SHADE_MIN, SHADE_MAX);
                     clampDecal(dc);
                     if (decalInside(dc, env)) lv.decals.push_back(dc);   // silently drop out-of-bounds art
+                }
+            }
+
+            // ---- Plates ----
+            // Same defensiveness as decals: a malformed or out-of-bounds plate
+            // is dropped, the rest of the ship still loads.
+            sol::optional<sol::table> plates = (*root)["plates"];
+            if (plates) {
+                const std::vector<sf::Vector2f> env = d.envelope();
+                for (std::size_t i = 1; i <= plates->size() && lv.plates.size() < static_cast<std::size_t>(MAX_PLATES); ++i) {
+                    sol::optional<sol::table> e = (*plates)[i];
+                    if (!e) continue;
+                    sol::optional<sol::table> sh = (*e)["shape"];
+                    if (!sh) continue;
+                    Plate pl;
+                    pl.shape = readPoints(*sh, MAX_PLATE_POINTS);
+                    for (auto& q : pl.shape) q = { std::clamp(q.x, -0.5f, 0.5f), std::clamp(q.y, -0.5f, 0.5f) };
+                    pl.pos = { (*e)["x"].get_or(0.f), (*e)["y"].get_or(0.f) };
+                    pl.w = (*e)["w"].get_or(18.f);
+                    pl.h = (*e)["h"].get_or(10.f);
+                    pl.angle = (*e)["angle"].get_or(0.f);
+                    pl.tonal = (*e)["ink"].get_or(std::string("tone")) == "tone";
+                    pl.shade = (*e)["shade"].get_or(0.72f);
+                    pl.color = colorFromHex((*e)["color"].get_or(std::string()), sf::Color(40, 245, 255));
+                    pl.accent = (*e)["accent"].get_or(false);
+                    pl.over = (*e)["over"].get_or(true);
+                    pl.mirrored = (*e)["mirror"].get_or(false);
+                    clampPlate(pl);
+                    if (plateValid(pl) && plateFits(pl, env)) lv.plates.push_back(pl);
                 }
             }
 

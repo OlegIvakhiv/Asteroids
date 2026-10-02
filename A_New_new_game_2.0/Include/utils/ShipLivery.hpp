@@ -31,13 +31,47 @@
  * A decal must sit inside the model ENVELOPE (see ShipDesign): paint may not
  * be used to fake a silhouette bigger than the one the enemy has to hit.
  *
+ * ============================================================================
+ * PLATES
+ * ============================================================================
+ * Armour panels: any simple polygon (<= 16 points), stamped from a primitive
+ * and then reshaped point by point. Same idea as the enemy archetype plates
+ * (EnemyArchetypes.hpp), so a player ship can be dressed the way enemies are.
+ *
+ * A plate is stored as a SHAPE normalised to its own bounding box, plus the
+ * same four numbers a decal has (pos, w, h, angle). That way one gizmo moves,
+ * turns and sizes figures, plates and the canopy alike, and editing a point
+ * only changes the shape.
+ *
+ * ============================================================================
+ * INK: TONE OR COLOUR
+ * ============================================================================
+ * Plates and figures are inked one of two ways:
+ *   TONE    the LIVE hull fill multiplied by `shade`. Panels flash white on a
+ *           parry, glow with heat, flicker on stagger -- with the hull, as
+ *           enemy plates do. This is what keeps a dressed ship from looking
+ *           like stickers on a shape.
+ *   COLOUR  a fixed colour, for markings that should stay put (stripes, kill
+ *           marks, a faction badge).
+ * Alpha always comes from the item's own colour, so either ink can be
+ * see-through.
+ *
+ * ============================================================================
+ * ONE MESH, TWO DRAWERS
+ * ============================================================================
+ * liveryPass() builds a pass (under or over the hull) as local-space
+ * vertices. RenderSystem transforms them by the hull; the refit bay maps them
+ * onto its canvas. Neither draws livery any other way, so the editor cannot
+ * show something the fight will not.
+ *
  * @author Oleg Ivakhiv
- * @version 1.0
+ * @version 1.2 -- plates, tonal ink, hull alpha, shared liveryPass()
  */
 
 #pragma once
 
 #include <SFML/Graphics/Color.hpp>
+#include <SFML/Graphics/Vertex.hpp>
 #include <SFML/System/Vector2.hpp>
 #include "ShipDesign.hpp"
 #include <vector>
@@ -49,6 +83,17 @@
 namespace ship {
 
     inline constexpr int MAX_DECALS = 20;
+    inline constexpr int MAX_PLATES = 16;
+    inline constexpr int MAX_PLATE_POINTS = 16;
+
+    /// A see-through hull is allowed; an invisible one is not. The outline
+    /// stays opaque in any case, so the silhouette always reads.
+    inline constexpr std::uint8_t HULL_MIN_ALPHA = 64;
+
+    /// Tone range. Below ~0.2 a panel is black whatever the hull does;
+    /// above ~1.6 every hull colour clips to white.
+    inline constexpr float SHADE_MIN = 0.2f;
+    inline constexpr float SHADE_MAX = 1.6f;
 
     enum class DecalKind : std::uint8_t { Line = 0, Bar, Oval, Tri, Ring };
     inline constexpr int DECAL_KIND_COUNT = 5;
@@ -73,6 +118,39 @@ namespace ship {
         sf::Color    color{ 40, 245, 255, 255 };
         bool         over = true;               ///< Above the hull, or under it
         bool         mirrored = false;          ///< Also drawn at -x
+        bool         tonal = false;             ///< TONE ink: live hull fill x shade
+        float        shade = 0.6f;              ///< Used when tonal
+    };
+
+    /// Stamp shapes a new plate starts from. Every one is editable afterwards.
+    enum class PlateStamp : std::uint8_t { Rect = 0, Tri, Fin, Half, Chevron, Hex };
+    inline constexpr int PLATE_STAMP_COUNT = 6;
+
+    inline const char* plateStampName(PlateStamp s) {
+        switch (s) {
+        case PlateStamp::Rect:    return "PANEL";
+        case PlateStamp::Tri:     return "WEDGE";
+        case PlateStamp::Fin:     return "FIN";
+        case PlateStamp::Half:    return "HALF";
+        case PlateStamp::Chevron: return "CHEVRON";
+        default:                  return "HEX";
+        }
+    }
+
+    struct Plate {
+        /// Outline normalised to the plate's own box: every point in
+        /// [-0.5, 0.5] on both axes. Local = (x * w, y * h), rotated by angle.
+        std::vector<sf::Vector2f> shape;
+        sf::Vector2f pos;                       ///< Box centre, ship space
+        float        w = 18.f;
+        float        h = 10.f;
+        float        angle = 0.f;               ///< Degrees, clockwise
+        bool         tonal = true;              ///< TONE ink by default, like enemy plates
+        float        shade = 0.72f;
+        sf::Color    color{ 40, 245, 255, 255 };///< COLOUR ink; its alpha is used by both inks
+        bool         accent = false;            ///< Thin outline in the live outline colour
+        bool         over = true;
+        bool         mirrored = false;
     };
 
     /// Canopies. Purely decorative -- they do not move a mount or a hitbox.
@@ -117,6 +195,7 @@ namespace ship {
         Paint              paint;
         std::vector<Decal> decals;
         Cockpit            cockpit;
+        std::vector<Plate> plates;              ///< Drawn before figures in each pass
     };
 
     /// Editor palette. Terminal-bright, plus enough neutrals to make panelling.
@@ -320,14 +399,47 @@ namespace ship {
     }
 
     /**
-     * @brief A decal must stay inside the model envelope.
+     * @brief A decal must stay inside the model envelope -- EXACT test.
      *
      * Paint cannot fake a silhouette bigger than the hull the enemy must hit.
-     * Checked on the corners of the decal's bounding circle, which is
-     * conservative and cheap.
+     * Tests every vertex the decal actually draws (mirror copy included).
+     * The envelope is the convex hitbox scaled about its centroid, so it is
+     * convex, and a triangle whose three corners are inside it is inside it.
+     *
+     * The old bounding-circle test treated a 40x3 stripe as a 40 px disc:
+     * rotating a stripe near the edge was refused while it visibly fitted.
+     * The refit bay uses THIS function.
+     */
+    inline bool decalFits(const Decal& d, const std::vector<sf::Vector2f>& envelope) {
+        if (envelope.size() < 3) return true;
+        std::vector<sf::Vector2f> tris;
+        decalGeometry(d, tris, false);
+        if (d.mirrored) decalGeometry(d, tris, true);
+        for (const auto& p : tris)
+            if (!ship::detail::pointInPolygon(p, envelope, 0.5f)) return false;
+        return true;
+    }
+
+    /// The canopy's rim and glass, same exact rule as a decal.
+    inline bool cockpitFits(const Cockpit& cp, const std::vector<sf::Vector2f>& envelope) {
+        if (envelope.size() < 3 || cp.style == CockpitStyle::None) return true;
+        std::vector<sf::Vector2f> glass, rim;
+        cockpitGeometry(cp, glass, rim);
+        for (const auto& p : rim)   if (!ship::detail::pointInPolygon(p, envelope, 0.5f)) return false;
+        for (const auto& p : glass) if (!ship::detail::pointInPolygon(p, envelope, 0.5f)) return false;
+        return true;
+    }
+
+    /**
+     * @brief Load-time acceptance: the exact test OR the legacy bounding circle.
+     *
+     * ShipFile drops decals that fail this. Accepting either rule means no
+     * ship saved before the exact test can lose art on import, and nothing
+     * the editor now allows can be dropped either.
      */
     inline bool decalInside(const Decal& d, const std::vector<sf::Vector2f>& envelope) {
         if (envelope.size() < 3) return true;
+        if (decalFits(d, envelope)) return true;
         const float r = decalRadius(d);
         const float xs[2] = { d.pos.x, -d.pos.x };
         for (int m = 0; m < (d.mirrored ? 2 : 1); ++m) {
@@ -346,6 +458,267 @@ namespace ship {
         d.thickness = std::clamp(d.thickness, 0.f, 12.f);
         while (d.angle < 0.f)    d.angle += 360.f;
         while (d.angle >= 360.f) d.angle -= 360.f;
+    }
+
+
+    // ============================================================================
+    // PLATES
+    // ============================================================================
+
+    inline void clampPlate(Plate& p) {
+        p.w = std::clamp(p.w, 2.f, 140.f);
+        p.h = std::clamp(p.h, 2.f, 140.f);
+        p.shade = std::clamp(p.shade, SHADE_MIN, SHADE_MAX);
+        while (p.angle < 0.f)    p.angle += 360.f;
+        while (p.angle >= 360.f) p.angle -= 360.f;
+    }
+
+    /// Ship-space outline of a plate (or of its mirror copy).
+    inline std::vector<sf::Vector2f> plateWorld(const Plate& p, bool mirrorX = false) {
+        std::vector<sf::Vector2f> out;
+        out.reserve(p.shape.size());
+        const float a = p.angle * 3.14159265f / 180.f;
+        const float ca = std::cos(a), sa = std::sin(a);
+        for (const auto& s : p.shape) {
+            const float lx = s.x * p.w, ly = s.y * p.h;
+            sf::Vector2f q{ p.pos.x + lx * ca - ly * sa, p.pos.y + lx * sa + ly * ca };
+            if (mirrorX) q.x = -q.x;
+            out.push_back(q);
+        }
+        return out;
+    }
+
+    /// Ship space -> the plate's normalised shape space (inverse of plateWorld).
+    inline sf::Vector2f plateToShape(const Plate& p, sf::Vector2f world) {
+        const float a = p.angle * 3.14159265f / 180.f;
+        const float ca = std::cos(a), sa = std::sin(a);
+        const sf::Vector2f d{ world.x - p.pos.x, world.y - p.pos.y };
+        return { (d.x * ca + d.y * sa) / std::max(0.01f, p.w),
+                 (-d.x * sa + d.y * ca) / std::max(0.01f, p.h) };
+    }
+
+    /**
+     * @brief Refit the box to the shape after its points changed.
+     *
+     * The ship-space outline is unchanged -- only how it is split between
+     * shape and box -- so it can run every frame of a point drag without the
+     * plate creeping. Keeps the gizmo box tight around what is drawn.
+     */
+    inline void normalizePlate(Plate& p) {
+        if (p.shape.empty()) return;
+        float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+        for (const auto& s : p.shape) {
+            const float lx = s.x * p.w, ly = s.y * p.h;
+            x0 = std::min(x0, lx); x1 = std::max(x1, lx);
+            y0 = std::min(y0, ly); y1 = std::max(y1, ly);
+        }
+        const float nw = std::max(1.f, x1 - x0), nh = std::max(1.f, y1 - y0);
+        const float cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
+        const float a = p.angle * 3.14159265f / 180.f;
+        const float ca = std::cos(a), sa = std::sin(a);
+        for (auto& s : p.shape) s = { (s.x * p.w - cx) / nw, (s.y * p.h - cy) / nh };
+        p.pos = { p.pos.x + cx * ca - cy * sa, p.pos.y + cx * sa + cy * ca };
+        p.w = nw;
+        p.h = nh;
+    }
+
+    /// A fresh plate of a stamp shape, centred on `pos`.
+    inline Plate plateStamp(PlateStamp kind, sf::Vector2f pos) {
+        Plate p;
+        p.pos = pos;
+        switch (kind) {
+        case PlateStamp::Rect:
+            p.shape = { { -0.5f, -0.5f }, { 0.5f, -0.5f }, { 0.5f, 0.5f }, { -0.5f, 0.5f } };
+            p.w = 18.f; p.h = 10.f;
+            break;
+        case PlateStamp::Tri:
+            p.shape = { { 0.f, -0.5f }, { 0.5f, 0.5f }, { -0.5f, 0.5f } };
+            p.w = 14.f; p.h = 14.f;
+            break;
+        case PlateStamp::Fin:          // swept: a long trailing edge, a short root
+            p.shape = { { -0.5f, -0.5f }, { 0.5f, 0.25f }, { 0.5f, 0.5f }, { -0.5f, 0.5f } };
+            p.w = 14.f; p.h = 18.f;
+            break;
+        case PlateStamp::Half: {       // flat edge aft, dome forward
+            for (int i = 0; i <= 8; ++i) {
+                const float t = 3.14159265f + 3.14159265f * static_cast<float>(i) / 8.f;
+                p.shape.push_back({ 0.5f * std::cos(t), 0.5f + std::sin(t) });
+            }
+            p.w = 16.f; p.h = 8.f;
+            break;
+        }
+        case PlateStamp::Chevron:
+            p.shape = { { 0.f, -0.5f }, { 0.5f, 0.1f }, { 0.5f, 0.5f }, { 0.f, -0.1f },
+                        { -0.5f, 0.5f }, { -0.5f, 0.1f } };
+            p.w = 16.f; p.h = 12.f;
+            break;
+        default:
+            for (int i = 0; i < 6; ++i) {
+                const float t = 3.14159265f / 6.f + 6.2831853f * static_cast<float>(i) / 6.f;
+                p.shape.push_back({ 0.5f * std::cos(t), 0.5f * std::sin(t) });
+            }
+            p.w = 14.f; p.h = 12.f;
+            break;
+        }
+        normalizePlate(p);   // fit the box to the shape exactly
+        return p;
+    }
+
+    /// Every point of the plate (and its mirror copy) inside the envelope.
+    /// The envelope is convex, so a concave plate with all corners inside is inside.
+    inline bool plateFits(const Plate& p, const std::vector<sf::Vector2f>& envelope) {
+        if (envelope.size() < 3) return true;
+        for (int m = 0; m < (p.mirrored ? 2 : 1); ++m)
+            for (const auto& q : plateWorld(p, m == 1))
+                if (!ship::detail::pointInPolygon(q, envelope, 0.5f)) return false;
+        return true;
+    }
+
+    /// 3..16 points and no self-crossing: ear clipping needs a simple polygon.
+    inline bool plateValid(const Plate& p) {
+        if (p.shape.size() < 3 || p.shape.size() > static_cast<std::size_t>(MAX_PLATE_POINTS)) return false;
+        return ship::detail::isSimplePolygon(plateWorld(p, false));
+    }
+
+    /**
+     * @brief Turn a figure into an editable plate with the same look.
+     *
+     * Outlined figures (a ring, an outlined bar) come out solid with the
+     * accent outline on: a plate is a filled panel.
+     */
+    inline Plate plateFromDecal(const Decal& d) {
+        Plate p;
+        p.pos = d.pos;
+        p.angle = d.angle;
+        p.w = std::max(1.f, d.w);
+        p.h = std::max(1.f, d.h);
+        switch (d.kind) {
+        case DecalKind::Line:
+            p.h = std::max(1.f, d.thickness > 0.f ? d.thickness : d.h * 0.5f);
+            p.shape = { { -0.5f, -0.5f }, { 0.5f, -0.5f }, { 0.5f, 0.5f }, { -0.5f, 0.5f } };
+            break;
+        case DecalKind::Bar:
+            p.shape = { { -0.5f, -0.5f }, { 0.5f, -0.5f }, { 0.5f, 0.5f }, { -0.5f, 0.5f } };
+            break;
+        case DecalKind::Tri:
+            p.shape = { { 0.f, -0.5f }, { 0.5f, 0.5f }, { -0.5f, 0.5f } };
+            break;
+        default:   // Oval, Ring
+            for (int i = 0; i < MAX_PLATE_POINTS; ++i) {
+                const float t = 6.2831853f * static_cast<float>(i) / static_cast<float>(MAX_PLATE_POINTS);
+                p.shape.push_back({ 0.5f * std::cos(t), 0.5f * std::sin(t) });
+            }
+            break;
+        }
+        p.accent = (d.kind == DecalKind::Ring) || (d.kind != DecalKind::Line && d.thickness > 0.f);
+        p.tonal = d.tonal;
+        p.shade = d.shade;
+        p.color = d.color;
+        p.over = d.over;
+        p.mirrored = d.mirrored;
+        clampPlate(p);
+        return p;
+    }
+
+    // ============================================================================
+    // INK
+    // ============================================================================
+
+    /// The hull colour of THIS frame, scaled. Alpha is the item's own.
+    inline sf::Color tone(sf::Color fill, float shade, std::uint8_t alpha) {
+        const auto ch = [&](std::uint8_t c) {
+            return static_cast<std::uint8_t>(std::clamp(static_cast<float>(c) * shade, 0.f, 255.f));
+            };
+        return { ch(fill.r), ch(fill.g), ch(fill.b), alpha };
+    }
+
+    inline sf::Color inkOf(const Decal& d, sf::Color liveFill) {
+        return d.tonal ? tone(liveFill, d.shade, d.color.a) : d.color;
+    }
+    inline sf::Color inkOf(const Plate& p, sf::Color liveFill) {
+        return p.tonal ? tone(liveFill, p.shade, p.color.a) : p.color;
+    }
+
+    namespace detail {
+
+        /// Closed polygon stroke, centred on the edges, mitred, as triangles.
+        inline void strokeClosed(const std::vector<sf::Vector2f>& P, float w,
+            std::vector<sf::Vector2f>& out) {
+            const std::size_t n = P.size();
+            if (n < 3 || w <= 0.f) return;
+            const auto normalOf = [&](std::size_t i) {
+                const sf::Vector2f e{ P[(i + 1) % n].x - P[i].x, P[(i + 1) % n].y - P[i].y };
+                const float l = std::max(0.0001f, std::sqrt(e.x * e.x + e.y * e.y));
+                return sf::Vector2f{ e.y / l, -e.x / l };
+                };
+            std::vector<sf::Vector2f> off(n);
+            for (std::size_t i = 0; i < n; ++i) {
+                const sf::Vector2f n1 = normalOf((i + n - 1) % n), n2 = normalOf(i);
+                const float d = std::max(1.f + n1.x * n2.x + n1.y * n2.y, 0.0001f);
+                sf::Vector2f m{ (n1.x + n2.x) / d, (n1.y + n2.y) / d };
+                const float ml = std::sqrt(m.x * m.x + m.y * m.y);
+                if (ml > 4.f) { m.x *= 4.f / ml; m.y *= 4.f / ml; }   // cap spikes at 4x
+                off[i] = { m.x * w * 0.5f, m.y * w * 0.5f };
+            }
+            for (std::size_t i = 0; i < n; ++i) {
+                const std::size_t j = (i + 1) % n;
+                const sf::Vector2f a0{ P[i].x + off[i].x, P[i].y + off[i].y }, a1{ P[i].x - off[i].x, P[i].y - off[i].y };
+                const sf::Vector2f b0{ P[j].x + off[j].x, P[j].y + off[j].y }, b1{ P[j].x - off[j].x, P[j].y - off[j].y };
+                out.push_back(a0); out.push_back(b0); out.push_back(b1);
+                out.push_back(a0); out.push_back(b1); out.push_back(a1);
+            }
+        }
+
+    } // namespace detail
+
+    /// Width of a plate's accent outline, local pixels.
+    inline constexpr float PLATE_ACCENT_PX = 1.2f;
+
+    /// The live colours of the frame being drawn. The refit bay passes the
+    /// paint; the game passes whatever the hull is showing right now.
+    struct LiveInk {
+        sf::Color fill;
+        sf::Color outline;
+    };
+
+    /**
+     * @brief One pass of the livery as LOCAL-space triangles.
+     *
+     * Order inside a pass: plates, then figures; the OVER pass ends with the
+     * canopy. Appends; never clears. Callers transform the positions.
+     */
+    inline void liveryPass(const Livery& lv, const LiveInk& ink, bool over, std::vector<sf::Vertex>& out) {
+        std::vector<sf::Vector2f> tris;
+        for (const auto& p : lv.plates) {
+            if (p.over != over || p.shape.size() < 3) continue;
+            const sf::Color c = inkOf(p, ink.fill);
+            const sf::Color ac(ink.outline.r, ink.outline.g, ink.outline.b,
+                static_cast<std::uint8_t>(std::min<int>(ink.outline.a, 220) * c.a / 255));
+            for (int m = 0; m < (p.mirrored ? 2 : 1); ++m) {
+                const std::vector<sf::Vector2f> poly = plateWorld(p, m == 1);
+                for (const auto& v : ship::detail::triangulate(poly)) out.push_back({ v, c });
+                if (p.accent) {
+                    tris.clear();
+                    detail::strokeClosed(poly, PLATE_ACCENT_PX, tris);
+                    for (const auto& v : tris) out.push_back({ v, ac });
+                }
+            }
+        }
+        for (const auto& d : lv.decals) {
+            if (d.over != over) continue;
+            tris.clear();
+            decalGeometry(d, tris, false);
+            if (d.mirrored) decalGeometry(d, tris, true);
+            const sf::Color c = inkOf(d, ink.fill);
+            for (const auto& v : tris) out.push_back({ v, c });
+        }
+        if (over && lv.cockpit.style != CockpitStyle::None) {
+            std::vector<sf::Vector2f> glass, rim;
+            cockpitGeometry(lv.cockpit, glass, rim);
+            const sf::Color rimCol(14, 18, 26, 235);
+            for (const auto& v : rim)   out.push_back({ v, rimCol });
+            for (const auto& v : glass) out.push_back({ v, lv.paint.cockpit });
+        }
     }
 
     /// HSV -> RGB. h in [0,360), s and v in [0,1]. For the colour picker.
