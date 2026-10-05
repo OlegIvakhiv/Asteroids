@@ -505,3 +505,23 @@ hull_classes = {
         ram_medium_taken     = 0.35,
     },
 }
+
+-- ============================================================================
+-- SCRAP PICKUP (ScrapSystem) -- the ship's magnet
+--
+-- Scrap drops as small amber cubes. Inside magnet_radius they stop drifting
+-- and home on the ship (matching its velocity first, so they catch you even
+-- at turbo); within collect_radius they are banked. Radii are in px from the
+-- ship's centre. magnet_radius is the obvious future upgrade.
+-- ============================================================================
+scrap = {
+    magnet_radius   = 150.0,   -- px. Pull starts here
+    collect_radius  = 26.0,    -- px. Banked here -- roughly the hull edge
+    home_speed_far  = 240.0,   -- px/s toward the ship at the magnet edge...
+    home_speed_near = 620.0,   -- ...rising to this right at the hull
+    magnet_grip     = 12.0,    -- 1/s. How fast a cube's course bends onto the ship
+    pickup_delay    = 0.35,    -- s after dropping before the magnet can take it
+    drift_drag      = 1.6,     -- 1/s. Loose cubes slow down and sit
+    lifetime        = 30.0,    -- s before uncollected scrap is gone
+    blink_time      = 5.0,     -- s of blinking warning before that
+}

@@ -215,6 +215,7 @@ asteroid_types = {
         size_variance_min = 0.70, size_variance_max = 1.30, hp_follows_size = 1.0,
         detail = "cluster", scrap_template = "junk_m",
         metallic = true, child_inherit_color = true,
+        scrap_drop = { 0, 1 },
         tier = 1, child_type = "SCRAP_CHUNK", explosive = false
     },
 
@@ -227,6 +228,7 @@ asteroid_types = {
         size_variance_min = 0.65, size_variance_max = 1.45, hp_follows_size = 1.0,
         detail = "cluster", scrap_template = "junk_l",
         metallic = true, child_inherit_color = true,
+        scrap_drop = { 1, 2 },
         tier = 2, child_type = "SCRAP", explosive = false
     },
 
@@ -280,6 +282,7 @@ asteroid_types = {
         speed_range = { 5.0, 6.5 },
         size_variance_min = 0.92, size_variance_max = 1.08,
         metallic = true, child_inherit_color = true,
+        scrap_drop = { 1, 2 },
         tier = 0, explosive = false
     },
 
@@ -291,6 +294,7 @@ asteroid_types = {
         speed_range = { 4.4, 5.6 },
         size_variance_min = 0.92, size_variance_max = 1.08,
         metallic = true, child_inherit_color = true,
+        scrap_drop = { 2, 3 },
         tier = 1, child_type = "SCRAP_CHUNK", explosive = false
     },
 
@@ -306,6 +310,7 @@ asteroid_types = {
         speed_range = { 3.6, 4.8 },
         size_variance_min = 0.94, size_variance_max = 1.06,
         metallic = true, child_inherit_color = true,
+        scrap_drop = { 3, 5 },
         tier = 2, child_type = "SCRAP",
         child_alt = "REACTOR", child_alt_chance = 100,
         explosive = false
@@ -325,6 +330,7 @@ asteroid_types = {
         speed_range = { 5.2, 6.8 },
         size_variance_min = 0.92, size_variance_max = 1.08,
         metallic = true, child_inherit_color = true,
+        scrap_drop = { 1, 2 },
         tier = 0, explosive = false
     },
 
@@ -336,6 +342,7 @@ asteroid_types = {
         speed_range = { 4.4, 5.8 },
         size_variance_min = 0.92, size_variance_max = 1.08,
         metallic = true, child_inherit_color = true,
+        scrap_drop = { 2, 3 },
         tier = 1, child_type = "SCRAP_CHUNK", explosive = false
     },
 
@@ -347,6 +354,7 @@ asteroid_types = {
         speed_range = { 4.6, 6.0 },
         size_variance_min = 0.92, size_variance_max = 1.08,
         metallic = true, child_inherit_color = true,
+        scrap_drop = { 2, 3 },
         tier = 1, child_type = "SCRAP_CHUNK", explosive = false
     },
 
@@ -360,6 +368,7 @@ asteroid_types = {
         speed_range = { 3.2, 4.2 },
         size_variance_min = 0.94, size_variance_max = 1.06,
         metallic = true, child_inherit_color = true,
+        scrap_drop = { 4, 6 },
         tier = 2, child_type = "SCRAP",
         child_alt = "REACTOR", child_alt_chance = 100,
         explosive = false
@@ -383,6 +392,7 @@ asteroid_types = {
         speed_range = { 3.5, 4.6 },
         size_variance_min = 0.94, size_variance_max = 1.08, hp_follows_size = 1.0,
         metallic = true,
+        scrap_drop = { 1, 2 },
         tier = 3,
         explosive = true,
         explosion_radius = 150.0,
@@ -404,6 +414,7 @@ asteroid_types = {
         speed_range = { 4.0, 5.0 },
         size_variance_min = 0.80, size_variance_max = 1.25, hp_follows_size = 1.0,
         metallic = true,
+        scrap_drop = { 1, 2 },
         tier = 3,
         explosive = true,
         explosion_radius = 150.0,

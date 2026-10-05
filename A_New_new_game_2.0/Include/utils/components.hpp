@@ -389,6 +389,48 @@ struct DebrisChunk {
     int pointCount = 0;
 };
 
+// A decorative piece of a destroyed SHIP (utils/ShipShatter.hpp cuts them).
+// Same contract as DebrisChunk -- no body, no collision, no ECS slot -- but a
+// ship piece is an arbitrary shape cut from a concave hull, so it carries its
+// own triangles instead of a 5-point polygon, plus the two kinds of edge it
+// draws: SKIN (the ship's original outline) and SCAR (the fresh fracture
+// face, which starts hot and cools). Vectors allocate, but only on a kill,
+// never per frame.
+struct WreckShard {
+    sf::Vector2f position;
+    sf::Vector2f velocity;
+    float rotation = 0.f;               // Degrees
+    float angularVelocity = 0.f;        // Degrees/sec
+    float lifetime = 3.f;               // Seconds left, fade included
+    float fadeTime = 0.8f;              // Final stretch over which alpha falls to 0
+    float drag = 0.45f;                 // Velocity decay rate (1/s)
+    float heat = 1.f;                   // 1 = fracture faces white-hot, 0 = cold
+    float coolRate = 1.f;               // Heat lost per second
+    float emberTimer = 0.f;
+    float radius = 4.f;                 // Furthest vertex, for ember placement
+    float lineWidth = 1.4f;
+    sf::Color fill;
+    sf::Color skinColor;
+    std::vector<sf::Vector2f> tris;     // Local, 3 per triangle
+    std::vector<sf::Vector2f> skin;     // Local segment pairs
+    std::vector<sf::Vector2f> scar;     // Local segment pairs
+};
+
+// A loose piece of SCRAP -- the currency. Dropped by kills, drifts, and is
+// vacuumed up by the player's magnet (ScrapSystem). Like the wreckage it is
+// not an entity and has no body: a pickup the player can bump off course, or
+// that blocks a shot, would be a hazard rather than a reward.
+struct ScrapPickup {
+    sf::Vector2f position;
+    sf::Vector2f velocity;
+    float rotation = 0.f;               // Degrees
+    float spin = 0.f;                   // Degrees/sec
+    float age = 0.f;                    // Seconds since it dropped
+    float size = 4.f;                   // Cube edge, px
+    int   value = 1;                    // Scrap credited on pickup
+    bool  pulled = false;               // Inside the magnet this frame (drawn with a streak)
+};
+
 // Full-screen color wash — used for parry connects, heavy impacts.
 struct ScreenFlash {
     float timer = 0.f;
@@ -497,6 +539,14 @@ struct HealthComponent {
     /// an enemy ship, because it IS the same event -- the only difference is
     /// that nobody is flying this one.
     bool metallic = false;
+
+    /// Scrap this object drops when destroyed, rolled in [scrapMin, scrapMax].
+    /// Cached at spawn from `scrap_drop = { min, max }` in asteroids.lua, for
+    /// the same reason childType is: by death time nothing else of the rock's
+    /// Lua table is left. Enemies do NOT use these -- their drop is read from
+    /// the archetype at death, so an F5 retune applies to ships already alive.
+    uint16_t scrapMin = 0;
+    uint16_t scrapMax = 0;
 };
 
 // ============================================================================

@@ -771,6 +771,26 @@ public:
             em.healths.back().childInheritColor = config["child_inherit_color"].get_or(false);
             em.healths.back().metallic = config["metallic"].get_or(false);
 
+            // Scrap on destruction: `scrap_drop = { min, max }`, or a single
+            // number for a fixed amount. Unset = nothing -- plain rock is
+            // rock. Salvage types set it.
+            {
+                int lo = 0, hi = 0;
+                sol::object sd = config["scrap_drop"];
+                if (sd.is<sol::table>()) {
+                    sol::table t = sd.as<sol::table>();
+                    lo = t[1].get_or(0);
+                    hi = t[2].get_or(lo);
+                }
+                else if (sd.is<double>()) {
+                    lo = hi = static_cast<int>(sd.as<double>());
+                }
+                lo = std::clamp(lo, 0, 9999);
+                hi = std::clamp(hi, lo, 9999);
+                em.healths.back().scrapMin = static_cast<uint16_t>(lo);
+                em.healths.back().scrapMax = static_cast<uint16_t>(hi);
+            }
+
             // Per-type core, falling back to the global visual so nothing
             // that relied on `magma_core_size` changes behaviour.
             {

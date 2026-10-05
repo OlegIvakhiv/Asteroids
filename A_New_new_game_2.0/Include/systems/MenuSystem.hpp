@@ -895,7 +895,7 @@ private:
             float y = std::max(46.f, (r.h - blockH) * 0.5f);
 
             if (m_lastState == GameState::GameOver) {
-                sf::Text sc(monoFont(), "FINAL TALLY  " + groupNumber(m_score), 20);
+                sf::Text sc(monoFont(), "SCRAP SALVAGED  " + groupNumber(m_score), 20);
                 sc.setLetterSpacing(1.6f);
                 sc.setFillColor(CYAN);
                 sc.setPosition({ 26.f, y - 46.f });

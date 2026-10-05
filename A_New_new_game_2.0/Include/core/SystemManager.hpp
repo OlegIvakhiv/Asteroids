@@ -35,6 +35,7 @@
 #include "systems/SpaceDustSystem.hpp"
 #include "systems/HudSystem.hpp"
 #include "systems/DebrisSystem.hpp"
+#include "systems/ScrapSystem.hpp"          // scrap pickups + magnet
 #include "systems/MenuSystem.hpp"
 #include "systems/RefitSystem.hpp"
 #include "systems/TurretSystem.hpp"          // turret AI
@@ -113,6 +114,7 @@ public:
         // corruption in a busy fight is not.
         m_entityManager.reserveAll(8192);
         m_debrisSystem.init(ctx);
+        m_scrapSystem.init(ctx);
         m_menuSystem.init(ctx);
         m_zoneSystem.init(ctx);
         m_devSystem.init(ctx);
@@ -134,7 +136,7 @@ public:
         // looking at when they switch.
         m_zoneSystem.applyIfDirty();
 
-        m_menuSystem.setState(m_state, m_entityManager.totalScore);
+        m_menuSystem.setState(m_state, m_entityManager.scrap);
 
         // ====================================================================
         // 1. MENU STATES (no game logic)
@@ -163,6 +165,8 @@ public:
         if (m_state == GameState::Paused) {
             m_window.setView(m_cameraSystem.getWorldView());
             m_zoneSystem.update(0.f);
+            m_debrisSystem.update(0.f);     // wreckage stays on screen, frozen
+            m_scrapSystem.draw();
             m_particleSystem.update(0.f);
             m_renderSystem.update(0.f);
             m_debugSystem.update(0.f);
@@ -223,6 +227,7 @@ public:
         m_zoneSystem.update(dt);      // backdrop: behind dust, debris and ships
         m_spaceDustSystem.update(dt);
         m_debrisSystem.update(dt);
+        m_scrapSystem.draw();
         m_particleSystem.update(dt);
         m_renderSystem.update(dt);
         m_debugSystem.update(dt);
@@ -384,6 +389,7 @@ public:
         m_spaceDustSystem.init(ctx);
         m_hudSystem.init(ctx);
         m_debrisSystem.init(ctx);
+        m_scrapSystem.init(ctx);
         m_menuSystem.init(ctx);
         m_zoneSystem.init(ctx);
         m_devSystem.init(ctx);
@@ -487,6 +493,7 @@ private:
         m_weaponSystem.update(dt);
         m_aiSystem.update(dt);
         m_turretSystem.update(dt);
+        m_scrapSystem.update(dt);           // after DamageSystem: this frame's drops exist
 
         m_devSystem.endPass();
 
@@ -553,6 +560,7 @@ private:
     SpaceDustSystem m_spaceDustSystem;
     HudSystem m_hudSystem;
     DebrisSystem m_debrisSystem;
+    ScrapSystem  m_scrapSystem;
     MenuSystem m_menuSystem;
 
     // ---- Zones ----

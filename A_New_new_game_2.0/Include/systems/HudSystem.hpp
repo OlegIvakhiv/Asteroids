@@ -1,6 +1,6 @@
 ﻿/**
  * @file HudSystem.hpp
- * @brief Stylized screen-space HUD (health, energy, heat, score)
+ * @brief Stylized screen-space HUD (health, energy, heat, scrap)
  *
  * Pulled out of game.cpp, which was building SFML shapes inline every frame.
  *
@@ -51,7 +51,11 @@ public:
         m_playerEntityId = ctx.playerEntityId;
         m_time = 0.f;
         m_ghostHp = -1.f;
-        m_displayScore = 0.f;
+        m_displayScrap = 0.f;
+        m_lastScrap = -1;
+        m_gainAccum = 0;
+        m_gainTimer = 0.f;
+        m_scrapPulse = 0.f;
         m_qteOpen = 0.f;
     }
 
@@ -74,9 +78,22 @@ public:
         if (hp.currentHp > m_ghostHp) m_ghostHp = hp.currentHp;
         else m_ghostHp += (hp.currentHp - m_ghostHp) * (1.f - std::exp(-4.5f * dt));
 
-        // ---- Score counts up rather than snapping ----
-        m_displayScore += (static_cast<float>(m_em->totalScore) - m_displayScore)
-            * (1.f - std::exp(-9.f * dt));
+        // ---- Scrap counts up rather than snapping, and every gain is shown
+        //      as a "+N" that keeps adding while cubes keep arriving ----
+        const int bal = m_em->scrap;
+        if (m_lastScrap < 0 || bal < m_lastScrap) {          // first frame, or spent
+            m_lastScrap = bal;
+            m_displayScrap = static_cast<float>(bal);
+        }
+        else if (bal > m_lastScrap) {
+            m_gainAccum += bal - m_lastScrap;
+            m_gainTimer = 1.4f;
+            m_scrapPulse = 1.f;
+            m_lastScrap = bal;
+        }
+        m_displayScrap += (static_cast<float>(bal) - m_displayScrap) * (1.f - std::exp(-9.f * dt));
+        m_scrapPulse = std::max(0.f, m_scrapPulse - dt * 4.f);
+        if (m_gainTimer > 0.f) { m_gainTimer -= dt; if (m_gainTimer <= 0.f) m_gainAccum = 0; }
 
         const float x = 26.f;
         float y = 26.f;
@@ -159,22 +176,9 @@ public:
         y += bh + 13.f + 18.f * m_qteOpen;
 
         // ================================================================
-        // SCORE
+        // SCRAP
         // ================================================================
-        if (m_font) {
-            sf::Text score(*m_font);
-            score.setCharacterSize(28);
-            score.setString(std::to_string(static_cast<int>(m_displayScore + 0.5f)));
-            score.setPosition({ x + 3.f, y });
-
-            sf::Text shadow = score;
-            shadow.setFillColor(sf::Color(0, 0, 0, 170));
-            shadow.setPosition({ x + 5.f, y + 2.f });
-            m_window->draw(shadow);
-
-            score.setFillColor(sf::Color(255, 225, 120));
-            m_window->draw(score);
-        }
+        drawScrap(x, y);
     }
 
 private:
@@ -397,6 +401,60 @@ private:
 
     float m_time = 0.f;
     float m_ghostHp = -1.f;
-    float m_displayScore = 0.f;
+    float m_displayScrap = 0.f;   ///< Counts up toward the real balance
+    int   m_lastScrap = -1;       ///< Balance last frame; -1 = not seen yet
+    int   m_gainAccum = 0;        ///< "+N" being shown
+    float m_gainTimer = 0.f;      ///< How long the "+N" stays up
+    float m_scrapPulse = 0.f;     ///< 1 on a pickup, decays: the icon kicks
+
+    /**
+     * @brief Scrap balance: the same amber cube the field drops, then the
+     *        number, then a "+N" while pickups are landing.
+     *
+     * The icon IS the pickup, drawn the same way, so the player connects the
+     * cubes they are flying through with the number going up without being
+     * told. It kicks on every pickup; the "+N" sums a whole burst into one
+     * figure instead of flickering through +3 +2 +4.
+     */
+    void drawScrap(float x, float y) {
+        const float k = m_scrapPulse;
+        const float cx = x + 14.f, cy = y + 17.f;
+        const float half = 8.f + 3.f * k;
+        const float rot = (18.f + 25.f * k) * 3.14159f / 180.f;
+        const float cs = std::cos(rot), sn = std::sin(rot);
+        const auto square = [&](float h, sf::Color c) {
+            sf::ConvexShape q(4);
+            q.setPoint(0, { cx + (-cs + sn) * h, cy + (-sn - cs) * h });
+            q.setPoint(1, { cx + (cs + sn) * h,  cy + (sn - cs) * h });
+            q.setPoint(2, { cx + (cs - sn) * h,  cy + (sn + cs) * h });
+            q.setPoint(3, { cx + (-cs - sn) * h, cy + (-sn + cs) * h });
+            q.setFillColor(c);
+            m_window->draw(q);
+            };
+        square(half + 1.6f, sf::Color(255, 244, 214));
+        square(half, sf::Color(255, static_cast<uint8_t>(170 + 60 * k), static_cast<uint8_t>(110 * k)));
+
+        if (!m_font) return;
+        sf::Text num(*m_font);
+        num.setCharacterSize(28);
+        num.setString(std::to_string(static_cast<int>(m_displayScrap + 0.5f)));
+        num.setPosition({ x + 34.f, y });
+        sf::Text shadow = num;
+        shadow.setFillColor(sf::Color(0, 0, 0, 170));
+        shadow.setPosition({ x + 36.f, y + 2.f });
+        m_window->draw(shadow);
+        num.setFillColor(sf::Color(255, 225, 120));
+        m_window->draw(num);
+
+        if (m_gainAccum > 0 && m_gainTimer > 0.f) {
+            const float a = std::clamp(m_gainTimer / 0.5f, 0.f, 1.f);
+            sf::Text plus(*m_font);
+            plus.setCharacterSize(18);
+            plus.setString("+" + std::to_string(m_gainAccum));
+            plus.setPosition({ x + 42.f + num.getLocalBounds().size.x, y + 7.f });
+            plus.setFillColor(sf::Color(255, 190, 70, static_cast<uint8_t>(255 * a)));
+            m_window->draw(plus);
+        }
+    }
     float m_qteOpen = 0.f;          // 0..1 smooth expansion of QTE widget
 };

@@ -105,7 +105,12 @@ enemy_defaults = {
 
     -- ===== COMBAT =====
     hp                   = 250.0,
-    score_reward         = 500,
+    score_reward         = 500,     -- no longer a score: kept as a size tag, see EntityManager
+    -- SCRAP: the currency. Rolled in [min, max] on a kill and thrown out as
+    -- cubes the player's magnet collects. Priced by how hard the unit is to
+    -- kill, how dangerous it is and how rarely it shows up. Despawned units
+    -- (flew out of range) drop nothing -- only kills pay.
+    scrap_drop           = { 3, 5 },
     bullet_speed         = 550.0,
     bullet_lifetime      = 2.0,
     bullet_damage        = 25.0,     -- Per projectile. Was BulletComponent's
@@ -413,9 +418,27 @@ enemy_defaults = {
                                      -- charge / lunge / coil.
 
     -- ===== DEATH =====
-    death_style           = "standard",   -- "visceral": hull splits into shards
-    death_shards          = 7,
+    death_style           = "standard",   -- "visceral": tight blast, pieces thrown harder
+    death_shards          = 7,            -- old triangle shards, only when wreckage = false
     death_trauma          = 0.38,         -- visceral only
+
+    -- ===== WRECKAGE (decorative -- nothing here collides) =====
+    -- On death the hull is cut into pieces of itself and the plates tear off
+    -- whole. Pieces hold for wreck_life, then fade over wreck_fade. Thrown
+    -- harder on a visceral death (x1.6) and harder still when blown up by a
+    -- Maniac charge (x2.2).
+    wreckage              = true,
+    wreck_cuts            = 0,                -- straight cuts; 0 = by size (2 / 3 / 4)
+    wreck_life            = { 2.0, 3.0 },     -- s at full opacity, rolled per piece
+    wreck_fade            = 0.8,              -- s to fade out after that
+    wreck_speed           = { 40.0, 160.0 },  -- px/s outward, hull pieces
+    wreck_plate_speed     = { 80.0, 240.0 },  -- px/s outward, armour plates
+    wreck_spin            = 230.0,            -- deg/s max tumble
+    wreck_inherit         = 0.6,              -- share of the ship's velocity kept
+    wreck_drag            = 0.45,             -- 1/s; higher = settles sooner
+    wreck_char            = 0.45,             -- hull colour x this = burnt fill
+    wreck_cool_time       = 1.1,              -- s for a fracture edge to go cold
+    wreck_plates          = true,
 
     -- ===== SPAWN DIRECTOR =====
     faction               = "RAKSHARI",
@@ -537,6 +560,7 @@ enemy_archetypes.WARDOG = derive {
                                    -- real pressure; one is a nuisance. That gap
                                    -- is the whole unit.
     score_reward         = 45,
+    scrap_drop           = { 0, 1 },     -- summoned chaff: next to nothing, or the summoner is a farm
     engine_power         = 260.0,
     max_speed            = 26.0,
     rotation_speed       = 6.0,
@@ -584,6 +608,7 @@ enemy_archetypes.RAIDER = derive {
     turrets = {},
 
     spawn_weight = 150.0,
+    scrap_drop   = { 3, 5 },             -- common line unit: a little, often
     max_active   = 6,
     threat_cost  = 3,
     ambush_chance = 0.15,
@@ -668,6 +693,7 @@ enemy_archetypes.BARGE = derive {
     angulardrag_factor   = 6.0,
     hp                   = 2600.0,
     score_reward         = 3200,
+    scrap_drop           = { 30, 40 },   -- 2600 HP of salvage: the jackpot
     stagger_resist       = 0.92,
     stun_resist          = 0.88,
 
@@ -833,6 +859,7 @@ enemy_archetypes.BERSERKER = derive {
     density              = 5.0,
     hp                   = 440.0,  -- Bigger target, slightly more to chew
     score_reward         = 900,
+    scrap_drop           = { 14, 18 },   -- the most dangerous thing in a fight pays best per kill
     stagger_resist       = 0.25,   -- Harder to knock around than a Raider...
     stun_resist          = 0.10,   -- ...but a parried bash still SHUTS IT DOWN.
                                    -- Keep this low: the stun is the reward.
@@ -1029,6 +1056,7 @@ enemy_archetypes.MANIAC = derive {
     hp                   = 300.0,  -- Squishier than a Berserker: killing him
                                    -- early is supposed to be viable
     score_reward         = 850,
+    scrap_drop           = { 12, 16 },   -- rare and dangerous: worth chasing down
     stagger_resist       = 0.0,
     stun_resist          = 0.0,
 

@@ -72,6 +72,7 @@
 #include "core/EntityManager.hpp"
 #include "core/EntityFactory.hpp"
 #include "core/EnemyArchetypes.hpp"        // added for archetype registry
+#include "utils/ShipShatter.hpp"            // ship wreckage on death
 #include <cfloat>
 #include <cmath>
 #include <vector>
@@ -809,8 +810,10 @@ public:
                 sf::Vector2f deathPos = m_em->transforms[i].position;
 
                 if (type == BodyType::Asteroid) {
-                    int reward = m_em->scoreRewards[i];
-                    m_em->totalScore += reward;
+                    // Salvage pays out in scrap; plain rock (scrapMax 0) does
+                    // not. scoreRewards is no longer credited anywhere -- it
+                    // survives only as the size tag parry and Rift read.
+                    dropScrap(i, rollScrap(m_em->healths[i].scrapMin, m_em->healths[i].scrapMax));
                     bool isExplosive = m_em->healths[i].isExplosive;
 
                     if (isExplosive) {
@@ -903,7 +906,7 @@ public:
                     }
                 }
                 else if (type == BodyType::Enemy) {
-                    m_em->totalScore += m_em->scoreRewards[i];
+                    dropScrap(i, enemyScrap(i));
                     spawnEnemyDeath(i, deathPos);
                 }
             }
@@ -1625,9 +1628,17 @@ private:
     // ========================================================================
 
     void spawnEnemyDeath(size_t i, sf::Vector2f deathPos) {
+        const enemyarch::ArchetypeDef* adef = m_registry
+            ? &m_registry->resolve(m_em->enemies[i].archetype) : nullptr;
+
         // Already blew himself up -- the blast WAS the death. Stacking a
         // standard explosion on top of it would read as two separate events.
-        if (m_em->enemies[i].detonated) return;
+        // The hull still has to go somewhere, though: it is thrown apart by
+        // its own charge, hardest of any death.
+        if (m_em->enemies[i].detonated) {
+            if (adef) spawnWreckage(i, *adef, WRECK_BLAST);
+            return;
+        }
 
         // Shot down mid-charge: it still goes off, just smaller. A Maniac who
         // simply vanished when killed during the charge would make the whole
@@ -1635,24 +1646,224 @@ private:
         if (m_em->enemies[i].frenzyState == FrenzyState::Ignite ||
             m_em->enemies[i].frenzyState == FrenzyState::Charge) {
             blowUpManiac(i, false);
+            if (adef) spawnWreckage(i, *adef, WRECK_BLAST);
             return;
         }
 
-        if (m_registry) {
-            const enemyarch::ArchetypeDef& adef = m_registry->resolve(m_em->enemies[i].archetype);
-            if (adef.config["death_style"].get_or<std::string>("standard") == "visceral") {
-                spawnVisceralDeath(i, deathPos, adef);
-                return;
-            }
+        if (adef && adef->config["death_style"].get_or<std::string>("standard") == "visceral") {
+            spawnVisceralDeath(i, deathPos, *adef);
+            return;
         }
 
-        // ---- Standard: unchanged from 1.3 ----
+        // ---- Standard: the 1.3 blast, and now the hull comes apart in it ----
+        if (adef) spawnWreckage(i, *adef, WRECK_STANDARD);
         m_em->spawnExplosion(deathPos, sf::Color::Red, 35, 5.0f);
         m_em->spawnExplosion(deathPos, sf::Color::Yellow, 15, 2.5f);
         m_em->spawnShockRing(deathPos, 15.f, 190.f, 0.40f,
             sf::Color(255, 90, 40), 5.f, 230.f);
         m_em->addTrauma(0.30f);
     }
+
+    // ========================================================================
+    // SCRAP
+    // ========================================================================
+
+    static int rollScrap(int lo, int hi) {
+        if (hi <= 0) return 0;
+        lo = std::max(0, lo);
+        hi = std::max(lo, hi);
+        return lo + rand() % (hi - lo + 1);
+    }
+
+    /**
+     * @brief What a dying ship is worth, read from its archetype NOW.
+     *
+     * `scrap_drop = { min, max }` in enemy.lua. Read at death rather than
+     * cached at spawn so an F5 retune applies to ships already in the field.
+     * A single number means a fixed amount.
+     */
+    int enemyScrap(size_t i) const {
+        if (!m_registry || i >= m_em->enemies.size()) return 0;
+        const sol::table& cfg = m_registry->resolve(m_em->enemies[i].archetype).config;
+        sol::object sd = cfg["scrap_drop"];
+        if (sd.is<sol::table>()) {
+            sol::table t = sd.as<sol::table>();
+            const int lo = t[1].get_or(0);
+            return rollScrap(lo, t[2].get_or(lo));
+        }
+        if (sd.is<double>()) return std::max(0, static_cast<int>(sd.as<double>()));
+        return 0;
+    }
+
+    /// Throw `amount` scrap out of entity i, carrying its momentum.
+    void dropScrap(size_t i, int amount) {
+        if (amount <= 0) return;
+        sf::Vector2f vel(0.f, 0.f);
+        if (b2Body_IsValid(m_em->physics[i].bodyId)) {
+            const b2Vec2 v = b2Body_GetLinearVelocity(m_em->physics[i].bodyId);
+            vel = { v.x * SCALE, v.y * SCALE };
+        }
+        m_em->spawnScrap(m_em->transforms[i].position, vel, amount);
+    }
+
+    // ========================================================================
+    // SHIP WRECKAGE
+    // ========================================================================
+
+    /// Throw force per death style. Multiplies the archetype's wreck_speed and
+    /// spin, so per-unit tuning stays in Lua and the STYLE keeps its ordering:
+    /// a blast scatters harder than a visceral break, which scatters harder
+    /// than an ordinary kill.
+    static constexpr float WRECK_STANDARD = 1.0f;
+    static constexpr float WRECK_VISCERAL = 1.6f;
+    static constexpr float WRECK_BLAST = 2.2f;
+
+    /**
+     * @brief Break the dying ship into decorative pieces of its own hull.
+     *
+     * The hull is cut by shatter::slice (utils/ShipShatter.hpp); the armour
+     * plates come off whole on top. Every piece starts exactly where that part
+     * of the ship was, at the ship's heading, and leaves with:
+     *
+     *   - an outward throw along its own direction from the centre, jittered
+     *   - a share of the ship's momentum -- a ship killed at speed leaves a
+     *     debris trail that keeps going the way it was going
+     *   - the ship's own spin, as tangential speed at that radius, so a
+     *     tumbling ship flings its pieces off the way a tumbling ship would
+     *
+     * Then each piece holds for wreck_life seconds and fades over wreck_fade.
+     * Nothing collides; see DebrisSystem.
+     *
+     * @return false if the unit opts out (`wreckage = false`) or has no hull,
+     *         so a caller can fall back to its old shards.
+     */
+    bool spawnWreckage(size_t i, const enemyarch::ArchetypeDef& adef, float force) {
+        const sol::table& cfg = adef.config;
+        if (!cfg["wreckage"].get_or(true)) return false;
+        if (adef.visualTris.size() < 3 || adef.visual.size() < 3) return false;
+
+        // A kill-all on a packed field can land many deaths in one frame. The
+        // pieces are pure spectacle, so past this many in flight, new kills
+        // shed fewer: plates go first, then the cut gets coarser.
+        constexpr size_t SOFT_CAP = 400;
+        const bool crowded = m_em->wreckShards.size() > SOFT_CAP;
+        if (m_em->wreckShards.size() > SOFT_CAP * 2) return true;
+
+        const auto& tf = m_em->transforms[i];
+        sf::Vector2f shipVel(0.f, 0.f);
+        float shipSpin = 0.f;   // rad/s
+        if (b2Body_IsValid(m_em->physics[i].bodyId)) {
+            const b2Vec2 v = b2Body_GetLinearVelocity(m_em->physics[i].bodyId);
+            shipVel = { v.x * SCALE, v.y * SCALE };
+            shipSpin = b2Body_GetAngularVelocity(m_em->physics[i].bodyId);
+        }
+        const float rr = tf.rotation * 3.14159f / 180.f;
+        const float cs = std::cos(rr), sn = std::sin(rr);
+
+        // ---- Tuning (Lua, per archetype; see enemy_defaults) ----
+        const auto range = [&](const char* key, float lo, float hi) {
+            sol::optional<sol::table> t = cfg[key];
+            if (t) { lo = (*t)[1].get_or(lo); hi = (*t)[2].get_or(hi); }
+            return std::pair<float, float>(lo, std::max(lo, hi));
+            };
+        const auto roll = [](std::pair<float, float> r) {
+            return r.first + (r.second - r.first) * ((rand() % 1000) / 1000.f);
+            };
+        const auto life = range("wreck_life", 2.0f, 3.0f);
+        const auto speed = range("wreck_speed", 40.f, 160.f);
+        const auto plateSpeed = range("wreck_plate_speed", 80.f, 240.f);
+        const float fade = std::max(0.05f, cfg["wreck_fade"].get_or(0.8f));
+        const float spin = cfg["wreck_spin"].get_or(230.f);
+        const float inherit = cfg["wreck_inherit"].get_or(0.6f);
+        const float charK = cfg["wreck_char"].get_or(0.45f);
+        const float drag = cfg["wreck_drag"].get_or(0.45f);
+        const float cool = std::max(0.05f, cfg["wreck_cool_time"].get_or(1.1f));
+
+        int cuts = cfg["wreck_cuts"].get_or(0);
+        if (cuts <= 0) cuts = (adef.radius < 26.f) ? 2 : (adef.radius < 45.f) ? 3 : 4;
+        if (crowded) cuts = std::max(1, cuts - 1);
+
+        // ---- Colours ----
+        // The hull's own colour, charred. A unit that dies still powered
+        // down never showed its live colours, so it breaks in its cold ones
+        // (the same drain EntityFactory::coldColorFor falls back to).
+        sf::Color base = adef.color;
+        if (i < m_em->enemies.size() && m_em->enemies[i].dormant)
+            base = sf::Color(static_cast<uint8_t>(base.r * 0.22f + 44.f),
+                static_cast<uint8_t>(base.g * 0.22f + 42.f),
+                static_cast<uint8_t>(base.b * 0.22f + 42.f));
+        const auto scaled = [](sf::Color c, float k, uint8_t a) {
+            return sf::Color(static_cast<uint8_t>(std::clamp(c.r * k, 0.f, 255.f)),
+                static_cast<uint8_t>(std::clamp(c.g * k, 0.f, 255.f)),
+                static_cast<uint8_t>(std::clamp(c.b * k, 0.f, 255.f)), a);
+            };
+        // The live outline is fill + (60,50,50); the wreck keeps it, dimmed,
+        // so a piece still reads as THIS ship's edge.
+        const sf::Color liveEdge(static_cast<uint8_t>(std::min(255, base.r + 60)),
+            static_cast<uint8_t>(std::min(255, base.g + 50)),
+            static_cast<uint8_t>(std::min(255, base.b + 50)));
+        const sf::Color skinCol = scaled(liveEdge, 0.85f, 230);
+        const float lineW = (adef.radius > 45.f) ? 1.8f : 1.4f;
+
+        const auto launch = [&](const shatter::Piece& pc, sf::Color fill, sf::Color skin,
+            std::pair<float, float> spd, float spinMul, float lifeMul, float heat)
+            {
+                // Where this piece is in the world, and which way is "out".
+                const sf::Vector2f wc(pc.centre.x * cs - pc.centre.y * sn,
+                    pc.centre.x * sn + pc.centre.y * cs);
+                float a;
+                const float wl = std::sqrt(wc.x * wc.x + wc.y * wc.y);
+                if (wl > 0.5f) a = std::atan2(wc.y, wc.x) + ((rand() % 1000) / 1000.f - 0.5f) * 1.0f;
+                else           a = (rand() % 360) * 3.14159f / 180.f;
+                const sf::Vector2f out(std::cos(a), std::sin(a));
+
+                WreckShard s;
+                s.position = tf.position + wc;
+                s.velocity = out * (roll(spd) * force)
+                    + shipVel * inherit
+                    + sf::Vector2f(-wc.y, wc.x) * shipSpin;          // omega x r
+                s.rotation = tf.rotation;
+                s.angularVelocity = ((rand() % 2) ? 1.f : -1.f)
+                    * (0.35f + 0.65f * ((rand() % 1000) / 1000.f)) * spin * spinMul * force
+                    + shipSpin * 180.f / 3.14159f;
+                s.fadeTime = fade;
+                s.lifetime = roll(life) * lifeMul + fade;
+                s.drag = drag;
+                s.heat = heat;
+                s.coolRate = 1.f / cool;
+                s.emberTimer = (rand() % 60) / 1000.f;
+                s.radius = pc.radius;
+                s.lineWidth = lineW;
+                s.fill = fill;
+                s.skinColor = skin;
+                s.tris = pc.tris;
+                s.skin = pc.skin;
+                s.scar = pc.scar;
+                m_em->wreckShards.push_back(std::move(s));
+            };
+
+        // ---- 1. The hull, cut ----
+        const sf::Color hullFill = scaled(base, charK, 255);
+        for (const auto& pc : shatter::slice(adef.visual, adef.visualTris, cuts))
+            launch(pc, hullFill, skinCol, speed, 1.f, 1.f, 1.f);
+
+        // ---- 2. The plates, torn off whole, AFTER the hull so they start on
+        //         top of it exactly as they were drawn on the live ship ----
+        // Smaller and lighter, so they go faster, spin harder, and are gone a
+        // little sooner. Cold from the start: a plate came off at the bolts,
+        // it was not cut.
+        if (!crowded && cfg["wreck_plates"].get_or(true)) {
+            for (const auto& pl : adef.plates) {
+                const shatter::Piece pc = shatter::whole(pl.points, pl.tris);
+                if (pc.tris.empty()) continue;
+                const sf::Color plFill = scaled(base, std::max(0.f, pl.shade) * charK, 255);
+                const sf::Color plSkin = pl.accent ? skinCol : scaled(liveEdge, 0.6f, 200);
+                launch(pc, plFill, plSkin, plateSpeed, 1.5f, 0.85f, 0.f);
+            }
+        }
+        return true;
+    }
+
 
     /**
      * @brief Close-range, dirty, and it comes apart.
@@ -1694,10 +1905,12 @@ private:
                 life, life, 2.f + rand() % 4 });
         }
 
-        // 4. The hull, in pieces.
+        // 4. The hull, in pieces. Real wreckage cut from the hull, thrown
+        //    harder than a standard kill. The old triangle shards stay as the
+        //    fallback for a unit that sets `wreckage = false`.
         const size_t triCount = adef.visualTris.size() / 3;
         const int maxShards = adef.config["death_shards"].get_or(7);
-        if (triCount > 0 && maxShards > 0) {
+        if (!spawnWreckage(i, adef, WRECK_VISCERAL) && triCount > 0 && maxShards > 0) {
             const size_t step = std::max<size_t>(1, triCount / static_cast<size_t>(maxShards));
             const sf::Color shard(
                 static_cast<uint8_t>(adef.color.r * 0.8f),

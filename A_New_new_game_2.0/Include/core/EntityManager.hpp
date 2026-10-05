@@ -152,6 +152,11 @@ public:
         // magma detonation adds 14. A rift burst clearing a cluster can put
         // 100+ in flight at once, each living up to ~1.35s.
         debris.reserve(512);
+        // Ship wreckage: ~4-11 hull pieces plus the plates per kill, living
+        // ~3s. KILL ALL on a full roster is the worst case, ~150.
+        wreckShards.reserve(256);
+        // A kill drops at most 12 cubes; they live ~30s unless collected.
+        scrapPickups.reserve(512);
     }
 
 
@@ -193,13 +198,15 @@ public:
         shockRings.clear();
         particles.clear();
         debris.clear();
+        wreckShards.clear();
+        scrapPickups.clear();
         // NOTE: `stars` is deliberately NOT cleared -- the starfield is
         // cosmetic background, not game state, and initBackground() is
         // expensive-ish (regenerates 800 stars with an RNG loop).
 
         entityIdMap.clear();
         nextEntityId = 1;
-        totalScore = 0;
+        scrap = 0;
 
         timeScale = 1.f;
         hitstopFreeze = 0.f;
@@ -240,9 +247,50 @@ public:
     std::vector<Particle> particles;              ///< Explosion/debris particles
     std::vector<Star> stars;                      ///< Parallax background stars
 
-    // ===== Scoring System =====
-    std::vector<int> scoreRewards;                ///< Points awarded when entity dies
-    int totalScore = 0;                           ///< Cumulative player score
+    // ===== Size tags (NOT score any more) =====
+    /// Historically the points an entity was worth. Score is gone -- the
+    /// player earns SCRAP now -- but this array stays, because parry and the
+    /// Rift burst still read it as a size tag (>= 200 large rock, == 75
+    /// magmatic, < 50 small). Deleting it would silently change both. Treat
+    /// `score_reward` in Lua as "size class" until those reads are migrated
+    /// to HealthComponent::asteroidTier.
+    std::vector<int> scoreRewards;
+
+    // ===== Scrap: the currency =====
+    int scrap = 0;                                ///< Player's scrap balance this run
+    std::vector<ScrapPickup> scrapPickups;        ///< Loose scrap in the field
+
+    /**
+     * @brief Throw `total` scrap out of a kill as a burst of cubes.
+     *
+     * The value is split over at most MAX cubes so a Barge's 35 reads as a
+     * shower rather than one fat block, and so a fat drop cannot flood the
+     * field with hundreds of pickups. Bigger cubes are worth more, and look
+     * it: edge grows with sqrt(value).
+     *
+     * @param inheritVel  The victim's velocity, px/s. A ship killed at speed
+     *                    sheds its scrap along its path, not in a dead stop.
+     */
+    void spawnScrap(sf::Vector2f pos, sf::Vector2f inheritVel, int total) {
+        if (total <= 0) return;
+        constexpr int MAX = 12;
+        const int count = std::min(total, MAX);
+        const int base = total / count;
+        const int extra = total % count;
+        const float spread = std::min(90.f, total * 2.5f);   // bigger hauls fly wider
+        for (int k = 0; k < count; ++k) {
+            ScrapPickup p;
+            p.value = base + (k < extra ? 1 : 0);
+            const float a = (rand() % 360) * 3.14159f / 180.f;
+            const float sp = 45.f + spread + rand() % 110;
+            p.position = pos + sf::Vector2f(std::cos(a), std::sin(a)) * 6.f;
+            p.velocity = sf::Vector2f(std::cos(a), std::sin(a)) * sp + inheritVel * 0.35f;
+            p.rotation = static_cast<float>(rand() % 360);
+            p.spin = ((rand() % 2) ? 1.f : -1.f) * (90.f + rand() % 270);
+            p.size = std::min(8.5f, 3.2f + 1.3f * std::sqrt(static_cast<float>(p.value)));
+            scrapPickups.push_back(p);
+        }
+    }
 
     // ===== DEV =====
     /// God mode. Written every frame by DevSystem from DevState and read ONLY
@@ -768,6 +816,10 @@ public:
     // DEBRIS (decorative, non-physical rock shards)
     // ========================================================================
     std::vector<DebrisChunk> debris;
+
+    /// Decorative pieces of destroyed ships. Spawned by DamageSystem from
+    /// utils/ShipShatter.hpp, simulated and drawn by DebrisSystem.
+    std::vector<WreckShard> wreckShards;
 
     /**
      * @brief Break an asteroid apart into visible shards
