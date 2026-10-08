@@ -60,8 +60,78 @@
  *    the player. Killed mid-charge -> a smaller blast, so shooting him down
  *    early stays the safe answer and therefore a real choice.
  *
+ * CHANGED in 1.6 -- BLOODSEEKER
+ *
+ *  - DISENGAGE DODGE. While a Bloodseeker disengages (DuelShift::Disengage)
+ *    the player's plasma and Rift bolts PASS THROUGH him: the round is put
+ *    back on its own line beyond the hull at its own speed, he is kicked off
+ *    that line, and a hull-shaped ghost stays where he was. Reflected
+ *    (parried) rounds still land -- the spec is "he cannot dodge the parry"
+ *    -- and so do ramming, the shoulder bash, kinetic rocks and every blast,
+ *    none of which come through this branch. A stunned or tumbling
+ *    Bloodseeker dodges nothing.
+ *
+ *  - DIVE CONTACT. The Blood Dive is a rush, not a ram: touching him mid-dive
+ *    deals no damage either way. Parrying it is a parry. The bash it hands
+ *    off to is what hurts, and that keeps its full cyan windup.
+ *
+ *  - parryEnemy() and a reflected round's stun flag duelStunEvade: when that
+ *    stun ends AISystem opens his post-stun evade window, during which
+ *    isDuelEvading() is true exactly as in the disengage. Bullet stuns honour
+ *    `stun_resist_ranged` (default 0, so only units that set it change).
+ *    parryEnemy(), like staggerEnemy(), breaks a dive, a ram-cancel rush or a feint
+ *    in progress (breakDive). staggerEnemy() also breaks a lancer or a cone
+ *    (breakRangeAttack) and puts it on cooldown rather than letting it
+ *    resume when he recovers.
+ *
+ *  - PACK. triggerDeathChaos() stamps feralTimer on the pack when a
+ *    Bloodseeker dies (not on an executed ally). Enemy rounds that carry
+ *    feralMult (fired while feral) now damage enemy hulls; every other enemy
+ *    round still stops dead on one. An `executed` ally drops no scrap.
+ *
+ *  - A ram the Bloodseeker CANCELS stops being a ram on the frame: ramState
+ *    goes to None, so isRamInvulnerable() is false for the rush that
+ *    follows, and the rush is a dive (no contact damage, parriable).
+ *
+ *  1.8 -- ROSTER PASS
+ *  - FERAL MELEE. A bash strike with bashTargetId set lands on that ship
+ *    (bash_damage x death_chaos_damage, stagger), not the player. A feral
+ *    ram in Charge hurts ANY hull it touches (feralRamHit: ram_damage x
+ *    death_chaos_damage, thrown sideways out of its lane).
+ *  - Enemy rounds chip poise x BulletComponent::poiseMult (Wardogs 0.1).
+ *  - A mine that runs out of lifetime unlit FIZZLES: no blast.
+ *
+ *  1.9 -- PLAYTEST
+ *  - BEAMS. resolveBeams() / traceBeam(): the lancer is hitscan. Pierces
+ *    everything on the line (rocks gone, ships <= killHp destroyed, bigger
+ *    ones pierceDamage + stagger); a parry stops it on the shield and
+ *    REFLECTS it off the shield's curve as the player's beam.
+ *  - PARRIED ROCKETS SEEK. parryRocket() picks a random victim (ships 3 :
+ *    rocks 1, never the player), turns the rocket's collisions off and
+ *    hands it to WeaponSystem, which always delivers it.
+ *
+ *  1.10 -- DODGE PASS
+ *  - PARRY RE-ARM. The hidden "perfect timing" test is gone: every bullet /
+ *    ship parry re-arms (onParryRearm, was onPerfectParry). Asteroids keep
+ *    the full recovery. Lua: parry_rearm_* (old parry_perfect_* still read).
+ *  - PERFECT DODGE. onDodgeAte(): a refit dodge whose i-frames ate an enemy
+ *    attack (round, bash, ram, beam, blast) refunds its energy and re-arms,
+ *    once per dodge, falling off over a chain. checkDodgePhase(): with enemy
+ *    collisions off (InputSystem), a ram / dive / lunge passing through the
+ *    ship counts. Dodge i-frames cover blasts.
+ *    1.10c (playtest): a dodged bash or ram changes NOTHING for the
+ *    attacker -- the chain continues, no hit-confirm lockout (those are for
+ *    hits that land). Dodging well is the player's reward only.
+ *    1.10d: PERFECT SHOULDER BASH (heavy). A shoulder bash inside a perfect
+ *    dodge is one event, not two: no ram damage taken when it breaks a
+ *    charge; HUD reads "PERFECT SHOULDER BASH".
+ *    1.10b (playtest): a NEAR MISS counts too (dodge_graze_*), and the tell
+ *    is loud -- a thick ghost where it met you, a ghost trail for the rest
+ *    of the escape (updateDodgeTrail), a slow-mo dip, a double ring, and a
+ *    "PERFECT DODGE" readout on the HUD (HudSystem).
+ *
  * @author Oleg Ivakhiv
- * @version 1.5 (maniac)
+ * @version 1.10 (dodge pass)
  */
 
 #pragma once
@@ -73,6 +143,8 @@
 #include "core/EntityFactory.hpp"
 #include "core/EnemyArchetypes.hpp"        // added for archetype registry
 #include "utils/ShipShatter.hpp"            // ship wreckage on death
+#include "utils/Afterimage.hpp"             // Bloodseeker dodge ghosts
+#include "utils/SeekTarget.hpp"             // parried rockets pick a victim
 #include <cfloat>
 #include <cmath>
 #include <vector>
@@ -120,10 +192,12 @@ public:
         m_feel = ship::classFeelFor(*m_lua, m_em->players[playerIdx].kit);
         if (m_em->healths[playerIdx].cheapInvulTimer > 0)
             m_em->healths[playerIdx].cheapInvulTimer -= dt;
-        if (m_em->players[playerIdx].perfectParryFlash > 0.f) {
-            m_em->players[playerIdx].perfectParryFlash -= dt;
-            if (m_em->players[playerIdx].perfectParryFlash <= 0.f)
-                m_em->players[playerIdx].perfectParryChain = 0;
+        if (m_em->players[playerIdx].dodgeVerdictFlash > 0.f)
+            m_em->players[playerIdx].dodgeVerdictFlash -= dt;
+        if (m_em->players[playerIdx].parryChainTimer > 0.f) {
+            m_em->players[playerIdx].parryChainTimer -= dt;
+            if (m_em->players[playerIdx].parryChainTimer <= 0.f)
+                m_em->players[playerIdx].parryChain = 0;
         }
         // ====================================================================
         // 1b. BASH STRIKES raised by AISystem last frame
@@ -131,6 +205,9 @@ public:
         // Before contacts, so a lunge that also produced a begin-touch this
         // frame is already settled when that contact is looked at.
         resolveBashStrikes(playerIdx);
+        resolveBeams(playerIdx);             // the lancer: hitscan, same frame-after rule
+        checkDodgePhase(playerIdx);          // perfect dodge through a ram / dive / lunge
+        updateDodgeTrail(playerIdx, dt);
 
         // ====================================================================
         // 1c. THROWN MANIACS — fuse and impact
@@ -171,6 +248,25 @@ public:
                     done = true;
                 }
                 if (done) continue;
+            }
+
+            // ================================================================
+            // 2a-pre1. FERAL RAM vs a SHIP (death-chaos)
+            // ================================================================
+            // A feral unit's charge hurts any hull it meets, not only the one
+            // it picked. The player side of a ram is handled further down.
+            if (typeA == BodyType::Enemy && typeB == BodyType::Enemy && udA && udB) {
+                const size_t ia = m_em->getEntityIndex(udA->entityId);
+                const size_t ib = m_em->getEntityIndex(udB->entityId);
+                if (ia != (size_t)-1 && ib != (size_t)-1 &&
+                    ia < m_em->enemies.size() && ib < m_em->enemies.size()) {
+                    bool hit = false;
+                    for (int pass = 0; pass < 2; ++pass) {
+                        const size_t r = pass ? ib : ia, v = pass ? ia : ib;
+                        if (feralRamHit(r, v)) hit = true;
+                    }
+                    if (hit) continue;
+                }
             }
 
             // ================================================================
@@ -322,6 +418,15 @@ public:
                             continue;
                         }
 
+                        // ---- BLOODSEEKER DISENGAGE: the round MISSES ----
+                        // The opposite read to the ram: there the shot lands
+                        // and does nothing; here it never lands at all. So
+                        // the round keeps flying and he leaves a ghost.
+                        if (isDuelEvading(targetIdx) && !blt.isReflected) {
+                            evadeRound(bulletIdx, targetIdx, hitVel);
+                            continue;
+                        }
+
                         m_em->healths[targetIdx].currentHp -= dmg;
                         applyKnockback(targetIdx, hitVel, blt.knockback);
                         m_em->enemies[targetIdx].hitFlashTimer = 0.18f;
@@ -346,8 +451,18 @@ public:
                         }
 
                         if (blt.stunOnHit > 0.f) {
+                            // Per-unit resist for stuns that arrive by round
+                            // (reflected shots, Rift direct hits). Its own key,
+                            // default 0: every unit that does not set it takes
+                            // these stuns in full, exactly as before.
+                            const float res = std::clamp(
+                                acfg(targetIdx, "stun_resist_ranged", 0.f), 0.f, 1.f);
                             m_em->healths[targetIdx].stunTimer =
-                                std::max(m_em->healths[targetIdx].stunTimer, blt.stunOnHit);
+                                std::max(m_em->healths[targetIdx].stunTimer, blt.stunOnHit * (1.f - res));
+                            // A PARRIED round's stun arms the Bloodseeker's
+                            // post-stun evade window (a no-op on anyone whose
+                            // post_stun_evade_time is 0).
+                            if (blt.isReflected) m_em->enemies[targetIdx].duelStunEvade = true;
                         }
 
                         m_em->spawnImpact(hitPos, sf::Color::Yellow, hitVel);
@@ -407,6 +522,12 @@ public:
                     // Gunship dodge into a ship: the dodge IS the attack. Runs
                     // before the ram contract so it can break a charge.
                     if (tryShoulderBash(playerIdx, otherIdx)) continue;
+                    // Blood Dive: a rush, not a ram. A parry still parries
+                    // him; anything else is just two hulls meeting.
+                    if (otherIdx < m_em->enemies.size() && m_em->enemies[otherIdx].duelDiving()) {
+                        if (isParryActive) parryEnemy(playerIdx, otherIdx);
+                        continue;
+                    }
                     if (isRamInvulnerable(otherIdx)) {
                         if (isParryActive) {
                             // Parry whiffs against a charge. Loud, so it reads
@@ -523,9 +644,8 @@ public:
 
                             m_em->spawnExplosion(otherPos, parryColor(), 10, 1.5f);
                             onParrySuccess(playerIdx, otherPos);
-                            // ---- Perfect parry on bullet ----
-                            if (isPerfectParry(playerIdx))
-                                onPerfectParry(playerIdx, otherPos);
+                            // ---- Parry re-arm (every bullet parry) ----
+                            onParryRearm(playerIdx, otherPos);
                             continue;
                         }
                     }
@@ -628,14 +748,34 @@ public:
                         if (hitType == BodyType::Player && m_em->healths[playerIdx].invulTimer <= 0) {
                             m_em->damagePlayer(playerIdx, blt.damage);
                             // Chip: wears poise down, can never break it alone.
-                            m_em->chipPoise(playerIdx, blt.damage * vcfg("bullet_poise_per_damage", 0.6f));
+                            m_em->chipPoise(playerIdx, blt.damage * blt.poiseMult
+                                * vcfg("bullet_poise_per_damage", 0.6f));
                             m_em->healths[playerIdx].invulTimer = blt.playerIframes;
                             m_em->spawnExplosion(hitPos, sf::Color(255, 100, 0), 8, 2.f);
                             m_em->spawnImpact(hitPos, sf::Color(255, 140, 0), hitVel);
                         }
+                        else if (hitType == BodyType::Player) {
+                            onDodgeAte(playerIdx, hitPos);   // only pays out inside a dodge
+                        }
                         else if (hitType == BodyType::Asteroid) {
                             m_em->healths[targetIdx].currentHp -= blt.damage * 0.6f;
                             m_em->spawnImpact(hitPos, sf::Color(255, 120, 0), hitVel);
+                        }
+                        // ---- Death-chaos: a FERAL round hurts the pack too ----
+                        // Ordinary enemy rounds still stop dead on an enemy
+                        // hull and do nothing. Never its own shooter, never a
+                        // charging ram, never a dormant hull (it must stay a
+                        // wreck to look at).
+                        else if (hitType == BodyType::Enemy && blt.feralMult > 0.f &&
+                            targetIdx < m_em->enemies.size() &&
+                            m_em->transforms[targetIdx].entityId != blt.ownerEntityId &&
+                            !m_em->enemies[targetIdx].dormant && !isRamInvulnerable(targetIdx))
+                        {
+                            m_em->healths[targetIdx].currentHp -= blt.damage * blt.feralMult;
+                            m_em->healths[targetIdx].hitFlash = 0.16f;
+                            m_em->enemies[targetIdx].hitFlashTimer = 0.16f;
+                            m_em->spawnImpact(hitPos, sf::Color(255, 70, 50), hitVel);
+                            m_em->spawnExplosion(hitPos, sf::Color(220, 40, 30), 4, 1.8f);
                         }
 
                         blt.markedForDestroy = true;
@@ -906,7 +1046,14 @@ public:
                     }
                 }
                 else if (type == BodyType::Enemy) {
-                    dropScrap(i, enemyScrap(i));
+                    // Executed by a Bloodseeker: the Rakshari kept that
+                    // salvage. Only kills the PLAYER's fight caused pay out.
+                    const bool executed = i < m_em->enemies.size() && m_em->enemies[i].executed;
+                    if (!executed) dropScrap(i, enemyScrap(i));
+                    else m_em->spawnShockRing(deathPos, 8.f, 90.f, 0.30f,
+                        sf::Color(214, 172, 92), 4.f, 240.f);
+                    // A Bloodseeker's death turns his pack on itself.
+                    if (!executed) triggerDeathChaos(i, deathPos);
                     spawnEnemyDeath(i, deathPos);
                 }
             }
@@ -916,7 +1063,15 @@ public:
                 // runs out mid-air. Never a silent despawn: a live fuse the
                 // player has walked away from is a hazard they earned.
                 const auto& b = m_em->bullets[i];
-                if (b.isRocket || (b.isMine && b.armTimer <= 0.f)) {
+                // A mine that simply ran out (decay, never lit) fizzles: a
+                // puff and a dead click, no blast. See WeaponSystem.
+                const bool fizzle = b.isMine && !b.markedForDestroy && b.mineFuse <= 0.f;
+                if (fizzle) {
+                    const sf::Vector2f mp = m_em->transforms[i].position;
+                    m_em->spawnExplosion(mp, sf::Color(120, 112, 100), 6, 1.6f);
+                    m_em->spawnShockRing(mp, 3.f, 22.f, 0.20f, sf::Color(150, 140, 125), 1.5f, 150.f);
+                }
+                else if (b.isRocket || (b.isMine && b.armTimer <= 0.f)) {
                     detonate(m_em->transforms[i].position, b.blastRadius, b.blastDamage,
                         i, b.isWild ? playerIdx : (size_t)-1,
                         b.isWild ? sf::Color(255, 240, 180) : sf::Color(255, 130, 40));
@@ -1050,12 +1205,27 @@ private:
         auto& ec = m_em->enemies[enIdx];
         const bool breaksCharge = (ec.ramState == RamState::Charge);
 
+        // ---- PERFECT SHOULDER BASH (1.10d) ----
+        // The perfect dodge and the shoulder bash used to be two separate
+        // reactions to one contact: the dodge paid out, then the bash still
+        // charged the ram's damage. Now they are one event. If this dodge's
+        // i-frames are still up, or it already paid out as perfect, the bash
+        // is PERFECT: no damage taken, and the payout happens here if the
+        // graze check has not done it yet.
+        if (ps.dodgeIframeTimer > 0.f && !ps.dodgeAte)
+            onDodgeAte(playerIdx, m_em->transforms[enIdx].position);
+        const bool perfect = ps.dodgeAte;
+        if (perfect) ps.dodgeVerdictBash = true;
+
         if (breaksCharge) {
-            // Take the ram through hyperarmor: damage, but never a tumble.
-            const bool had = ps.hyperarmor;
-            ps.hyperarmor = true;
-            m_em->damagePlayer(playerIdx, acfg(enIdx, "ram_damage", 95.f));
-            ps.hyperarmor = had;
+            // Late (no perfect): take the ram through hyperarmor -- damage,
+            // but never a tumble. Perfect: take nothing.
+            if (!perfect) {
+                const bool had = ps.hyperarmor;
+                ps.hyperarmor = true;
+                m_em->damagePlayer(playerIdx, acfg(enIdx, "ram_damage", 95.f));
+                ps.hyperarmor = had;
+            }
 
             ec.ramChainLeft = 0;
             ec.ramState = RamState::Recover;
@@ -1100,6 +1270,155 @@ private:
         const float def = (k == "damage") ? kDamage[tier] : (k == "poise") ? kPoise[tier]
             : (k == "knockback") ? kKnock[tier] : fallback;
         return vcfg((std::string("rock_") + kName[tier] + "_" + k).c_str(), def);
+    }
+
+    // ========================================================================
+    // BLOODSEEKER
+    // ========================================================================
+
+    /// Disengaging or in the post-stun window, and actually in control of
+    /// himself. A stun or a tumble switches the dodge off: a punished
+    /// Bloodseeker takes the hits.
+    bool isDuelEvading(size_t idx) const {
+        if (idx >= m_em->enemies.size()) return false;
+        const auto& ec = m_em->enemies[idx];
+        return ec.duelEvading() && ec.staggerTimer <= 0.f && m_em->healths[idx].stunTimer <= 0.f;
+    }
+
+    /// End a Blood Dive, ram-cancel rush or feint in progress. He lands in
+    /// MELEE. A real dive leaves the mode timer for AISystem to re-roll; a
+    /// trick happened inside MELEE, so its timer is kept.
+    void breakDive(size_t idx) {
+        if (idx >= m_em->enemies.size()) return;
+        auto& ec = m_em->enemies[idx];
+        if (!ec.duelBreakable()) return;
+        ec.duelShift = DuelShift::None;
+        ec.duelShiftTimer = 0.f;
+        ec.feintShotsLeft = 0;
+        ec.duelTrick = false;   // the mode clock is not touched: see AISystem note 23
+    }
+
+    /**
+     * @brief Death-chaos: every Rakshari near a dying Bloodseeker goes feral.
+     *
+     * Not Maniacs (`pack_immune`), not other aura units, not dormant hulls.
+     * AISystem does the rest (target picking, melee off vs ships); this is
+     * the stamp and the signal. The signal has to be screen-wide because it
+     * changes how every enemy on screen should be read: a dark red flash and
+     * a ring out to the exact radius now, red brackets on the screen edge
+     * (RenderSystem) for as long as any of them is still feral.
+     */
+    void triggerDeathChaos(size_t dead, sf::Vector2f pos) {
+        if (!m_registry || dead >= m_em->enemies.size()) return;
+        const sol::table& cfg = m_registry->resolve(m_em->enemies[dead].archetype).config;
+        const float radius = cfg["death_chaos_radius"].get_or(0.f);
+        if (radius <= 0.f) return;
+        const float time = cfg["death_chaos_time"].get_or(5.f);
+        const float retarget = cfg["death_chaos_retarget"].get_or(1.f);
+        const float dmg = cfg["death_chaos_damage"].get_or(1.5f);
+        const float frenzy = cfg["death_chaos_frenzy"].get_or(0.25f);
+
+        int turned = 0;
+        for (size_t j = 0; j < m_em->physics.size() && j < m_em->enemies.size(); ++j) {
+            if (j == dead) continue;
+            BodyUserData* ud = b2Body_IsValid(m_em->physics[j].bodyId) ? bodyUD(m_em->physics[j].bodyId) : nullptr;
+            if (!ud || ud->type != BodyType::Enemy) continue;
+            auto& ej = m_em->enemies[j];
+            if (!ej.powered() || m_em->healths[j].currentHp <= 0.f) continue;
+            const sol::table& cj = m_registry->resolve(ej.archetype).config;
+            if (cj["pack_immune"].get_or(false) || cj["aura_radius"].get_or(0.f) > 0.f) continue;
+            const sf::Vector2f d = m_em->transforms[j].position - pos;
+            if (d.x * d.x + d.y * d.y > radius * radius) continue;
+
+            ej.feralTimer = time;
+            ej.feralRetarget = 0.f;          // pick a target on the next frame
+            ej.feralRetargetTime = retarget;
+            ej.feralTargetId = 0;
+            ej.feralFrenzy = frenzy;
+            ej.feralDamage = dmg;
+            ej.execBuffTimer = 0.f;          // the man who gave that is dead
+            ej.telegraphActive = false;      // whatever it was lining up is off
+            ej.telegraphTimer = 0.f;
+            m_em->spawnShockRing(m_em->transforms[j].position, 8.f, 60.f, 0.26f,
+                sf::Color(255, 40, 30), 3.f, 240.f);
+            ++turned;
+        }
+
+        // The signal, even if nobody was close enough to turn: his death is
+        // an event either way.
+        m_em->spawnScreenFlash(sf::Color(150, 10, 10), 0.45f, turned > 0 ? 95.f : 55.f);
+        m_em->spawnShockRing(pos, 20.f, radius, 0.70f, sf::Color(255, 40, 30), 6.f, 230.f);
+        m_em->addTrauma(0.55f);
+        m_em->requestHitstop(0.05f, 0.14f, 0.35f);
+    }
+
+    /// A tumbling Bloodseeker is not charging a lancer or holding a cone.
+    /// Mirrors AISystem::cancelRangeAttack: broken, not finished, so the
+    /// attack goes on cooldown instead of resuming when he recovers.
+    void breakRangeAttack(size_t idx) {
+        if (idx >= m_em->enemies.size()) return;
+        auto& ec = m_em->enemies[idx];
+        if (ec.duelAttack == DuelAttack::None) return;
+        const bool cone = ec.duelAttack >= DuelAttack::ConeWindup;
+        ec.duelAttack = DuelAttack::None;
+        ec.duelAtkTimer = 0.f;
+        if (cone) ec.duelConeCd = std::max(ec.duelConeCd, 4.0f);
+        else      ec.duelLancerCd = std::max(ec.duelLancerCd, 1.2f);
+    }
+
+    /**
+     * @brief A round that hit a disengaging Bloodseeker goes on as a miss.
+     *
+     * Bullets are solid bodies, so by the time this contact is reported the
+     * round has already bounced off the hull. Undo that: put it back on its
+     * own line, clear of the far side of the hull, at its own speed. Player
+     * rounds fly straight (no homing -- reflected rounds never get here), so
+     * the transform's spawn velocity IS its line.
+     *
+     * He gets kicked off the line the round was on, and his ghost stays on it,
+     * so the player sees the shot go through where he used to be.
+     */
+    void evadeRound(size_t bulletIdx, size_t enIdx, sf::Vector2f vel) {
+        const float sp = std::sqrt(vel.x * vel.x + vel.y * vel.y);
+        if (sp < 1.f) { m_em->bullets[bulletIdx].markedForDestroy = true; return; }
+        const sf::Vector2f dir = vel / sp;
+
+        const enemyarch::ArchetypeDef* adef = m_registry
+            ? &m_registry->resolve(m_em->enemies[enIdx].archetype) : nullptr;
+        const float radius = adef ? adef->radius : 40.f;
+
+        const sf::Vector2f bp = m_em->transforms[bulletIdx].position;
+        const sf::Vector2f ep = m_em->transforms[enIdx].position;
+        const sf::Vector2f rel = ep - bp;
+        const float along = rel.x * dir.x + rel.y * dir.y;
+
+        // ---- The round: same line, past the hull, same speed ----
+        const sf::Vector2f np = bp + dir * (std::max(0.f, along) + radius + 14.f);
+        const b2BodyId bb = m_em->physics[bulletIdx].bodyId;
+        if (b2Body_IsValid(bb)) {
+            b2Body_SetTransform(bb, { np.x / SCALE, np.y / SCALE }, b2Body_GetRotation(bb));
+            b2Body_SetLinearVelocity(bb, { vel.x / SCALE, vel.y / SCALE });
+        }
+        m_em->transforms[bulletIdx].position = np;
+
+        // ---- Him: off the line, toward the side he was already on ----
+        sf::Vector2f side = rel - dir * along;
+        const float sl = std::sqrt(side.x * side.x + side.y * side.y);
+        side = (sl > 0.5f) ? side / sl
+            : sf::Vector2f(-dir.y, dir.x) * ((rand() % 2) ? 1.f : -1.f);
+
+        const b2BodyId eb = m_em->physics[enIdx].bodyId;
+        if (b2Body_IsValid(eb)) {
+            const float kick = acfg(enIdx, "disengage_dodge_kick", 460.f) * 0.8f;
+            const b2Vec2 v = b2Body_GetLinearVelocity(eb);
+            b2Body_SetLinearVelocity(eb, { v.x + side.x * kick / SCALE, v.y + side.y * kick / SCALE });
+        }
+
+        const sf::Color bone(232, 222, 196);
+        if (adef) fx::afterimage(*m_em, *adef, ep, m_em->transforms[enIdx].rotation,
+            { 0.f, 0.f }, bone, 0.22f);
+        // A flick of bone dust where the round went through the ghost.
+        m_em->spawnImpact(bp, sf::Color(232, 222, 196, 200), dir * 120.f);
     }
 
     /// Mid-lunge, or recoiling from a strike that already resolved. Contact
@@ -1188,6 +1507,11 @@ private:
         m_em->healths[otherIdx].stunTimer = stunDuration * (1.f - stunResist);
         m_em->enemies[otherIdx].provoke();
 
+        // Bloodseeker: the stun ends in his post-stun evade window, and a
+        // parry ends a dive, rush or feint outright.
+        m_em->enemies[otherIdx].duelStunEvade = true;
+        breakDive(otherIdx);
+
         // ---- FULL STAGGER, not just a shove ----
         // A melee parry is the highest-risk thing the player can do, so it
         // gets the loudest reaction available.
@@ -1198,8 +1522,7 @@ private:
 
         const sf::Vector2f mid = (playerPos + otherPos) * 0.5f;
         onParrySuccess(playerIdx, mid);
-        if (isPerfectParry(playerIdx))
-            onPerfectParry(playerIdx, mid);
+        onParryRearm(playerIdx, mid);
     }
 
     // ========================================================================
@@ -1218,8 +1541,9 @@ private:
      * winding up again before control returns -- bash, tumble, bash, tumble,
      * with no input that answers it. bash_hit_cooldown and
      * hit_confirm_cooldown (for the ram) guarantee a window of real control
-     * after every connect. Applied even if i-frames ate the damage, so that
-     * rule never depends on what else just happened.
+     * after every connect. Only after a connect (1.10c): a bash the player's
+     * i-frames ate never landed, there is no tumble to protect, and locking
+     * the Berserker out made a perfect dodge read as "the enemy gave up".
      */
     void resolveBashStrikes(size_t playerIdx) {
         for (size_t i = 0; i < m_em->enemies.size(); ++i) {
@@ -1229,14 +1553,35 @@ private:
             if (i == playerIdx) continue;
             if (m_em->healths[i].currentHp <= 0.f) continue;   // died mid-swing
 
+            // ---- FERAL: the swing was at another ship ----
+            if (ec.bashTargetId != 0) {
+                const uint32_t tid = ec.bashTargetId;
+                ec.bashTargetId = 0;
+                const size_t t = m_em->getEntityIndex(tid);
+                if (t == (size_t)-1 || t >= m_em->enemies.size()) continue;
+                if (m_em->healths[t].currentHp <= 0.f || m_em->enemies[t].dormant) continue;
+                ec.bashCooldown = std::max(ec.bashCooldown, acfg(i, "bash_hit_cooldown", 2.0f));
+                const sf::Vector2f ePos = m_em->transforms[i].position;
+                const sf::Vector2f tPos = m_em->transforms[t].position;
+                const sf::Vector2f contact = ePos + (tPos - ePos) * 0.6f;
+                if (isRamInvulnerable(t)) {   // a charging hull shrugs it off
+                    m_em->spawnImpact(contact, sf::Color(255, 230, 190), ec.bashDir * -300.f);
+                    continue;
+                }
+                const float mult = ec.feralDamage > 0.f ? ec.feralDamage : 1.f;
+                hurtShip(t, acfg(i, "bash_damage", 30.f) * mult);
+                staggerEnemy(t, ec.bashDir, acfg(i, "bash_knockback", 950.f) * 0.7f, 0.7f);
+                m_em->spawnShockRing(contact, 6.f, 85.f, 0.18f, sf::Color(255, 90, 70), 5.f, 255.f);
+                m_em->spawnImpact(contact, sf::Color(255, 90, 60), ec.bashDir * -500.f);
+                m_em->addTrauma(0.10f);
+                continue;
+            }
+
             // ---- PARRIED: the reward ----
             if (m_em->players[playerIdx].parryTimer > 0.f) {
                 parryEnemy(playerIdx, i);
                 continue;
             }
-
-            ec.bashCooldown = std::max(ec.bashCooldown, acfg(i, "bash_hit_cooldown", 2.0f));
-            ec.ramCooldown = std::max(ec.ramCooldown, acfg(i, "hit_confirm_cooldown", 0.f));
 
             const sf::Vector2f ePos = m_em->transforms[i].position;
             const sf::Vector2f pPos = m_em->transforms[playerIdx].position;
@@ -1244,10 +1589,17 @@ private:
 
             auto& php = m_em->healths[playerIdx];
             if (php.invulTimer > 0.f) {
-                // Landed on i-frames. Show it connected with nothing.
+                // Landed on i-frames. Show it connected with nothing -- and
+                // leave the attacker's rhythm alone: no hit-confirm lockout
+                // for a hit that never landed (1.10c).
                 m_em->spawnImpact(contact, sf::Color(255, 230, 190), ec.bashDir * -300.f);
+                onDodgeAte(playerIdx, contact);
                 continue;
             }
+
+            // Hit-confirm lockout: only for a bash that LANDED (anti tumble-lock).
+            ec.bashCooldown = std::max(ec.bashCooldown, acfg(i, "bash_hit_cooldown", 2.0f));
+            ec.ramCooldown = std::max(ec.ramCooldown, acfg(i, "hit_confirm_cooldown", 0.f));
 
             m_em->damagePlayer(playerIdx, acfg(i, "bash_damage", 30.f));
             php.invulTimer = acfg(i, "bash_iframes", 0.5f);
@@ -1266,6 +1618,309 @@ private:
         }
     }
 
+    // ========================================================================
+    // PERFECT DODGE (1.10)
+    // ========================================================================
+
+    /**
+     * @brief This dodge's i-frames just ate an enemy attack: pay it out.
+     *
+     * Once per dodge. Energy refunded (falling off over a chain so sustained
+     * fire cannot be dodged forever), the dodge re-armed on the spot, a ghost
+     * of the ship left where the hit should have landed in the player's own
+     * dodge paint, a short hitstop. Rocks and other non-attacks never call
+     * this -- dodging into scenery is not a read.
+     */
+    void onDodgeAte(size_t playerIdx, sf::Vector2f at) {
+        if (playerIdx >= m_em->players.size()) return;
+        auto& ps = m_em->players[playerIdx];
+        if (ps.dodgeIframeTimer <= 0.f || ps.dodgeAte) return;
+        ps.dodgeAte = true;
+
+        const float falloff = (*m_lua)["dodge_perfect_chain_falloff"].get_or(0.7f);
+        const float k = std::pow(falloff, static_cast<float>(ps.dodgeChain));
+        ps.energyDrive = std::min(ps.maxEnergyDrive,
+            ps.energyDrive + ps.dashEnergyCost * (*m_lua)["dodge_perfect_refund"].get_or(1.f) * k);
+        ps.dashCooldown = 0.f;                                   // re-armed
+        ps.dodgeChain++;
+        ps.dodgeChainTimer = (*m_lua)["dodge_perfect_chain_time"].get_or(1.5f);
+
+        // ---- The tell (playtest: the first version drowned in the dodge's own
+        // flash and shake). Three layers, all in the player's dodge paint:
+        //   1. THE MISS -- a bright, thick ghost of the ship left exactly
+        //      where the attack met it, lingering ~0.6s: "it hit THAT, not me".
+        //   2. THE TRAIL -- the rest of the dodge sheds ghosts every ~35ms,
+        //      the Bloodseeker's disengage read, so the escape itself is drawn.
+        //   3. THE BEAT -- a real slow-motion dip and a double ring. Distinct
+        //      from a normal dodge, which never slows time.
+        const auto& tf = m_em->transforms[playerIdx];
+        const sf::Color paint = ps.livery.paint.dodge;
+        const float rot = tf.rotation + tf.visualOffsetAngle;
+        if (ps.modelTris.size() >= 3 && ps.modelOutline.size() >= 3)
+            fx::afterimageShape(*m_em, ps.modelOutline, ps.modelTris, tf.position, rot,
+                { 0.f, 0.f }, lighten(paint, 0.55f), 0.60f, 3.0f, 110);
+        ps.dodgeTrailTimer = (*m_lua)["dodge_perfect_trail_time"].get_or(0.35f);
+        ps.dodgeTrailTick = 0.f;
+        ps.dodgeVerdictFlash = 0.9f;
+        ps.dodgeVerdictBash = false;
+
+        m_em->spawnShockRing(tf.position, 10.f, 110.f, 0.32f, lighten(paint, 0.5f), 4.f, 255.f);
+        m_em->spawnShockRing(tf.position, 4.f, 55.f, 0.20f, sf::Color(255, 255, 255), 2.5f, 230.f);
+        m_em->spawnExplosion(at, lighten(paint, 0.5f), 14, 2.2f);
+        m_em->spawnScreenFlash(lighten(paint, 0.6f), 0.14f, 55.f);
+        m_em->requestHitstop(0.04f, 0.22f, 0.30f);
+        m_em->addTrauma(0.15f);
+    }
+
+    /// Perfect-dodge trail: a ghost every few frames for the rest of the
+    /// escape, fading along the line it took.
+    void updateDodgeTrail(size_t playerIdx, float dt) {
+        auto& ps = m_em->players[playerIdx];
+        if (ps.dodgeTrailTimer <= 0.f) return;
+        ps.dodgeTrailTimer -= dt;
+        ps.dodgeTrailTick -= dt;
+        if (ps.dodgeTrailTick > 0.f) return;
+        ps.dodgeTrailTick = 0.035f;
+        if (ps.modelTris.size() < 3 || ps.modelOutline.size() < 3) return;
+        const auto& tf = m_em->transforms[playerIdx];
+        fx::afterimageShape(*m_em, ps.modelOutline, ps.modelTris, tf.position,
+            tf.rotation + tf.visualOffsetAngle, { 0.f, 0.f },
+            lighten(ps.livery.paint.dodge, 0.3f), 0.30f, 1.6f, 45);
+    }
+
+    /**
+     * @brief Phase-through and GRAZE detection, every frame of a dodge's
+     * i-frames.
+     *
+     * With enemy collisions off, a ram, a Blood Dive or a bash lunge passing
+     * over the ship never makes a contact event -- so look for it. And a
+     * contact-only rule only ever paid out for dodging INTO an attack, which
+     * nobody does on purpose (playtest: "no indication"). So a near miss
+     * counts too: an attacking hull within dodge_graze_hull px of the ship's
+     * edge, or an enemy round within dodge_graze_bullet px of its centre,
+     * while the i-frames are up. The attacker is untouched: a perfect dodge
+     * rewards the player, it never makes the enemy back off.
+     */
+    void checkDodgePhase(size_t playerIdx) {
+        auto& ps = m_em->players[playerIdx];
+        if (ps.dodgeIframeTimer <= 0.f || ps.dodgeAte || !m_registry) return;
+        const sf::Vector2f pp = m_em->transforms[playerIdx].position;
+        const float grazeHull = (*m_lua)["dodge_graze_hull"].get_or(55.f);
+        const float grazeBullet = (*m_lua)["dodge_graze_bullet"].get_or(40.f);
+
+        // ---- Rounds grazing past ----
+        for (size_t j = 0; j < m_em->bullets.size() && j < m_em->transforms.size(); ++j) {
+            const auto& b = m_em->bullets[j];
+            if (!b.isEnemyBullet || b.isMine || b.markedForDestroy) continue;
+            const sf::Vector2f d = m_em->transforms[j].position - pp;
+            if (d.x * d.x + d.y * d.y > grazeBullet * grazeBullet) continue;
+            onDodgeAte(playerIdx, pp + d);
+            return;
+        }
+
+        // ---- Attacking hulls through or past ----
+        for (size_t j = 0; j < m_em->enemies.size() && j < m_em->physics.size(); ++j) {
+            auto& ej = m_em->enemies[j];
+            const bool attacking = ej.ramState == RamState::Charge || ej.duelDiving()
+                || ej.bashState == BashState::Lunge;
+            if (!attacking || j == playerIdx) continue;
+            const float r = m_registry->resolve(ej.archetype).radius * 0.9f + 18.f + grazeHull;
+            const sf::Vector2f d = m_em->transforms[j].position - pp;
+            if (d.x * d.x + d.y * d.y > r * r) continue;
+            onDodgeAte(playerIdx, pp + d * 0.5f);
+            return;
+        }
+    }
+
+    // ========================================================================
+    // BEAMS -- the Bloodseeker's lancer (hitscan, piercing, mirror parry)
+    // ========================================================================
+
+    /// Rough body radius for a beam hit test: archetype radius for ships,
+    /// furthest vertex for polygons, the circle for circles.
+    float beamBodyRadius(size_t j, BodyType t) const {
+        if (t == BodyType::Enemy && m_registry && j < m_em->enemies.size())
+            return m_registry->resolve(m_em->enemies[j].archetype).radius * 0.85f;
+        if (j < m_em->physicsShapes.size()) {
+            const auto& s = m_em->physicsShapes[j];
+            if (s.type == PhysicsShapeData::Type::Circle) return s.radius;
+            float r2 = 0.f;
+            for (const auto& v : s.vertices) r2 = std::max(r2, v.x * v.x + v.y * v.y);
+            if (r2 > 0.f) return std::sqrt(r2) * 0.9f;
+        }
+        return 16.f;
+    }
+
+    void resolveBeams(size_t playerIdx) {
+        if (m_em->beamShots.empty()) return;
+        std::vector<BeamShot> shots;
+        shots.swap(m_em->beamShots);
+        for (const auto& s : shots) traceBeam(playerIdx, s);
+    }
+
+    /**
+     * @brief Everything on the line, at once.
+     *
+     * Pierces: rocks and wrecks take objectDamage (gone), ships at or under
+     * killHp max HP are destroyed, bigger ones (Barge, Bloodseeker) take
+     * pierceDamage and a stagger. The player takes damage + a tumble unless
+     * on i-frames -- or PARRYING, in which case the beam stops at the
+     * shield and reflects off its curve like light off a convex mirror:
+     * dead centre sends it straight back down the lane at him, an edge hit
+     * glances off at an angle. The reflection is the player's beam (same
+     * pierce, reflect_* damage) and gets one bounce.
+     */
+    void traceBeam(size_t playerIdx, const BeamShot& s) {
+        struct Hit { size_t j; float t; float perp; BodyType type; float r; };
+        std::vector<Hit> hits;
+        const float half = s.width * 0.5f;
+        for (size_t j = 0; j < m_em->physics.size(); ++j) {
+            if (!b2Body_IsValid(m_em->physics[j].bodyId)) continue;
+            BodyUserData* ud = bodyUD(m_em->physics[j].bodyId);
+            if (!ud || ud->type == BodyType::Bullet) continue;
+            if (m_em->transforms[j].entityId == s.ownerId) continue;
+            if (m_em->healths[j].currentHp <= 0.f) continue;
+            const float r = (j == playerIdx) ? 18.f : beamBodyRadius(j, ud->type);
+            const sf::Vector2f rel = m_em->transforms[j].position - s.origin;
+            const float t = rel.x * s.dir.x + rel.y * s.dir.y;
+            if (t < -r || t > s.range + r) continue;
+            const float perp = std::fabs(rel.x * s.dir.y - rel.y * s.dir.x);
+            if (perp > r + half) continue;
+            hits.push_back({ j, std::max(0.f, t), perp, ud->type, r });
+        }
+        std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.t < b.t; });
+
+        float end = s.range;
+        for (const auto& h : hits) {
+            const size_t j = h.j;
+            const sf::Vector2f at = s.origin + s.dir * h.t;
+
+            if (j == playerIdx) {
+                auto& ps = m_em->players[playerIdx];
+                auto& ph = m_em->healths[playerIdx];
+                if (ps.parryTimer > 0.f && s.bounce < 2) {
+                    // ---- MIRROR ----
+                    const sf::Vector2f pc = m_em->transforms[playerIdx].position;
+                    const float R = h.r + half;
+                    const float back = std::sqrt(std::max(0.f, R * R - h.perp * h.perp));
+                    const sf::Vector2f entry = s.origin + s.dir * std::max(0.f, h.t - back);
+                    sf::Vector2f n = entry - pc;
+                    const float nl = std::sqrt(n.x * n.x + n.y * n.y);
+                    n = (nl > 0.01f) ? n / nl : -s.dir;
+                    const float dn = s.dir.x * n.x + s.dir.y * n.y;
+                    sf::Vector2f refl = s.dir - n * (2.f * dn);
+                    const float rl = std::sqrt(refl.x * refl.x + refl.y * refl.y);
+                    refl = (rl > 0.01f) ? refl / rl : -s.dir;
+                    end = std::max(0.f, h.t - back);
+
+                    BeamShot r = s;
+                    r.origin = entry + refl * 2.f;
+                    r.dir = refl;
+                    r.ownerId = m_playerEntityId;
+                    r.byPlayer = true;
+                    r.bounce = s.bounce + 1;
+                    r.pierceDamage = wcfg("lancer_reflect_damage", 380.f);
+                    r.killHp = wcfg("lancer_reflect_kill_hp", 500.f);
+
+                    m_em->spawnShockRing(entry, 6.f, 80.f, 0.22f, sf::Color(250, 244, 230), 4.f, 255.f);
+                    m_em->spawnShockRing(entry, 4.f, 46.f, 0.16f, parryColor(), 3.f, 240.f);
+                    m_em->spawnExplosion(entry, sf::Color(250, 244, 230), 18, 2.6f);
+                    m_em->spawnScreenFlash(sf::Color(250, 244, 230), 0.12f, 70.f);
+                    onParrySuccess(playerIdx, entry);
+                    onParryRearm(playerIdx, entry);
+                    traceBeam(playerIdx, r);
+                    break;
+                }
+                if (ph.invulTimer > 0.f && !s.byPlayer) onDodgeAte(playerIdx, at);
+                if (ph.invulTimer <= 0.f && !s.byPlayer) {
+                    m_em->damagePlayer(playerIdx, s.damage);
+                    ph.invulTimer = s.iframes;
+                    m_em->staggerPlayer(playerIdx, s.dir, s.knockback,
+                        vcfg("stagger_tumble_duration", 1.1f),
+                        vcfg("stagger_recover_duration", 0.55f),
+                        vcfg("stagger_spin_speed", 620.f));
+                    m_em->spawnExplosion(at, sf::Color(255, 90, 60), 16, 2.8f);
+                }
+                continue;
+            }
+
+            auto& hp = m_em->healths[j];
+            if (h.type == BodyType::Enemy && j < m_em->enemies.size()) {
+                auto& ej = m_em->enemies[j];
+                if (hp.maxHp <= s.killHp) hp.currentHp = -1.f;           // through it
+                else {
+                    hp.currentHp -= s.pierceDamage;
+                    if (hp.currentHp > 0.f && !ej.dormant)
+                        staggerEnemy(j, s.dir, 650.f, 0.8f);
+                }
+                hp.hitFlash = 0.2f;
+                ej.hitFlashTimer = 0.25f;
+                ej.timesHit += 2;
+                if (s.byPlayer) ej.provoke();
+            }
+            else {
+                hp.currentHp -= s.objectDamage;                          // rocks, wrecks, scrap
+                hp.hitFlash = 0.2f;
+            }
+            m_em->spawnExplosion(at, sf::Color(250, 244, 230), 10, 2.4f);
+            m_em->spawnImpact(at, sf::Color(255, 90, 60), s.dir * 700.f);
+        }
+
+        // ---- The beam itself ----
+        BeamFx fx;
+        fx.a = s.origin;
+        fx.b = s.origin + s.dir * end;
+        fx.width = s.width;
+        fx.reflected = s.byPlayer;
+        m_em->beams.push_back(fx);
+        // Sparks shed along the line.
+        for (int k = 0; k < 26; ++k) {
+            const float t = (rand() % 1000) / 1000.f * end;
+            const sf::Vector2f side(-s.dir.y, s.dir.x);
+            const float life = 0.18f + (rand() % 20) / 100.f;
+            m_em->particles.push_back({ s.origin + s.dir * t,
+                side * static_cast<float>((rand() % 240) - 120) + s.dir * static_cast<float>(rand() % 200),
+                s.byPlayer ? sf::Color(255, 238, 120, 230) : sf::Color(250, 244, 230, 230),
+                life, life, 2.f + rand() % 2 });
+        }
+        m_em->addTrauma(0.30f);
+        m_em->requestHitstop(0.03f, 0.08f, 0.5f);
+    }
+
+    /** @brief Enemy-on-enemy damage from death-chaos melee. */
+    void hurtShip(size_t t, float dmg) {
+        m_em->healths[t].currentHp -= dmg;
+        m_em->healths[t].hitFlash = 0.2f;
+        m_em->enemies[t].hitFlashTimer = 0.2f;
+        m_em->enemies[t].timesHit += 1;
+    }
+
+    /**
+     * @brief Feral charge `r` meets ship `v`. Returns true if it was one.
+     *
+     * Any hull, not just the picked target: a charge in a crowd is chaos.
+     * Damage ram_damage x death_chaos_damage, thrown sideways out of the
+     * lane like the player is. Not a dormant hull, not another charge.
+     */
+    bool feralRamHit(size_t r, size_t v) {
+        auto& er = m_em->enemies[r];
+        if (er.ramState != RamState::Charge || er.feralTimer <= 0.f) return false;
+        auto& ev = m_em->enemies[v];
+        if (ev.dormant || isRamInvulnerable(v) || m_em->healths[v].currentHp <= 0.f) return false;
+        const float mult = er.feralDamage > 0.f ? er.feralDamage : 1.f;
+        hurtShip(v, acfg(r, "ram_damage", 95.f) * mult);
+        const sf::Vector2f rp = m_em->transforms[r].position, vp = m_em->transforms[v].position;
+        sf::Vector2f away = vp - rp;
+        const float along = away.x * er.ramDir.x + away.y * er.ramDir.y;
+        sf::Vector2f side = away - er.ramDir * along;
+        const float sl = std::sqrt(side.x * side.x + side.y * side.y);
+        side = sl > 0.5f ? side / sl : sf::Vector2f(-er.ramDir.y, er.ramDir.x);
+        staggerEnemy(v, er.ramDir * 0.55f + side * 0.85f, acfg(r, "ram_knockback", 1100.f) * 0.8f, 1.f);
+        m_em->spawnExplosion((rp + vp) * 0.5f, sf::Color(255, 90, 60), 18, 3.5f);
+        m_em->addTrauma(0.16f);
+        return true;
+    }
+
     /**
      * @brief A charging ship reached the player.
      *
@@ -1276,12 +1931,19 @@ private:
     void applyRamHit(size_t playerIdx, size_t enIdx) {
         auto& ec = m_em->enemies[enIdx];
 
-        // A chain that lands, stops. See AISystem 2.1, note 11.
+        // I-frames ate it: NOTHING changes on the attacker's side. The chain
+        // keeps coming, no hit-confirm lockout -- dodging well is the
+        // player's reward, never a reason for the enemy to back off (1.10c).
+        auto& php = m_em->healths[playerIdx];
+        if (php.invulTimer > 0.f) {
+            onDodgeAte(playerIdx, m_em->transforms[enIdx].position);
+            return;
+        }
+
+        // A chain that LANDS stops, with the hit-confirm lockout, so a hit
+        // cannot chain into a tumble-lock. See AISystem 2.1, note 11.
         ec.ramChainLeft = 0;
         ec.bashCooldown = std::max(ec.bashCooldown, acfg(enIdx, "hit_confirm_cooldown", 0.f));
-
-        auto& php = m_em->healths[playerIdx];
-        if (php.invulTimer > 0.f) return;
 
         m_em->damagePlayer(playerIdx, acfg(enIdx, "ram_damage", 95.f));
         php.invulTimer = acfg(enIdx, "ram_iframes", 1.0f);
@@ -1386,6 +2048,12 @@ private:
             if (d >= radius) continue;
 
             const float falloff = 1.f - (d / radius);
+            // A dodge's i-frames cover blasts too: the player was promised
+            // "untouchable while dodging", and a mine is still an attack.
+            if (j == playerIdx && j < m_em->players.size() && m_em->players[j].dodgeIframeTimer > 0.f) {
+                onDodgeAte(playerIdx, o);
+                continue;
+            }
             if (j == playerIdx) m_em->damagePlayer(j, damage * falloff);
             else {
                 m_em->healths[j].currentHp -= damage * falloff;
@@ -1459,10 +2127,38 @@ private:
         // Fast enough to run down the Maniac who fired it. A parried rocket
         // that the sender simply out-flies is a parry with no target, and the
         // sender is the target the player actually wants.
-        const float speed = wcfg("parry_rocket_speed", 1150.f);
-        if (b2Body_IsValid(m_em->physics[rocketIdx].bodyId)) {
-            b2Body_SetLinearVelocity(m_em->physics[rocketIdx].bodyId,
-                { dir.x * speed / SCALE, dir.y * speed / SCALE });
+        float speed = wcfg("parry_rocket_speed", 1150.f);
+
+        // ---- SEEKER (playtest 1.9): it picks a random victim and gets there ----
+        // Any enemy ship or rock in range, never you. From here WeaponSystem
+        // flies it: a drunken weave that tightens as it closes, collisions
+        // off (mask 0) so nothing on the way can stop it, detonation on
+        // arrival. Nothing in range: the old wild flight, as before.
+        const b2BodyId rb = m_em->physics[rocketIdx].bodyId;
+        const uint32_t victim = seek::pickTarget(*m_em, rPos, wcfg("parry_rocket_seek_range", 1300.f),
+            m_playerEntityId, m_em->transforms[rocketIdx].entityId,
+            wcfg("parry_rocket_ship_weight", 3.f), wcfg("parry_rocket_rock_weight", 1.f));
+        if (victim != 0 && b2Body_IsValid(rb)) {
+            b.seekTargetId = victim;
+            b.seekSpeed = wcfg("parry_rocket_seek_speed", 900.f);
+            b.seekTurn = wcfg("parry_rocket_seek_turn", 600.f);
+            b.seekWobbleAmp = wcfg("parry_rocket_wobble", 55.f);
+            b.seekWobble = (rand() % 628) / 100.f;
+            speed = b.seekSpeed;
+            b2ShapeId sid;
+            if (b2Body_GetShapes(rb, &sid, 1) > 0) {
+                b2Filter f = b2Shape_GetFilter(sid);
+                f.maskBits = 0;
+                b2Shape_SetFilter(sid, f);
+            }
+            // Mark the pick: a yellow ring closing on the victim.
+            const size_t vi = m_em->getEntityIndex(victim);
+            if (vi != (size_t)-1)
+                m_em->spawnShockRing(m_em->transforms[vi].position, 70.f, 8.f, 0.35f,
+                    sf::Color(255, 238, 0), 3.f, 230.f);
+        }
+        if (b2Body_IsValid(rb)) {
+            b2Body_SetLinearVelocity(rb, { dir.x * speed / SCALE, dir.y * speed / SCALE });
         }
 
         // YELLOW: the game's existing "parried, now yours" colour, the same
@@ -1479,7 +2175,7 @@ private:
         m_em->spawnExplosion(rPos, parryColor(), 14, 2.2f);
         m_em->spawnShockRing(rPos, 5.f, 52.f, 0.20f, sf::Color(255, 240, 90), 3.f, 240.f);
         onParrySuccess(playerIdx, rPos);
-        if (isPerfectParry(playerIdx)) onPerfectParry(playerIdx, rPos);
+        onParryRearm(playerIdx, rPos);
     }
 
     // ========================================================================
@@ -1565,7 +2261,7 @@ private:
             m_em->spawnExplosion(ePos, parryColor(), 26, 3.4f);
             m_em->spawnShockRing(ePos, 14.f, 150.f, 0.28f, lighten(parryColor(), 0.55f), 4.f, 240.f);
             onParrySuccess(playerIdx, (pPos + ePos) * 0.5f);
-            if (isPerfectParry(playerIdx)) onPerfectParry(playerIdx, ePos);
+            onParryRearm(playerIdx, ePos);
             return;
         }
 
@@ -1955,27 +2651,13 @@ private:
 
 
     /**
- * @brief Was this parry connect within the perfect timing slice?
- *
- * parryTimer counts DOWN from parry_window, so a HIGH remaining value means
- * little time has elapsed since the press -- the player reacted to the
- * incoming attack rather than pressing early and waiting for it.
- */
-    bool isPerfectParry(size_t playerIdx) const {
-        // The window this parry actually opened with -- class-scaled by
-        // InputSystem. Reading raw Lua here made a light ship's early presses
-        // count as "perfect" and a heavy's never could.
-        const auto& ps = m_em->players[playerIdx];
-        const float window = (ps.parryWindowTotal > 0.f)
-            ? ps.parryWindowTotal : (*m_lua)["parry_window"].get_or(0.3f);
-        const float frac = (*m_lua)["parry_perfect_fraction"].get_or(0.45f);
-        return ps.parryTimer >= window * (1.f - frac);
-    }
-
-    /**
      * @brief Cancel parry recovery and grant brief i-frames.
      *
-     * Called only from the BULLET and SHIP parry branches -- never asteroids.
+     * Every successful BULLET or SHIP parry (and a mirrored lancer, and a
+     * parried rocket) -- never asteroids. Until 1.10 this sat behind a
+     * "perfect timing" test that in practice nearly always passed and that
+     * no player could feel; the playtest read it as "bullet parries re-arm,
+     * rock parries don't", which is exactly the rule, so now it IS the rule.
      *
      * Two separate effects, solving two separate problems:
      *   - Cancelling the animation lockout and cooldown fixes "I parried and
@@ -1985,29 +2667,31 @@ private:
      *     shot was already in flight when the first connected, so there is no
      *     amount of reaction speed that covers it.
      *
-     * Chained perfects get progressively fewer i-frames so a parry-lock cannot
+     * Chained re-arms get progressively fewer i-frames so a parry-lock cannot
      * be held forever against sustained fire.
      */
-    void onPerfectParry(size_t playerIdx, sf::Vector2f at) {
+    void onParryRearm(size_t playerIdx, sf::Vector2f at) {
         auto& ps = m_em->players[playerIdx];
         auto& hp = m_em->healths[playerIdx];
 
         ps.parryAnimTimer = 0.f;
         ps.parryWhiffRecovery = false;
         ps.parryWhiffTimer = 0.f;
-        ps.parryCooldown = (*m_lua)["parry_perfect_cooldown"].get_or(0.12f);
+        ps.parryCooldown = (*m_lua)["parry_rearm_cooldown"].get_or(
+            (*m_lua)["parry_perfect_cooldown"].get_or(0.12f));
 
-        const float base = (*m_lua)["parry_perfect_iframes"].get_or(0.22f);
-        const float falloff = (*m_lua)["parry_perfect_chain_falloff"].get_or(0.75f);
-        const float grant = base * std::pow(falloff,
-            static_cast<float>(ps.perfectParryChain));
+        const float base = (*m_lua)["parry_rearm_iframes"].get_or(
+            (*m_lua)["parry_perfect_iframes"].get_or(0.22f));
+        const float falloff = (*m_lua)["parry_rearm_chain_falloff"].get_or(
+            (*m_lua)["parry_perfect_chain_falloff"].get_or(0.75f));
+        const float grant = base * std::pow(falloff, static_cast<float>(ps.parryChain));
 
         hp.invulTimer = std::max(hp.invulTimer, grant);
-        ps.perfectParryChain++;
-        ps.perfectParryFlash = 0.30f;
+        ps.parryChain++;
+        ps.parryChainTimer = 0.30f;
 
-        // Perfect parry reads as a brighter version of the same colour, so a
-        // repaint keeps the "that one was clean" signal intact.
+        // A brighter version of the player's own parry paint, so a repaint
+        // keeps the "that one re-armed" signal intact.
         m_em->spawnScreenFlash(lighten(parryColor(), 0.72f), 0.16f, 70.f);
         m_em->spawnShockRing(at, 10.f, 165.f, 0.30f,
             lighten(parryColor(), 0.55f), 4.f, 300.f);
@@ -2068,6 +2752,8 @@ private:
         ec.stormActive = false;
         ec.stormTimer = 0.f;
         ec.bashState = BashState::None;      // A tumbling ship is not mid-swing
+        breakDive(idx);                      // ...nor mid-dive
+        breakRangeAttack(idx);               // ...nor mid-lancer or mid-cone
         ec.bashStrikePending = false;
 
         float len = std::sqrt(knockDir.x * knockDir.x + knockDir.y * knockDir.y);

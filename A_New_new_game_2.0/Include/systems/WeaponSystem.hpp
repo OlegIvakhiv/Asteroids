@@ -50,6 +50,7 @@
 #include "utils/InputRegistry.hpp"
 #include "utils/GameConfig.hpp"
 #include "utils/ClassTuning.hpp"
+#include "utils/SeekTarget.hpp"
 #include <cfloat>
 #include <cmath>
 #include <cstdlib>
@@ -392,6 +393,19 @@ private:
             auto& bullet = m_em->bullets[i];
             bullet.lifetime -= dt;
 
+            // ---- Trace (the Barge's heavy slug) ----
+            // Short-lived embers dropped along the path: a hot line that
+            // shows the lane the slug is cutting, fading in ~0.2s.
+            if (bullet.trail) {
+                const auto& bt = m_em->transforms[i];
+                for (int k = 0; k < 2; ++k) {
+                    const float f = k * 0.5f;
+                    m_em->particles.push_back({ bt.position - bt.velocity * (dt * f),
+                        bt.velocity * -0.04f, sf::Color(255, static_cast<uint8_t>(150 + rand() % 60), 80, 220),
+                        0.20f, 0.20f, 3.f });
+                }
+            }
+
             // ================================================================
             // MINES: arm, then wait, then count down
             // ================================================================
@@ -443,6 +457,13 @@ private:
                     if (bullet.mineFuse <= 0.f) bullet.markedForDestroy = true;
                 }
 
+                // ---- Decay ----
+                // An unlit mine runs out (mine_lifetime) and FIZZLES -- no
+                // blast, DamageSystem reads lifetime <= 0 without a mark as
+                // "expired" -- which frees its slot under mine_max_active.
+                // A lit one always gets to finish its fuse.
+                if (bullet.mineFuse > 0.f) bullet.lifetime = std::max(bullet.lifetime, 0.05f);
+
                 m_em->transforms[i].rotation += 26.f * dt;
                 continue;   // mines do no rocket steering
             }
@@ -481,7 +502,58 @@ private:
                 // risk with no payoff. It bleeds speed and goes off on its own
                 // once it stalls, so a parry always ends in a detonation
                 // somewhere -- the only question is where you put it.
-                if (bullet.isWild && bullet.wildDrag > 0.f) {
+                // ---- SEEKING: a parried rocket that picked a victim ----
+                // (DamageSystem::parryRocket.) Constant speed, a drunken
+                // weave that tightens as it closes, and no collisions on the
+                // way (mask 0), so it ALWAYS arrives: it detonates when it
+                // reaches the victim's centre. Victim gone -> pick another;
+                // nothing left -> it falls through to the old wild flight
+                // below and goes off when it stalls.
+                if (bullet.isWild && bullet.seekSpeed > 0.f) {
+                    size_t t = bullet.seekTargetId ? m_em->getEntityIndex(bullet.seekTargetId) : (size_t)-1;
+                    if (t == (size_t)-1 || m_em->healths[t].currentHp <= 0.f) {
+                        bullet.seekTargetId = seek::pickTarget(*m_em, m_em->transforms[i].position,
+                            wcfg("parry_rocket_seek_range", 1300.f), m_playerEntityId,
+                            m_em->transforms[i].entityId,
+                            wcfg("parry_rocket_ship_weight", 3.f), wcfg("parry_rocket_rock_weight", 1.f));
+                        t = bullet.seekTargetId ? m_em->getEntityIndex(bullet.seekTargetId) : (size_t)-1;
+                    }
+                    if (t == (size_t)-1) {
+                        bullet.seekSpeed = 0.f;          // nothing left: plain wild flight
+                    }
+                    else {
+                        const sf::Vector2f p = m_em->transforms[i].position;
+                        const sf::Vector2f to = m_em->transforms[t].position - p;
+                        const float d = std::sqrt(to.x * to.x + to.y * to.y);
+                        if (d < wcfg("parry_rocket_hit_radius", 30.f)) {
+                            bullet.markedForDestroy = true;   // DamageSystem detonates it
+                        }
+                        else {
+                            bullet.seekWobble += dt;
+                            const float ph = bullet.seekWobble;
+                            const float amp = bullet.seekWobbleAmp * std::clamp(d / 320.f, 0.08f, 1.f);
+                            const float wob = amp * (0.65f * std::sin(ph * 7.3f) + 0.35f * std::sin(ph * 13.1f + 1.7f))
+                                * 3.14159265f / 180.f;
+                            const sf::Vector2f n = to / d;
+                            const sf::Vector2f want(n.x * std::cos(wob) - n.y * std::sin(wob),
+                                                    n.x * std::sin(wob) + n.y * std::cos(wob));
+                            const b2Vec2 cv = b2Body_GetLinearVelocity(bodyId);
+                            float ca = std::atan2(cv.y, cv.x);
+                            const float wa = std::atan2(want.y, want.x);
+                            float da = wa - ca;
+                            while (da > 3.14159265f)  da -= 6.2831853f;
+                            while (da < -3.14159265f) da += 6.2831853f;
+                            // Close in, the turn rate climbs: it cannot orbit its victim.
+                            const float turn = bullet.seekTurn * (1.f + 2.f * std::clamp(1.f - d / 200.f, 0.f, 1.f))
+                                * 3.14159265f / 180.f * dt;
+                            ca += std::clamp(da, -turn, turn);
+                            const float sp = bullet.seekSpeed / SCALE;
+                            b2Body_SetLinearVelocity(bodyId, { std::cos(ca) * sp, std::sin(ca) * sp });
+                            bullet.lifetime = std::max(bullet.lifetime, 0.3f);   // never expires mid-hunt
+                        }
+                    }
+                }
+                else if (bullet.isWild && bullet.wildDrag > 0.f) {
                     const b2Vec2 v0 = b2Body_GetLinearVelocity(bodyId);
                     const float decay = std::exp(-bullet.wildDrag * dt);
                     b2Body_SetLinearVelocity(bodyId, { v0.x * decay, v0.y * decay });

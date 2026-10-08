@@ -1068,6 +1068,13 @@ private:
             else if (ai && ec.visualState == EnemyState::COMBAT)   st += std::string(" / ") + maneuverName(ai->maneuver);
             m_ui.text({ x, y }, st, 11, stateColor(ec.visualState));
             y += 15.f;
+            if (m_aiSys) {   // squad AI (AISystem notes 42-46)
+                const std::string sq = m_aiSys->squadTag(tf.entityId);
+                if (!sq.empty()) {
+                    m_ui.text({ x, y }, sq, 10, sq.find("STALKING") != std::string::npos ? tui::TEXT_DIM : tui::CYAN);
+                    y += 13.f;
+                }
+            }
 
             // Suspicion bar -- the gate between PATROL and ALERT
             const float sus = ai ? std::clamp(ai->suspicion, 0.f, 1.f) : 0.f;

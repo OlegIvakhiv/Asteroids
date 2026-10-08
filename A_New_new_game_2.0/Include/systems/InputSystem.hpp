@@ -2,6 +2,13 @@
  * @file InputSystem.hpp
  * @brief Handles player controls: movement, rotation, turbo, dash, and parry
  *
+ * CHANGES in 1.7 (dodge pass): a refit dodge stamps dodgeIframeTimer (its own
+ * i-frames, separate from hit i-frames) for DamageSystem's perfect dodge, and
+ * classes without a shoulder bash PHASE through enemy hulls for those
+ * i-frames (beginDodgePhase / endDodgePhase: the shape mask drops
+ * CATEGORY_ENEMY and is restored after, or on a stagger). Shorter class
+ * recoveries live in player.lua / ClassTuning.hpp.
+ *
  * CHANGES in 1.6: poise tuning written to PlayerComponent every frame (hot
  * reload), poise regeneration, hyperarmor flag during a heavy dodge burst.
  *
@@ -146,6 +153,15 @@ public:
         // 2. TIMERS  (always tick, even while staggered)
         // ====================================================================
         if (playerStats.dashCooldown > 0)    playerStats.dashCooldown -= dt;
+        // ---- Perfect dodge: this dodge's i-frames, and the phase-through ----
+        if (playerStats.dodgeIframeTimer > 0.f) {
+            playerStats.dodgeIframeTimer -= dt;
+            if (playerStats.dodgeIframeTimer <= 0.f) endDodgePhase(playerStats, bodyId);
+        }
+        if (playerStats.dodgeChainTimer > 0.f) {
+            playerStats.dodgeChainTimer -= dt;
+            if (playerStats.dodgeChainTimer <= 0.f) playerStats.dodgeChain = 0;
+        }
         if (playerStats.staggerImmuneTimer > 0) playerStats.staggerImmuneTimer -= dt;
         if (playerStats.overheatTimer > 0)   playerStats.overheatTimer -= dt;
         if (playerStats.parryCooldown > 0)   playerStats.parryCooldown -= dt;
@@ -182,6 +198,8 @@ public:
         // ====================================================================
         if (playerStats.staggerTimer > 0.f) {
             if (playerStats.dashTimer > 0.f) b2Body_SetBullet(bodyId, false);
+            playerStats.dodgeIframeTimer = 0.f;
+            endDodgePhase(playerStats, bodyId);
             playerStats.isTurbo = false;
             playerStats.yawDriftVel = 0.f;   // the tumble owns rotation now
             playerStats.dashTimer = 0.f;
@@ -431,6 +449,13 @@ public:
                 auto& php = m_em->healths[playerIdx];
                 php.invulTimer = std::max(php.invulTimer, feel.dashIframes);
 
+                // ---- Perfect dodge bookkeeping (DamageSystem::onDodgeAte) ----
+                playerStats.dodgeIframeTimer = feel.dashIframes;
+                playerStats.dodgeAte = false;
+                // Phase through enemy hulls for the i-frames -- unless the
+                // class's dodge IS a hit (heavy shoulder bash).
+                if (feel.shoulderBash < 0.5f) beginDodgePhase(playerStats, bodyId);
+
                 playerStats.dashMaxCooldown = T + feel.dashRecovery;
                 playerStats.dashCooldown = playerStats.dashMaxCooldown;
                 animScale = std::clamp(T / 0.20f, 0.7f, 1.4f);
@@ -524,6 +549,37 @@ private:
     luacfg::Table m_cfgRefit{ "refit" };
     float rcfg(const char* key, float def) const {
         return m_cfgRefit.get(m_lua, key, def);
+    }
+
+    /// Dodge phase: enemy hulls stop colliding with the ship for the dodge's
+    /// i-frames, so a dodge through a ram or a dive passes THROUGH the hull
+    /// instead of bouncing off it. Bullets, ordnance and rocks still touch
+    /// (the i-frames are what make those harmless). Restored by endDodgePhase.
+    static void beginDodgePhase(PlayerComponent& ps, b2BodyId body) {
+        if (ps.dodgePhased || !b2Body_IsValid(body)) return;
+        b2ShapeId shapes[16];
+        const int n = b2Body_GetShapes(body, shapes, 16);
+        if (n <= 0) return;
+        ps.dodgeSavedMask = b2Shape_GetFilter(shapes[0]).maskBits;
+        for (int k = 0; k < n; ++k) {
+            b2Filter f = b2Shape_GetFilter(shapes[k]);
+            f.maskBits &= ~static_cast<uint64_t>(CATEGORY_ENEMY);
+            b2Shape_SetFilter(shapes[k], f);
+        }
+        ps.dodgePhased = true;
+    }
+
+    static void endDodgePhase(PlayerComponent& ps, b2BodyId body) {
+        if (!ps.dodgePhased) return;
+        ps.dodgePhased = false;
+        if (!b2Body_IsValid(body)) return;
+        b2ShapeId shapes[16];
+        const int n = b2Body_GetShapes(body, shapes, 16);
+        for (int k = 0; k < n; ++k) {
+            b2Filter f = b2Shape_GetFilter(shapes[k]);
+            f.maskBits = ps.dodgeSavedMask;
+            b2Shape_SetFilter(shapes[k], f);
+        }
     }
 
     /**

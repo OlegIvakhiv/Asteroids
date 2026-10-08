@@ -253,12 +253,13 @@ asteroid_types = {
     -- collides as torn and fractures along its torn outline.
     --
     -- WHERE A WRECK COMES FROM -- one of:
-    --   wreck_of = "BARGE"         hull, plates, thrusters, turrets, scars and
-    --                              HP from the live archetype in enemy.lua
+    --   wreck_of = "BARGE"         hull, plates, turrets, scars and HP from
+    --                              the live archetype in enemy.lua (no
+    --                              nozzles: the live Rakshari have none)
     --   wreck_of_class = "LIGHT"   outline, drive positions and HP from the
     --                              player's stock hull of that class (the
     --                              refit bay preset)
-    -- Plates / thrusters / turrets / scars / hull_points set here override the
+    -- Plates / turrets / scars / hull_points set here override the
     -- source, field by field.
     --
     -- HP is the ship's own, flat -- a dead Barge soaks what a live one does.
@@ -322,11 +323,7 @@ asteroid_types = {
         color = { r = 74, g = 60, b = 56 },
         wreck_of = "RAIDER",
         wreck_damage = { light = 3, heavy = 4 },
-        -- The live Raider has no nozzle hardware (its flame comes from the
-        -- default emitter); the dead one shows three cold ones. A dormant
-        -- Raider reads these too, so the disguise matches.
-        thrusters = { { -7, 13 }, { 7, 13 }, { 0, 17 } },
-        base_size = 0.97, density = 3.2, score_reward = 60,
+        base_size = 1.26, density = 3.2, score_reward = 60,   -- = the live Raider (r 38) after its +30%
         speed_range = { 5.2, 6.8 },
         size_variance_min = 0.92, size_variance_max = 1.08,
         metallic = true, child_inherit_color = true,
@@ -362,9 +359,7 @@ asteroid_types = {
         color = { r = 78, g = 62, b = 56 },
         wreck_of = "BARGE",
         wreck_damage = { light = 3, heavy = 4 },
-        -- Engine block nozzles; the live Barge only emits flame there.
-        thrusters = { { 7, 68 }, { -7, 68 } },
-        base_size = 2.75, density = 7.0, score_reward = 340,
+        base_size = 3.00, density = 7.0, score_reward = 340,   -- = the live Barge (r ~90) after its +35%
         speed_range = { 3.2, 4.2 },
         size_variance_min = 0.94, size_variance_max = 1.06,
         metallic = true, child_inherit_color = true,

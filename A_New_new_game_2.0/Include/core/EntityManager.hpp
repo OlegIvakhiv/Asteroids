@@ -196,6 +196,8 @@ public:
         debugAoEs.clear();
         screenFlashes.clear();
         shockRings.clear();
+        beamShots.clear();
+        beams.clear();
         particles.clear();
         debris.clear();
         wreckShards.clear();
@@ -242,6 +244,8 @@ public:
 
     std::vector<ScreenFlash> screenFlashes;
     std::vector<ShockRing>   shockRings;
+    std::vector<BeamShot>    beamShots;   ///< Raised by AISystem, resolved by DamageSystem
+    std::vector<BeamFx>      beams;       ///< Drawn by RenderSystem
 
     // ===== Visual Effects =====
     std::vector<Particle> particles;              ///< Explosion/debris particles
@@ -629,6 +633,13 @@ public:
             if (shockRings[i].timer <= 0.f) {
                 shockRings[i] = shockRings.back();
                 shockRings.pop_back();
+            }
+        }
+        for (size_t i = beams.size(); i-- > 0; ) {
+            beams[i].timer -= realDt;
+            if (beams[i].timer <= 0.f) {
+                beams[i] = beams.back();
+                beams.pop_back();
             }
         }
     }

@@ -30,8 +30,18 @@
  *
  * CHANGED in 1.7 — archetype scars, hull thruster flame, bash crescent tell.
  *
+ * CHANGED in 1.14 -- turret drawn from utils/TurretModel.hpp (same model,
+ * same size as the dormant / dead gun; charge = colour, not size), the
+ * shotgun wedge, the turret's search-light cone, summon hatches, mine decay
+ * fade. drawWedge() shared by the Bloodseeker cone and the shotgun.
+ *
+ * CHANGED in 1.15 -- cone telegraphs (Bloodseeker cone, Barge shotgun) are
+ * drawConeTell(): marching-ant outline, a faint wash, a pulsing warning sign
+ * that swells and fades as the attack fires. Lancer charge (spike-to-maw
+ * lines and core) and the lancer beams.
+ *
  * @author Oleg Ivakhiv
- * @version 1.8 -- frenzy corona and colour override
+ * @version 1.15 -- cone tells, lancer charge and beams
  */
 
 #pragma once
@@ -41,6 +51,7 @@
 #include "core/EntityManager.hpp"
 #include "core/EnemyArchetypes.hpp"        // added for archetype registry and geometry
 #include "utils/FieldGeom.hpp"              // radial gradients for the field-object overlays
+#include "utils/TurretModel.hpp"            // live turret == dormant / dead turret
 #include <SFML/Graphics.hpp>
 #include <unordered_map>
 #include <vector>
@@ -68,6 +79,7 @@ public:
 
         auto& playerStats = m_em->players[playerIdx];
         m_enemyAnimTime += dt;
+        m_chaos = 0.f;   // rebuilt from the enemies below; read by drawScreenSpace
         m_magmaPulseTime += dt;
 
         for (size_t i = 0; i < m_em->renders.size(); ++i) {
@@ -433,6 +445,37 @@ public:
                     outlineColor = sf::Color(255, 200, 80, 240);
                 }
 
+                // ---- Bloodseeker RANGE kit: the hull carries the beat too ----
+                // Lancer: red, thickening through the charge, then bone-white
+                // at the lock -- the same switch the lane makes, so either
+                // one alone is enough. Cone: red, pulsing faster as the windup
+                // completes, then steady while he is rooted and firing.
+                if (ec.duelAttack != DuelAttack::None && ec.duelAtkDuration > 0.f) {
+                    const float u = std::clamp(1.f - ec.duelAtkTimer / ec.duelAtkDuration, 0.f, 1.f);
+                    switch (ec.duelAttack) {
+                    case DuelAttack::LancerCharge:
+                        outlineWidth = 1.8f + 3.0f * u;
+                        outlineColor = sf::Color(255, 90, 60, static_cast<uint8_t>(170 + 70 * u));
+                        break;
+                    case DuelAttack::LancerLock:
+                        outlineWidth = 5.2f;
+                        outlineColor = sf::Color(245, 238, 222, 255);
+                        break;
+                    case DuelAttack::ConeWindup: {
+                        const float p = (std::fmod(m_enemyAnimTime * (4.f + 10.f * u), 1.f) < 0.5f) ? 1.f : 0.f;
+                        outlineWidth = 2.0f + 3.0f * u * p;
+                        outlineColor = sf::Color(255, 90, 60, static_cast<uint8_t>(160 + 90 * p));
+                        break;
+                    }
+                    case DuelAttack::ConeFire:
+                        outlineWidth = 4.0f;
+                        outlineColor = sf::Color(255, 120, 70, 245);
+                        break;
+                    default:
+                        break;
+                    }
+                }
+
                 // ---- Bash: the parry colour, on the hull itself ----
                 // Evaluated last so it always wins. A bash must never be
                 // mistaken for anything else, least of all the ram.
@@ -544,14 +587,43 @@ public:
                             // Shade the LIVE fill, so plates flash, glow and
                             // ramp with the hull instead of sitting inert
                             // through every colour effect the unit has.
-                            const sf::Color pc(
+                            sf::Color pc(
                                 static_cast<uint8_t>(std::clamp(fill.r * pl.shade, 0.f, 255.f)),
                                 static_cast<uint8_t>(std::clamp(fill.g * pl.shade, 0.f, 255.f)),
                                 static_cast<uint8_t>(std::clamp(fill.b * pl.shade, 0.f, 255.f)),
                                 fill.a);
+                            // Trim (elite gold / bone): mixed in AFTER the
+                            // shade, so the flash and stagger still move it.
+                            if (pl.tintMix > 0.f) {
+                                const float m = pl.tintMix;
+                                pc.r = static_cast<uint8_t>(pc.r + (pl.tint.r - pc.r) * m);
+                                pc.g = static_cast<uint8_t>(pc.g + (pl.tint.g - pc.g) * m);
+                                pc.b = static_cast<uint8_t>(pc.b + (pl.tint.b - pc.b) * m);
+                            }
                             for (const auto& v : pl.tris) panels[w++] = sf::Vertex{ v, pc };
                         }
                         m_window->draw(panels, states);
+                    }
+
+                    // ---- Elite trim: hard edges on the accent plates ----
+                    // Strips are built once at load (plate_edge_width > 0);
+                    // here they only get coloured. The trim follows the hit
+                    // flash like everything else on the hull.
+                    if (adef.plateEdgeWidth > 0.f) {
+                        sf::Color ec2 = adef.plateEdge;
+                        if (ec.hitFlashTimer > 0.f) {
+                            const float w = std::clamp(ec.hitFlashTimer / 0.16f, 0.f, 1.f);
+                            ec2.r = static_cast<uint8_t>(ec2.r + (255 - ec2.r) * w);
+                            ec2.g = static_cast<uint8_t>(ec2.g + (255 - ec2.g) * w);
+                            ec2.b = static_cast<uint8_t>(ec2.b + (255 - ec2.b) * w);
+                        }
+                        for (const auto& pl : adef.plates) {
+                            if (pl.edgeStrip.size() < 4) continue;
+                            sf::VertexArray e(sf::PrimitiveType::TriangleStrip, pl.edgeStrip.size());
+                            for (size_t k = 0; k < pl.edgeStrip.size(); ++k)
+                                e[k] = sf::Vertex{ pl.edgeStrip[k], ec2 };
+                            m_window->draw(e, states);
+                        }
                     }
                 }
 
@@ -574,6 +646,10 @@ public:
                         edge[k] = sf::Vertex{ m_outlineScratch[k], outlineColor };
                     m_window->draw(edge, states);
                 }
+
+                // ---- Mode lamp (Bloodseeker) -- last, so nothing covers it ----
+                if (!adef.lampTris.empty())
+                    drawModeLamp(ec, adef, states, m_em->healths[i].stunTimer > 0.f);
 
                 // ====================================================================
                 // 3b. TURRET — drawn in its OWN frame, not the hull's
@@ -600,47 +676,151 @@ public:
                         heat = 1.f - (ec.turretTelegraphTimer / ec.turretTelegraphDuration);
                     if (ec.turretMuzzleFlash > 0.f) heat = 1.f;
 
-                    const sf::Color barrelCol(
-                        255,
-                        static_cast<uint8_t>(std::clamp(200.f - 120.f * heat, 0.f, 255.f)),
-                        static_cast<uint8_t>(std::clamp(150.f - 130.f * heat, 0.f, 255.f)),
-                        static_cast<uint8_t>(std::clamp(200.f + 55.f * heat, 0.f, 255.f)));
+                    // Shotgun windup heats the gun the same way, on its own clock.
+                    if (ec.shotgunState != 0 && ec.shotgunDuration > 0.f)
+                        heat = std::max(heat, 1.f - ec.shotgunTimer / ec.shotgunDuration);
+                    if (ec.shotgunFlash > 0.f) heat = 1.f;
 
-                    // Barrel: a bar running forward (-Y local) from the mount.
-                    const float bl = ts * (2.1f + 0.25f * heat);
-                    const float bw = ts * 0.28f;
-                    sf::VertexArray barrel(sf::PrimitiveType::TriangleStrip, 4);
-                    barrel[0] = sf::Vertex{ { -bw, 0.f },  barrelCol };
-                    barrel[1] = sf::Vertex{ {  bw, 0.f },  barrelCol };
-                    barrel[2] = sf::Vertex{ { -bw, -bl },  barrelCol };
-                    barrel[3] = sf::Vertex{ {  bw, -bl },  barrelCol };
-                    m_window->draw(barrel, tst);
-
-                    // Housing: an octagon, so the gun reads as a separate
-                    // machine bolted on rather than part of the hull plating.
-                    sf::VertexArray housing(sf::PrimitiveType::TriangleFan, 10);
-                    housing[0] = sf::Vertex{ { 0.f, 0.f },
-                        sf::Color(std::min(255, fill.r + 40),
-                                  std::min(255, fill.g + 30),
-                                  std::min(255, fill.b + 30)) };
-                    for (int k = 0; k <= 8; ++k) {
-                        const float a = k * 3.14159f * 2.f / 8.f;
-                        housing[k + 1] = sf::Vertex{
-                            { std::cos(a) * ts, std::sin(a) * ts }, outlineColor };
+                    // ---- The model: utils/TurretModel.hpp ----
+                    // The same polygons a dormant or dead hull bakes cold, at
+                    // the same size, so nothing jumps when it wakes or dies.
+                    // Geometry never changes with the charge; colour carries
+                    // it: barrels heat, the lane down the housing fills from
+                    // the breech forward, a glow sits on each muzzle.
+                    const auto shade = [&](float k) {
+                        return sf::Color(
+                            static_cast<uint8_t>(std::clamp(fill.r * k, 0.f, 255.f)),
+                            static_cast<uint8_t>(std::clamp(fill.g * k, 0.f, 255.f)),
+                            static_cast<uint8_t>(std::clamp(fill.b * k, 0.f, 255.f)));
+                        };
+                    const auto mix = [](sf::Color c0, sf::Color c1, float t) {
+                        t = std::clamp(t, 0.f, 1.f);
+                        return sf::Color(
+                            static_cast<uint8_t>(c0.r + (c1.r - c0.r) * t),
+                            static_cast<uint8_t>(c0.g + (c1.g - c0.g) * t),
+                            static_cast<uint8_t>(c0.b + (c1.b - c0.b) * t));
+                        };
+                    const sf::Color hot(255, static_cast<uint8_t>(150 - 70 * heat), 60);
+                    const sf::Color edgeCol = outlineColor;
+                    const auto poly = [&](const std::vector<sf::Vector2f>& p, sf::Color c, bool edge) {
+                        sf::VertexArray va(sf::PrimitiveType::TriangleFan, p.size());
+                        for (size_t k = 0; k < p.size(); ++k) va[k] = sf::Vertex{ p[k], c };
+                        m_window->draw(va, tst);
+                        if (!edge) return;
+                        sf::VertexArray ln(sf::PrimitiveType::LineStrip, p.size() + 1);
+                        for (size_t k = 0; k <= p.size(); ++k) ln[k] = sf::Vertex{ p[k % p.size()], edgeCol };
+                        m_window->draw(ln, tst);
+                        };
+                    using turretmodel::Part;
+                    for (const auto& part : turretmodel::parts(ts)) {
+                        switch (part.part) {
+                        case Part::Rear:    poly(part.pts, shade(0.55f), true); break;
+                        case Part::Barrel:  poly(part.pts, mix(shade(0.75f), hot, heat * 0.85f), true); break;
+                        case Part::Brake:   poly(part.pts, mix(shade(0.62f), hot, heat), true); break;
+                        case Part::Mantlet: poly(part.pts, shade(0.68f), true); break;
+                        case Part::Housing: poly(part.pts, shade(1.18f), true); break;
+                        case Part::Lane:
+                            poly(part.pts, sf::Color(26, 14, 12), false);
+                            if (heat > 0.01f) poly(turretmodel::laneFill(ts, heat), hot, false);
+                            break;
+                        }
                     }
-                    m_window->draw(housing, tst);
 
-                    // Muzzle flash.
+                    // Muzzle glow: grows with the charge, flares on the shot.
+                    if (heat > 0.05f) {
+                        const float g = ts * (0.10f + 0.22f * heat);
+                        for (const auto& mz : turretmodel::muzzles(ts)) {
+                            sf::VertexArray d(sf::PrimitiveType::TriangleFan, 4);
+                            const sf::Color gc(255, static_cast<uint8_t>(210 - 90 * heat), 120,
+                                static_cast<uint8_t>(120 + 135 * heat));
+                            d[0] = sf::Vertex{ { mz.x, mz.y - g }, gc };
+                            d[1] = sf::Vertex{ { mz.x + g, mz.y }, gc };
+                            d[2] = sf::Vertex{ { mz.x, mz.y + g }, gc };
+                            d[3] = sf::Vertex{ { mz.x - g, mz.y }, gc };
+                            m_window->draw(d, tst);
+                        }
+                    }
+
+                    // Muzzle flash, both barrels.
                     if (ec.turretMuzzleFlash > 0.f) {
-                        const float u = ec.turretMuzzleFlash / 0.11f;
-                        sf::VertexArray fl(sf::PrimitiveType::TriangleFan, 4);
-                        const sf::Color fc(255, 230, 150,
-                            static_cast<uint8_t>(230 * u));
-                        fl[0] = sf::Vertex{ { 0.f, -bl }, fc };
-                        fl[1] = sf::Vertex{ { -ts * 0.8f * u, -bl - ts * 0.6f }, sf::Color(255,180,80,0) };
-                        fl[2] = sf::Vertex{ { 0.f, -bl - ts * 2.2f * u },        sf::Color(255,200,90,0) };
-                        fl[3] = sf::Vertex{ {  ts * 0.8f * u, -bl - ts * 0.6f }, sf::Color(255,180,80,0) };
-                        m_window->draw(fl, tst);
+                        const float u = std::clamp(ec.turretMuzzleFlash / 0.11f, 0.f, 1.f);
+                        const sf::Color fc(255, 230, 150, static_cast<uint8_t>(230 * u));
+                        for (const auto& mz : turretmodel::muzzles(ts)) {
+                            sf::VertexArray fl(sf::PrimitiveType::Triangles, 3);
+                            fl[0] = sf::Vertex{ { mz.x - ts * 0.22f, mz.y }, fc };
+                            fl[1] = sf::Vertex{ { mz.x + ts * 0.22f, mz.y }, fc };
+                            fl[2] = sf::Vertex{ { mz.x, mz.y - ts * 1.6f * u }, sf::Color(255, 200, 90, 0) };
+                            m_window->draw(fl, tst);
+                        }
+                    }
+
+                    // ---- SHOTGUN wedge: exactly the cone that will land ----
+                    // Tracking: thin red edges, fill creeping in. Locked: hard
+                    // edges, fuller fill -- the last beat to get out. Fired:
+                    // a flash of the whole wedge.
+                    if (ec.shotgunState != 0 || ec.shotgunFlash > 0.f) {
+                        const float R = adef.config["shotgun_range"].get_or(320.f);
+                        const float half = adef.config["shotgun_half_angle"].get_or(30.f) * 3.14159f / 180.f;
+                        const float ar = ec.turretAngle * 3.14159f / 180.f;
+                        const sf::Vector2f dir(std::sin(ar), -std::cos(ar));
+                        const sf::Vector2f apex = mountPos + dir * (turretmodel::kMuzzle * ts);
+                        const float base = std::atan2(dir.y, dir.x);
+                        if (ec.shotgunFlash > 0.f) {
+                            drawConeTell(apex, base, half, R, 1.f, true,
+                                std::clamp(ec.shotgunFlash / 0.30f, 0.f, 1.f) * 0.999f);
+                        }
+                        else {
+                            const float u = 1.f - ec.shotgunTimer / std::max(0.01f, ec.shotgunDuration);
+                            drawConeTell(apex, base, half, R, u, ec.shotgunState == 2, 1.f);
+                        }
+                    }
+
+                    // ---- Turret eye: a faint searchlight while it hunts ----
+                    if (ec.visualState != EnemyState::COMBAT) {
+                        const float vr = adef.config["turret_vision_range"].get_or(0.f);
+                        if (vr > 0.f) {
+                            float vh = adef.config["turret_vision_fov"].get_or(60.f) * 0.5f;
+                            if (ec.visualState == EnemyState::ALERT)
+                                vh *= adef.config["vision_fov_alert_mult"].get_or(1.45f);
+                            const float ar = (ec.turretAngle - 90.f) * 3.14159f / 180.f;
+                            const float h = std::min(vh, 175.f) * 3.14159f / 180.f;
+                            const uint8_t a0 = ec.visualState == EnemyState::ALERT ? 70 : 38;
+                            const sf::Color c0(255, 190, 60, a0), c1(255, 190, 60, 0);
+                            sf::VertexArray cone(sf::PrimitiveType::Lines, 4);
+                            cone[0] = sf::Vertex{ mountPos, c0 };
+                            cone[1] = sf::Vertex{ mountPos + sf::Vector2f(std::cos(ar - h), std::sin(ar - h)) * (vr * 0.55f), c1 };
+                            cone[2] = sf::Vertex{ mountPos, c0 };
+                            cone[3] = sf::Vertex{ mountPos + sf::Vector2f(std::cos(ar + h), std::sin(ar + h)) * (vr * 0.55f), c1 };
+                            m_window->draw(cone);
+                        }
+                    }
+                }
+
+                // ====================================================================
+                // 3b-2. SUMMON -- the sponson hatches glow while the hull charges
+                // ====================================================================
+                if (ec.summonState == 1 && ec.summonDuration > 0.f) {
+                    const float u = 1.f - ec.summonTimer / ec.summonDuration;
+                    const float sc = adef.config["scale"].get_or(1.f);
+                    float hx = 30.f, hy = 4.f;
+                    if (sol::optional<sol::table> h = adef.config["summon_hatch"]) {
+                        hx = (*h)["x"].get_or(hx);
+                        hy = (*h)["y"].get_or(hy);
+                    }
+                    const float flick = 0.8f + 0.2f * std::sin(m_enemyAnimTime * (20.f + 30.f * u));
+                    const sf::Color hc(255, static_cast<uint8_t>(110 + 100 * u), 60,
+                        static_cast<uint8_t>((90 + 165 * u) * flick));
+                    for (float side : { -1.f, 1.f }) {
+                        // A slot along the sponson, in the hull frame: a seam
+                        // that cracks open wider as the charge fills.
+                        const float x = side * hx * sc, y = hy * sc;
+                        const float w = (1.2f + 2.6f * u) * sc, l = 11.f * sc;
+                        sf::VertexArray q(sf::PrimitiveType::TriangleFan, 4);
+                        q[0] = sf::Vertex{ { x - w, y - l }, hc };
+                        q[1] = sf::Vertex{ { x + w, y - l }, hc };
+                        q[2] = sf::Vertex{ { x + w, y + l }, hc };
+                        q[3] = sf::Vertex{ { x - w, y + l }, hc };
+                        m_window->draw(q, states);
                     }
                 }
 
@@ -723,6 +903,14 @@ public:
                 if (bashU >= 0.f) drawBashCrescent(tf, adef, bashU, bashCol,
                     ec.bashState == BashState::Lunge);
 
+                // ---- Bloodseeker execution: the same crescent, in GOLD ----
+                // Gold, not cyan: it is aimed at one of his own, not at you.
+                // Nothing to parry -- the read is "he has turned his back".
+                if (ec.duelShift == DuelShift::ExecStrike && ec.duelShiftDuration > 0.f) {
+                    const float u = std::clamp(1.f - ec.duelShiftTimer / ec.duelShiftDuration, 0.f, 1.f);
+                    drawBashCrescent(tf, adef, u, sf::Color(214, 172, 92), false);
+                }
+
                 // ====================================================================
                 // 4. TELEGRAPH AIM LINE
                 // ====================================================================
@@ -738,6 +926,10 @@ public:
                                           sf::Color(255, 90, 60, 0) };
                     m_window->draw(beam);
                 }
+
+                // ---- 4b. Bloodseeker lancer lane / cone wedge ----
+                if (ec.duelAttack != DuelAttack::None) drawDuelAttack(tf, ec, adef);
+
 
                 // ====================================================================
                 // 5. VISION CONE (ALERT only) — uses adef.config
@@ -770,6 +962,12 @@ public:
                     drawAlertIcon(tf.position, ec);
                 }
 
+                // ====================================================================
+                // 7. PACK MARK -- aura / execution buff / feral
+                // ====================================================================
+                if (ec.packTier > 0) drawPackMark(tf.position, ec, adef.radius);
+                m_chaos = std::max(m_chaos, ec.feralTimer);
+
                 continue;   // enemy drawn, skip generic render
             }
 
@@ -782,6 +980,7 @@ public:
         }
 
         drawShockRings();
+        drawBeams();
         pruneDetailCache();
     }
 
@@ -790,7 +989,9 @@ public:
      * Called by SystemManager after switching to the default view.
      */
     void drawScreenSpace() {
-        if (!m_em || !m_window || m_em->screenFlashes.empty()) return;
+        if (!m_em || !m_window) return;
+        if (m_chaos > 0.f) drawChaosFrame();
+        if (m_em->screenFlashes.empty()) return;
 
         const sf::View& v = m_window->getView();
         sf::RectangleShape quad(v.getSize());
@@ -872,6 +1073,31 @@ private:
         else if (ec.bashState == BashState::Windup || ec.ramState == RamState::Windup) {
             intent = 0.25f;
         }
+        // ---- Bloodseeker mode tell ----
+        // RANGE mode guts the aft flame: he is holding back on retros (the
+        // prow plumes come from AISystem), so a long hot tail always means
+        // MELEE -- he is coming. The dive opens it white, like a charge.
+        else if (ec.duelShift == DuelShift::Dive) {
+            intent = 1.9f; whiteHot = true;
+        }
+        else if (ec.duelShift == DuelShift::DiveWindup) {
+            intent = 0.2f;
+        }
+        // Feint: the flame cuts out on the hesitation -- a coil that loses
+        // its fire instead of snapping forward -- and stays low while he
+        // backs off spraying.
+        else if (ec.duelShift == DuelShift::FeintBreak) {
+            intent = 0.08f;
+        }
+        else if (ec.duelShift == DuelShift::FeintFallback) {
+            intent = 0.3f;
+        }
+        else if (ec.duelMode == DuelMode::Range) {
+            intent = 0.35f;
+        }
+
+        // Pack buff: the flame is the second channel (the pip is the first).
+        intent *= 1.f + 2.5f * (ec.packMult - 1.f);
 
         const float g = adef.exhaust.glow;
         const sf::Color outer = whiteHot ? sf::Color(255, 235, 190, 210) : sf::Color(255, 150, 60, 175);
@@ -930,6 +1156,13 @@ private:
         const sf::Color hotCol(255, static_cast<uint8_t>(70 - 40 * urgency), 45);
         const sf::Color blink = lit ? hotCol : idleCol;
 
+        // ---- Decay: the last 2.5s of an unlit mine's life ----
+        // Everything dims toward nothing, and the lamp sputters instead of
+        // ticking: it is running out, and it will fizzle, not blow.
+        const float fadeK = (!lit && mine.lifetime < 2.5f)
+            ? std::clamp(mine.lifetime / 2.5f, 0.15f, 1.f) : 1.f;
+        const auto fa = [fadeK](float a) { return static_cast<uint8_t>(std::clamp(a * fadeK, 0.f, 255.f)); };
+
         // ---- Trigger zone: sonar sweep ----
         // Only while armed. An unarmed mine has no zone yet, and drawing one
         // would promise a threat that is not live.
@@ -945,7 +1178,7 @@ private:
             sweep.setFillColor(sf::Color::Transparent);
             sweep.setOutlineThickness(lit ? 2.2f : 1.4f);
             sweep.setOutlineColor(sf::Color(blink.r, blink.g, blink.b,
-                static_cast<uint8_t>((lit ? 190.f : 90.f) * fade)));
+                fa((lit ? 190.f : 90.f) * fade)));
             m_window->draw(sweep);
 
             // The boundary itself, held faintly all the time, so the edge is
@@ -956,7 +1189,7 @@ private:
             edge.setFillColor(sf::Color::Transparent);
             edge.setOutlineThickness(1.f);
             edge.setOutlineColor(sf::Color(blink.r, blink.g, blink.b,
-                static_cast<uint8_t>(lit ? 70 + 60 * on : 34)));
+                fa(lit ? 70.f + 60.f * on : 34.f)));
             m_window->draw(edge);
         }
 
@@ -964,21 +1197,22 @@ private:
         rd.shape.setPosition(tf.position);
         rd.shape.setRotation(sf::degrees(tf.rotation));
         rd.shape.setOutlineColor(sf::Color(blink.r, blink.g, blink.b,
-            static_cast<uint8_t>(140 + 115 * on)));
+            fa(140.f + 115.f * on)));
         rd.shape.setFillColor(lit
             ? sf::Color(static_cast<uint8_t>(60 + 120 * on), 34, 30)
-            : sf::Color(64, 58, 56));
+            : sf::Color(64, 58, 56, fa(255.f)));
         m_window->draw(rd.shape);
 
         // ---- Lamp ----
         // A hard dot at the centre. The hull outline can be lost against a
         // bright background; this cannot.
-        if (on > 0.5f) {
-            const float s = lit ? 5.f + 3.f * urgency : 3.f;
+        const bool sputter = fadeK < 1.f && std::fmod(m_enemyAnimTime * 9.f, 1.f) < 0.3f;
+        if (on > 0.5f || sputter) {
+            const float s = lit ? 5.f + 3.f * urgency : 3.f * (0.5f + 0.5f * fadeK);
             sf::CircleShape lamp(s, 8);
             lamp.setOrigin({ s, s });
             lamp.setPosition(tf.position);
-            lamp.setFillColor(sf::Color(blink.r, blink.g, blink.b, 245));
+            lamp.setFillColor(sf::Color(blink.r, blink.g, blink.b, fa(245.f)));
             m_window->draw(lamp);
         }
     }
@@ -1033,6 +1267,344 @@ private:
      * creeping outward and brightening as the coil completes, then snapping
      * to full white-cyan for the lunge itself.
      */
+    /// A world-space segment as a quad, colour fading from `ca` to `cb`.
+    /// sf::Lines is 1px and vanishes under zoom-out.
+    /**
+     * @brief Cone telegraph: marching ants + a warning sign (playtest 1.15).
+     *
+     * The filled red wedge read as too simple and too bright. Now:
+     *   - the wedge itself is barely there (a faint wash),
+     *   - its OUTLINE is marching ants: dashes crawling outward along the
+     *     edges and round the arc -- the boundary is what matters, so the
+     *     boundary is what moves,
+     *   - a warning triangle with a "!" sits inside the cone, its glow
+     *     pulsing faster as the charge fills.
+     * `charge` 0..1 = windup progress; `locked` = last beat (ants faster,
+     * thicker, solid sign); `fade` 1 -> 0 after it fires: the sign swells
+     * and fades out with the ants, so the attack starting reads as the
+     * warning being spent.
+     */
+    void drawConeTell(sf::Vector2f apex, float base, float half, float R,
+        float charge, bool locked, float fade)
+    {
+        fade = std::clamp(fade, 0.f, 1.f);
+        charge = std::clamp(charge, 0.f, 1.f);
+        if (fade <= 0.01f) return;
+        const sf::Color red(255, 80, 55);
+        const auto A = [&](float a) { return static_cast<uint8_t>(std::clamp(a * fade, 0.f, 255.f)); };
+
+        // ---- Faint wash ----
+        {
+            constexpr int SEG = 18;
+            sf::VertexArray fan(sf::PrimitiveType::TriangleFan, SEG + 2);
+            const sf::Color f(red.r, red.g, red.b, A(locked ? 22.f : 6.f + 10.f * charge));
+            fan[0] = sf::Vertex{ apex, f };
+            for (int k = 0; k <= SEG; ++k) {
+                const float a = base - half + 2.f * half * (static_cast<float>(k) / SEG);
+                fan[k + 1] = sf::Vertex{ apex + sf::Vector2f(std::cos(a), std::sin(a)) * R, f };
+            }
+            m_window->draw(fan);
+        }
+
+        // ---- Marching ants round the boundary ----
+        // One closed path apex -> edge -> arc -> edge -> apex, walked with a
+        // dash pattern whose offset advances with time.
+        std::vector<sf::Vector2f> path;
+        path.push_back(apex);
+        constexpr int ARC = 24;
+        for (int k = 0; k <= ARC; ++k) {
+            const float a = base - half + 2.f * half * (static_cast<float>(k) / ARC);
+            path.push_back(apex + sf::Vector2f(std::cos(a), std::sin(a)) * R);
+        }
+        path.push_back(apex);
+        const float dash = 12.f, gap = 9.f, period = dash + gap;
+        const float speed = locked ? 150.f : 45.f + 55.f * charge;
+        const float off = std::fmod(m_enemyAnimTime * speed, period);
+        const float w = locked ? 2.4f : 1.4f + 0.6f * charge;
+        const sf::Color ant(red.r, red.g, red.b, A(locked ? 240.f : 90.f + 120.f * charge));
+        float s0 = -off;   // path distance where the current dash pattern starts
+        float walked = 0.f;
+        for (size_t k = 0; k + 1 < path.size(); ++k) {
+            const sf::Vector2f p0 = path[k], p1 = path[k + 1];
+            const sf::Vector2f d = p1 - p0;
+            const float L = std::sqrt(d.x * d.x + d.y * d.y);
+            if (L < 1e-3f) continue;
+            const sf::Vector2f n = d / L;
+            // every dash [s0 + m*period, s0 + m*period + dash] overlapping [walked, walked+L]
+            float m0 = std::floor((walked - s0 - dash) / period);
+            for (float m = m0; ; m += 1.f) {
+                const float a0 = s0 + m * period, a1 = a0 + dash;
+                if (a0 > walked + L) break;
+                const float c0 = std::max(a0, walked) - walked, c1 = std::min(a1, walked + L) - walked;
+                if (c1 > c0) drawBand(p0 + n * c0, p0 + n * c1, w, ant, ant);
+            }
+            walked += L;
+        }
+
+        // ---- Warning sign ----
+        const sf::Vector2f dir(std::cos(base), std::sin(base));
+        const sf::Vector2f c = apex + dir * (R * 0.42f);
+        const float swell = 1.f + 0.6f * (1.f - fade) * (fade < 1.f ? 1.f : 0.f);
+        const float sz = 12.f * swell;
+        const float pulse = 0.5f + 0.5f * std::sin(m_enemyAnimTime * (5.f + 12.f * charge));
+        const auto tri = [&](float s) {
+            return std::array<sf::Vector2f, 3>{ c + sf::Vector2f(0.f, -s),
+                c + sf::Vector2f(s * 0.95f, s * 0.70f), c + sf::Vector2f(-s * 0.95f, s * 0.70f) };
+            };
+        // glow ring: an outline a step out, breathing
+        {
+            const auto g = tri(sz * 1.45f);
+            const sf::Color gc(red.r, 120, 80, A((locked ? 150.f : 50.f + 90.f * charge) * (0.4f + 0.6f * pulse)));
+            for (int k = 0; k < 3; ++k) drawBand(g[k], g[(k + 1) % 3], 1.6f, gc, gc);
+        }
+        {
+            const auto t = tri(sz);
+            sf::VertexArray body(sf::PrimitiveType::Triangles, 3);
+            const sf::Color bc(28, 8, 8, A(210.f));
+            for (int k = 0; k < 3; ++k) body[k] = sf::Vertex{ t[k], bc };
+            m_window->draw(body);
+            const sf::Color ec(255, static_cast<uint8_t>(110 + 60 * pulse), 70, A(locked ? 255.f : 150.f + 100.f * charge));
+            for (int k = 0; k < 3; ++k) drawBand(t[k], t[(k + 1) % 3], 2.0f, ec, ec);
+            // the "!"
+            drawBand(c + sf::Vector2f(0.f, -sz * 0.52f), c + sf::Vector2f(0.f, sz * 0.18f), 2.4f * swell, ec, ec);
+            drawBand(c + sf::Vector2f(0.f, sz * 0.32f), c + sf::Vector2f(0.f, sz * 0.48f), 2.4f * swell, ec, ec);
+        }
+    }
+
+    /// A filled wedge with hard edges. Apex, centre bearing (radians),
+    /// half-angle, range. (Cone telegraphs use drawConeTell now.)
+    void drawWedge(sf::Vector2f apex, float base, float half, float R,
+        sf::Color fill, sf::Color edge, float w) {
+        constexpr int SEG = 18;
+        sf::VertexArray fan(sf::PrimitiveType::TriangleFan, SEG + 2);
+        fan[0] = sf::Vertex{ apex, fill };
+        for (int k = 0; k <= SEG; ++k) {
+            const float a = base - half + 2.f * half * (static_cast<float>(k) / SEG);
+            fan[k + 1] = sf::Vertex{ apex + sf::Vector2f(std::cos(a), std::sin(a)) * R, fill };
+        }
+        m_window->draw(fan);
+        const sf::Vector2f e0 = apex + sf::Vector2f(std::cos(base - half), std::sin(base - half)) * R;
+        const sf::Vector2f e1 = apex + sf::Vector2f(std::cos(base + half), std::sin(base + half)) * R;
+        drawBand(apex, e0, w, edge, edge);
+        drawBand(apex, e1, w, edge, edge);
+        for (int k = 0; k < SEG; ++k) {
+            const float a0 = base - half + 2.f * half * (static_cast<float>(k) / SEG);
+            const float a1 = base - half + 2.f * half * (static_cast<float>(k + 1) / SEG);
+            drawBand(apex + sf::Vector2f(std::cos(a0), std::sin(a0)) * R,
+                apex + sf::Vector2f(std::cos(a1), std::sin(a1)) * R, w, edge, edge);
+        }
+    }
+
+    void drawBand(sf::Vector2f a, sf::Vector2f b, float width, sf::Color ca, sf::Color cb) {
+        sf::Vector2f d = b - a;
+        const float l = std::sqrt(d.x * d.x + d.y * d.y);
+        if (l < 1e-3f) return;
+        const sf::Vector2f n(-d.y / l * width * 0.5f, d.x / l * width * 0.5f);
+        sf::VertexArray q(sf::PrimitiveType::TriangleStrip, 4);
+        q[0] = sf::Vertex{ a - n, ca }; q[1] = sf::Vertex{ a + n, ca };
+        q[2] = sf::Vertex{ b - n, cb }; q[3] = sf::Vertex{ b + n, cb };
+        m_window->draw(q);
+    }
+
+    /**
+     * @brief The Bloodseeker's RANGE tells, in world space.
+     *
+     * LANCER  a lane from the prow along the solved intercept. Charge: thin,
+     *         red, lengthening -- "a shot is being lined up on where you are
+     *         going". Lock: full length, thick, bone-white -- "it has stopped
+     *         tracking; move off this line now".
+     *
+     * CONE    the exact wedge the rounds will fill, out to their real reach.
+     *         Flat fill (no gradient), hard edges and a rim arc. The fill
+     *         thickens through the windup so "how long until it starts" is
+     *         readable without a timer; while firing it holds, and it is gone
+     *         the moment he goes into recovery.
+     */
+    void drawDuelAttack(const TransformComponent& tf, const EnemyComponent& ec,
+        const enemyarch::ArchetypeDef& adef) {
+        const float u = (ec.duelAtkDuration > 0.f)
+            ? std::clamp(1.f - ec.duelAtkTimer / ec.duelAtkDuration, 0.f, 1.f) : 1.f;
+        const sf::Vector2f dir = ec.duelAtkDir;
+        const sf::Vector2f nose = tf.position + dir * (adef.radius * 0.95f);
+
+        switch (ec.duelAttack) {
+        case DuelAttack::LancerCharge: {
+            const float len = 260.f + 640.f * u;
+            drawBand(nose, nose + dir * len, 1.4f + 1.6f * u,
+                sf::Color(255, 90, 60, static_cast<uint8_t>(60 + 130 * u)),
+                sf::Color(255, 90, 60, 0));
+            drawLancerCharge(tf, adef, u, false);
+            break;
+        }
+        case DuelAttack::LancerLock: {
+            const float R = adef.config["lancer_range"].get_or(1300.f);
+            drawBand(nose, nose + dir * R, 4.0f,
+                sf::Color(245, 238, 222, 245), sf::Color(245, 238, 222, 0));
+            drawLancerCharge(tf, adef, 1.f, true);
+            break;
+        }
+
+        case DuelAttack::ConeWindup:
+        case DuelAttack::ConeFire: {
+            const bool firing = (ec.duelAttack == DuelAttack::ConeFire);
+            const float half = ec.duelConeHalf * 3.14159f / 180.f;
+            const float R = ec.duelConeRange;
+            const float base = std::atan2(dir.y, dir.x);
+            // Rounds leave from 0.9r and fly R: the wedge is drawn from there
+            // to exactly where they die.
+            const sf::Vector2f apex = tf.position + dir * (adef.radius * 0.9f);
+
+            // Windup: ants + sign charging. Firing: the warning is spent --
+            // sign swells and fades with the ants over the volley.
+            drawConeTell(apex, base, half, R, firing ? 1.f : u, false, firing ? 1.f - u : 1.f);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    /**
+     * @brief Under-the-ship mark for the Bloodseeker's pack.
+     *
+     *   AURA       one small gold chevron under the hull, still.
+     *   EXECUTION  two gold chevrons, pulsing: +20% and back in the fight.
+     *   FERAL      three red slashes over the hull, flickering: this one is
+     *              fighting whoever is nearest, you or its own.
+     *
+     * Screen-aligned, like the alert icons, so it reads the same whatever
+     * way the ship is facing. Below the hull so it never sits on an icon.
+     */
+    void drawPackMark(sf::Vector2f pos, const EnemyComponent& ec, float radius) {
+        if (ec.packTier == 3) {
+            const bool on = std::fmod(m_enemyAnimTime * 9.f, 1.f) < 0.6f;
+            const sf::Color red(255, 50, 35, on ? 245 : 120);
+            const float y = pos.y - radius - 14.f;
+            for (int k = -1; k <= 1; ++k) {
+                const float x = pos.x + k * 7.f;
+                drawBand({ x + 4.f, y - 6.f }, { x - 4.f, y + 6.f }, on ? 3.0f : 2.4f, red, red);
+            }
+            return;
+        }
+        const bool exec = (ec.packTier == 2);
+        float a = 190.f;
+        if (exec) a = 180.f + 75.f * (0.5f + 0.5f * std::sin(m_enemyAnimTime * 9.f));
+        const sf::Color gold(214, 172, 92, static_cast<uint8_t>(a));
+        const int n = exec ? 2 : 1;
+        for (int k = 0; k < n; ++k) {
+            const float y = pos.y + radius + 10.f + k * 6.f;
+            drawBand({ pos.x - 7.f, y + 4.f }, { pos.x, y }, 2.4f, gold, gold);
+            drawBand({ pos.x + 7.f, y + 4.f }, { pos.x, y }, 2.4f, gold, gold);
+        }
+    }
+
+    /**
+     * @brief Death-chaos screen frame: red corner brackets, screen space.
+     *
+     * Up for as long as any Rakshari is feral, fading over the last second.
+     * Flat, hard-edged, on the edge of the screen: it changes how EVERY enemy
+     * should be read, so it lives where the whole screen is, not on a ship.
+     */
+    void drawChaosFrame() {
+        const sf::View& v = m_window->getView();
+        const sf::Vector2f c = v.getCenter(), h = v.getSize() * 0.5f;
+        const float fade = std::clamp(m_chaos, 0.f, 1.f);
+        const float pulse = 0.65f + 0.35f * std::sin(m_enemyAnimTime * 7.f);
+        const sf::Color red(200, 25, 20, static_cast<uint8_t>(220.f * fade * pulse));
+        const float inset = std::min(h.x, h.y) * 0.04f;
+        const float arm = std::min(h.x, h.y) * 0.22f;
+        const float w = std::max(4.f, std::min(h.x, h.y) * 0.012f);
+        for (int k = 0; k < 4; ++k) {
+            const float sx = (k & 1) ? 1.f : -1.f, sy = (k & 2) ? 1.f : -1.f;
+            const sf::Vector2f p(c.x + sx * (h.x - inset), c.y + sy * (h.y - inset));
+            drawBand(p, { p.x - sx * arm, p.y }, w, red, red);
+            drawBand(p, { p.x, p.y - sy * arm }, w, red, red);
+        }
+    }
+
+    /**
+     * @brief The Bloodseeker's mode light: one small piece of the hull.
+     *
+     *   ORANGE      MELEE. Quick pulse (he is coming).
+     *   BLUE-CYAN   RANGE. Slow pulse (he is sighting you). Bluer than the
+     *               bash crescent's mint on purpose, so a RANGE Bloodseeker
+     *               winding up a bash still shows two different cyans.
+     *
+     * The colour is FIXED -- it does not follow the hull's state tint, hit
+     * flash or stagger -- because it is the one thing on him that has to
+     * read the same in every frame. Each pulse also sends a thin ring of the
+     * lamp's own shape out over the plating: flat, hard-edged, gone in a beat.
+     *
+     * Hard fast blink = perfect-dodging right now (disengage or post-stun
+     * window). Dim and still = stunned or tumbling, i.e. open.
+     * During a switch it already shows the mode he is going INTO.
+     *
+     * Drawn in the hull's frame (`states`), so it banks and squashes with it.
+     */
+    void drawModeLamp(const EnemyComponent& ec, const enemyarch::ArchetypeDef& adef,
+        const sf::RenderStates& states, bool stunned)
+    {
+        const bool range = (ec.duelShift == DuelShift::Disengage) ? true
+            : (ec.duelShift == DuelShift::DiveWindup || ec.duelShift == DuelShift::Dive)
+                ? false : (ec.duelMode == DuelMode::Range);
+        const sf::Color base = range ? adef.lampRange : adef.lampMelee;
+        const bool broken = stunned || ec.staggerTimer > 0.f;
+        const bool evading = ec.duelEvading() && !broken;
+
+        // ---- Brightness ----
+        float b, phase = 0.f;
+        if (broken) b = 0.30f;
+        else if (evading) b = (std::fmod(m_enemyAnimTime * 11.f, 1.f) < 0.5f) ? 1.f : 0.22f;
+        else {
+            const float hz = range ? 1.5f : 3.0f;
+            phase = std::fmod(m_enemyAnimTime * hz, 1.f);
+            // Snap up, ease down: a heartbeat rather than a sine wave.
+            b = 0.55f + 0.45f * (1.f - phase) * (1.f - phase);
+        }
+        const auto scale = [](sf::Color c, float k) {
+            return sf::Color(static_cast<uint8_t>(std::clamp(c.r * k, 0.f, 255.f)),
+                static_cast<uint8_t>(std::clamp(c.g * k, 0.f, 255.f)),
+                static_cast<uint8_t>(std::clamp(c.b * k, 0.f, 255.f)));
+        };
+        const sf::Color fillC = scale(base, b);
+        // Rim: toward white at the top of the beat, so the lamp has a hard
+        // bright edge against the plate around it.
+        const float wr = std::clamp((b - 0.55f) / 0.45f, 0.f, 1.f) * 0.6f;
+        const sf::Color rimC(
+            static_cast<uint8_t>(fillC.r + (255 - fillC.r) * wr),
+            static_cast<uint8_t>(fillC.g + (255 - fillC.g) * wr),
+            static_cast<uint8_t>(fillC.b + (255 - fillC.b) * wr), 255);
+
+        // ---- Pulse ring: the lamp's own outline, swelling and fading ----
+        if (!broken && !evading) {
+            const float k = 1.f + 0.9f * phase;
+            m_lampScratch.clear();
+            for (const auto& v : adef.lamp)
+                m_lampScratch.push_back(adef.lampCentre + (v - adef.lampCentre) * k);
+            const auto ring = enemyarch::geom::outlineStrip(m_lampScratch, 1.2f);
+            if (ring.size() >= 4) {
+                const uint8_t a = static_cast<uint8_t>(190.f * (1.f - phase) * (1.f - phase));
+                sf::VertexArray r(sf::PrimitiveType::TriangleStrip, ring.size());
+                for (size_t n = 0; n < ring.size(); ++n)
+                    r[n] = sf::Vertex{ ring[n], sf::Color(base.r, base.g, base.b, a) };
+                m_window->draw(r, states);
+            }
+        }
+
+        // ---- The lamp ----
+        sf::VertexArray body(sf::PrimitiveType::Triangles, adef.lampTris.size());
+        for (size_t n = 0; n < adef.lampTris.size(); ++n)
+            body[n] = sf::Vertex{ adef.lampTris[n], fillC };
+        m_window->draw(body, states);
+
+        const auto rim = enemyarch::geom::outlineStrip(adef.lamp, 1.1f);
+        if (rim.size() >= 4) {
+            sf::VertexArray r(sf::PrimitiveType::TriangleStrip, rim.size());
+            for (size_t n = 0; n < rim.size(); ++n) r[n] = sf::Vertex{ rim[n], rimC };
+            m_window->draw(r, states);
+        }
+    }
+
     void drawBashCrescent(const TransformComponent& tf, const enemyarch::ArchetypeDef& adef,
         float u, sf::Color col, bool lunging) {
         const float arcCos = std::clamp(adef.config["bash_arc_cos"].get_or(0.30f), -0.9f, 0.95f);
@@ -1599,6 +2171,62 @@ private:
         return sf::Color(static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b));
     }
 
+    /**
+     * @brief The lancer charging: both side spikes pour into the central one.
+     * Lines from each side spike tip to the maw tip, flickering brighter and
+     * thicker as it fills, and a bone-white core swelling at the maw. Locked:
+     * full, with a red rim on the core -- the next frame is light.
+     */
+    void drawLancerCharge(const TransformComponent& tf, const enemyarch::ArchetypeDef& adef,
+        float u, bool locked)
+    {
+        const sol::table& c = adef.config;
+        const float sc = c["scale"].get_or(1.f);
+        float mx = 0.f, my = -50.f, sx = 22.f, sy = -48.f;
+        if (sol::optional<sol::table> m = c["lancer_maw"]) { mx = (*m)["x"].get_or(mx); my = (*m)["y"].get_or(my); }
+        if (sol::optional<sol::table> s = c["lancer_spike"]) { sx = (*s)["x"].get_or(sx); sy = (*s)["y"].get_or(sy); }
+        const float r = tf.rotation * 3.14159265f / 180.f;
+        const float cr = std::cos(r), sr = std::sin(r);
+        const auto w = [&](float x, float y) {
+            x *= sc; y *= sc;
+            return tf.position + sf::Vector2f(x * cr - y * sr, x * sr + y * cr);
+            };
+        const sf::Vector2f maw = w(mx, my), L = w(-sx, sy), Rt = w(sx, sy);
+        const float flick = locked ? 1.f : 0.75f + 0.25f * std::sin(m_enemyAnimTime * 50.f);
+        const sf::Color line(250, 244, 230, static_cast<uint8_t>((60.f + 180.f * u) * flick));
+        const float lw = 1.f + 1.8f * u;
+        drawBand(L, maw, lw, line, line);
+        drawBand(Rt, maw, lw, line, line);
+        // spike tips glow too, draining into the core
+        const float tipS = 1.5f + 2.5f * (locked ? 0.3f : 1.f - u * 0.6f);
+        const float coreS = locked ? 8.f + 1.5f * std::sin(m_enemyAnimTime * 40.f) : 2.f + 6.f * u;
+        const auto diamond = [&](sf::Vector2f p, float s, sf::Color col) {
+            sf::VertexArray d(sf::PrimitiveType::TriangleFan, 4);
+            d[0] = sf::Vertex{ p + sf::Vector2f(0.f, -s), col };
+            d[1] = sf::Vertex{ p + sf::Vector2f(s, 0.f), col };
+            d[2] = sf::Vertex{ p + sf::Vector2f(0.f, s), col };
+            d[3] = sf::Vertex{ p + sf::Vector2f(-s, 0.f), col };
+            m_window->draw(d);
+            };
+        diamond(L, tipS, line);
+        diamond(Rt, tipS, line);
+        if (locked) diamond(maw, coreS + 3.f, sf::Color(255, 70, 50, 230));
+        diamond(maw, coreS, sf::Color(250, 244, 230, 250));
+    }
+
+    /// Lancer beams: a red rim and a bone-white core that thins as it fades.
+    /// A reflected beam (the player's) burns yellow, the parry colour.
+    void drawBeams() {
+        for (const auto& b : m_em->beams) {
+            const float f = std::clamp(b.timer / std::max(0.001f, b.maxTimer), 0.f, 1.f);
+            const sf::Color rim = b.reflected ? sf::Color(255, 220, 60, static_cast<uint8_t>(190 * f))
+                                              : sf::Color(255, 70, 50, static_cast<uint8_t>(190 * f));
+            drawBand(b.a, b.b, b.width * (1.1f + 0.9f * (1.f - f)), rim, rim);
+            const sf::Color core(250, 244, 230, static_cast<uint8_t>(255 * f));
+            drawBand(b.a, b.b, b.width * 0.45f * f + 1.f, core, core);
+        }
+    }
+
     void drawShockRings() const {
         for (const auto& r : m_em->shockRings) {
             const float u = std::clamp(1.f - (r.timer / std::max(0.0001f, r.maxTimer)), 0.f, 1.f);
@@ -1760,4 +2388,6 @@ private:
     float m_magmaPulseTime = 0.f;
     const enemyarch::EnemyRegistry* m_enemyReg = nullptr;   // added for archetype access
     std::vector<sf::Vector2f> m_outlineScratch;             // reused across enemies
+    std::vector<sf::Vector2f> m_lampScratch;                // mode lamp pulse ring
+    float m_chaos = 0.f;                                    // longest feral timer this frame
 };

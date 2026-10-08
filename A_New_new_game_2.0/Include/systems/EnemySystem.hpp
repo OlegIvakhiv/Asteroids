@@ -356,6 +356,32 @@ private:
             sf::Vector2f(std::cos(angle) * dist, std::sin(angle) * dist);
 
         m_ef->createEnemy(*m_em, spawnPos, *m_lua, m_worldId, *m_registry, chosen, dormant);
+
+        // ---- Escort: a pack leader arrives with his pack ----
+        // `escort = { "RAIDER", ... }` on the archetype (the Bloodseeker). In
+        // list order, as many as still fit the SAME gates the director just
+        // applied -- per-unit cap, faction cap, threat budget -- so an escort
+        // never breaks a zone's numbers. Never for an ambusher: a dead hull
+        // with a live squad around it is no disguise.
+        if (dormant) return;
+        sol::optional<sol::table> escort = def.config["escort"];
+        if (!escort) return;
+        int units = liveUnits + 1;
+        int threat = liveThreat + def.threatCost;
+        ++m_liveCount[chosen];
+        for (size_t k = 1; k <= escort->size(); ++k) {
+            const std::string key = (*escort)[k].get_or<std::string>("");
+            const uint8_t id = m_registry->idOf(key);
+            if (id == enemyarch::INVALID_ARCHETYPE) continue;
+            const auto& a = archetypes[id];
+            if (units >= maxActive || threat + a.threatCost > maxThreat) break;
+            if (m_liveCount[id] >= a.maxActive) continue;
+            const float ea = (rand() % 360) * 3.14159f / 180.f;
+            const float er = 130.f + rand() % 90;
+            m_ef->createEnemy(*m_em, spawnPos + sf::Vector2f(std::cos(ea), std::sin(ea)) * er,
+                *m_lua, m_worldId, *m_registry, id, false);
+            ++units; threat += a.threatCost; ++m_liveCount[id];
+        }
     }
 
     // ---- Dependencies ----

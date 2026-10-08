@@ -1250,6 +1250,7 @@ public:
         bc.ownerEntityId = ownerEntityId;
         bc.damage = damage;
         bc.playerIframes = cfg["bullet_iframes"].get_or(0.8f);   // 0.8 == old hardcode
+        bc.poiseMult = cfg["bullet_poise_mult"].get_or(1.f);      // Wardog chaff: 0.1
         em.bullets.push_back(bc);
 
         em.healths.push_back({ entityId });
@@ -1592,13 +1593,21 @@ private:
                 }
             }
         }
-        if (auto t = field("thrusters")) {
-            src.thrusters = readLuaPoints(*t);
-            for (auto& v : src.thrusters) { v.x *= k; v.y *= k; }
-        }
+        // No thrusters from here. An archetype's `thrusters` are flame
+        // emitters, not hardware -- the live hull draws nothing there -- so
+        // drawing nozzle housings on its wreck or its dormant disguise gave
+        // both away. Player stock hulls get theirs from stockNozzles().
         if (auto t = field("turrets")) {
             src.turrets = readLuaPoints(*t);
             for (auto& v : src.turrets) { v.x *= k; v.y *= k; }
+        }
+        // The live turret's size, carried to this scale: k / the archetype's
+        // own scale. A dormant hull (k == scale) gets exactly turret_size.
+        {
+            const float archScale = arch ? (*arch)["scale"].get_or(1.f) : config["scale"].get_or(1.f);
+            const float tsz = config["turret_size"].get_or(
+                arch ? (*arch)["turret_size"].get_or(10.f) : 10.f);
+            src.turretSize = tsz * k / std::max(0.01f, archScale);
         }
         if (auto scars = field("scars")) {
             for (size_t i = 1; i <= scars->size(); ++i) {

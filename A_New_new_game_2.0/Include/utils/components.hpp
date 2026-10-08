@@ -201,9 +201,24 @@ struct PlayerComponent {
     // ---- Overdrive (the perfect-vent reward) ----
     float overdriveTimer = 0.f;    // Heat cannot rise while > 0
 
-    // ---- Perfect parry ----
-    float perfectParryFlash = 0.f;
-    int   perfectParryChain = 0;   // Consecutive perfects, for feedback scaling
+    // ---- Parry re-arm (every bullet / ship parry; DamageSystem::onParryRearm) ----
+    float parryChainTimer = 0.f;   // >0: the chain is still live
+    int   parryChain = 0;          // Consecutive re-arms; each grants fewer i-frames
+
+    // ---- Perfect dodge (refit ships) ----
+    // A dodge whose i-frames actually ATE an enemy attack refunds its energy
+    // and re-arms on the spot (DamageSystem::onDodgeAte). Classes without a
+    // shoulder bash also PHASE through enemy hulls for the i-frames.
+    float    dodgeIframeTimer = 0.f;   // >0: inside THIS dodge's i-frames
+    bool     dodgeAte = false;         // this dodge already paid out
+    bool     dodgePhased = false;      // enemy collisions are off right now
+    uint64_t dodgeSavedMask = 0;       // the mask to restore
+    int      dodgeChain = 0;           // consecutive paid-out dodges
+    float    dodgeChainTimer = 0.f;    // >0: the chain is still live
+    float    dodgeTrailTimer = 0.f;    // >0: a perfect dodge is still shedding ghosts
+    float    dodgeTrailTick = 0.f;
+    float    dodgeVerdictFlash = 0.f;  // HUD "PERFECT DODGE" readout
+    bool     dodgeVerdictBash = false; // ...it was a PERFECT SHOULDER BASH
 
 };
 
@@ -285,6 +300,31 @@ struct BulletComponent {
     float mineFuseTime = 2.f;           // Fuse length, carried per mine so the
     // countdown comes from the archetype
     // rather than from a global
+
+    // ---- Death-chaos (Bloodseeker) ----
+    // >0 = fired by a FERAL Rakshari: it damages other enemy ships too, by
+    // damage x this. 0 (every ordinary round) = enemy hulls stop it dead and
+    // take nothing, exactly as before. LAST on purpose: createRiftBolt builds
+    // this struct positionally, and a field added in the middle would shift
+    // its arguments onto the wrong members.
+    float feralMult = 0.f;
+
+    // ---- Appended after feralMult, same reason ----
+    // Poise this round chips off the player, x the usual. 1 = unchanged.
+    // Wardogs fire at 0.1: chaff damage, next to no stagger pressure.
+    float poiseMult = 1.f;
+    // A Maniac TOSS mine: thrown armed and already lit. Does not count
+    // against mine_max_active (it is gone in a second and a half).
+    bool  mineTossed = false;
+    // 1 = leaves a hot trace (the Barge's heavy slug). WeaponSystem emits it.
+    uint8_t trail = 0;
+    // A parried Maniac rocket that has picked a victim: steered every frame
+    // onto this entity (0 = none). See DamageSystem::parryRocket.
+    uint32_t seekTargetId = 0;
+    float    seekWobble = 0.f;          // phase of its drunken weave
+    float    seekSpeed = 0.f;           // >0 = seeking (px/s, constant)
+    float    seekTurn = 0.f;            // deg/s it can bend
+    float    seekWobbleAmp = 0.f;       // deg of weave at range; shrinks as it closes
 };
 
 // ============================================================================
@@ -440,6 +480,39 @@ struct ScreenFlash {
 };
 
 // An expanding ring outline in world space (explosions, parry hits, etc).
+/**
+ * @brief A hitscan beam to resolve (the Bloodseeker's lancer).
+ *
+ * AISystem raises it the frame the lancer fires; DamageSystem resolves it
+ * at the top of the next frame (like a bash strike): everything on the line
+ * is hit at once -- it is light, it does not travel. A parry reflects it
+ * like a mirror off the shield's curve and the reflection is the player's.
+ */
+struct BeamShot {
+    sf::Vector2f origin;
+    sf::Vector2f dir;                   ///< Unit
+    float    range = 1200.f;
+    float    width = 14.f;              ///< Hit width, px
+    float    damage = 45.f;             ///< To the player
+    float    iframes = 0.6f;
+    float    knockback = 1000.f;
+    float    pierceDamage = 600.f;      ///< To a ship too big to kill outright
+    float    killHp = 500.f;            ///< maxHp at or under this: destroyed
+    float    objectDamage = 9999.f;     ///< Rocks and wrecks
+    uint32_t ownerId = 0;               ///< Never hits this entity
+    bool     byPlayer = false;          ///< A reflection: the player's now
+    int      bounce = 0;
+};
+
+/// The drawn beam: core + rim, fading over its life.
+struct BeamFx {
+    sf::Vector2f a, b;
+    float timer = 0.35f;
+    float maxTimer = 0.35f;
+    float width = 14.f;
+    bool  reflected = false;
+};
+
 struct ShockRing {
     sf::Vector2f position;
     float startRadius = 20.f;
@@ -636,6 +709,67 @@ enum class BashState : uint8_t {
     Recover     // Short. Longer if it whiffed.
 };
 
+/**
+ * @brief The Bloodseeker's two fighting modes.
+ *
+ * MELEE is the Berserker kit (spray while closing, bash, ram chain). RANGE
+ * keeps distance and fights with the gun; it never bashes or rams. Each mode
+ * reads its own Lua table (the archetype for MELEE, `duel_range` for RANGE),
+ * so a mode is a whole config swap rather than a pile of if-statements.
+ */
+enum class DuelMode : uint8_t { Melee = 0, Range };
+
+/**
+ * @brief The committed move between the two modes. Each owns the ship.
+ *
+ *   Disengage    MELEE -> RANGE. Backpedals for distance, nose on the
+ *                player, and perfectly dodges plasma and Rift bolts while it
+ *                does. Parry, contact, kinetic rocks and AoE still land.
+ *   DiveWindup   RANGE -> MELEE, the read: brake, swing on, prow flare.
+ *   Dive         The rush. No contact damage and no i-frames -- shoot him,
+ *                sidestep him, or parry him. Reaching bash range hands off to
+ *                a normal bash with its FULL cyan windup.
+ *   DiveRecover  Overshot or ran out of rush. The punish window.
+ *
+ * Two MELEE tricks reuse this machine rather than adding a third one:
+ *
+ *   FeintBreak     A bash windup that stops halfway. The cyan crescent is
+ *                  gone the same frame, the hull stops dead, retros flare.
+ *                  The half-beat hesitation: this is the tell.
+ *   FeintFallback  Backpedals and fires a short spray. Hits a player still
+ *                  stuck in a parry whiff; a player who waited just steps.
+ *
+ * The ram cancel needs no state of its own: the charge stops, and he goes
+ * straight into DiveWindup/Dive with `duelTrick` set.
+ */
+enum class DuelShift : uint8_t {
+    None = 0, Disengage, DiveWindup, Dive, DiveRecover, FeintBreak, FeintFallback,
+    ExecApproach,   // flying at a wounded ally; his back is to you
+    ExecStrike      // the gold windup, then the kill
+};
+
+/**
+ * @brief The Bloodseeker's RANGE-mode signature attacks. Each owns the ship.
+ *
+ *   LANCER  one fast, heavy round aimed where you WILL be.
+ *     Charge   aim tracks your lead; thin red lane from the prow.
+ *     Lock     aim frozen; the lane snaps bone-white. Change course NOW.
+ *     Recover  short. It is a shot, not a commitment.
+ *
+ *   CONE    suppressing fire into a locked wedge.
+ *     Windup   brakes to a stop, swings on, the wedge is drawn and fills in.
+ *     Fire     ROOTED: no movement, no turning, no dodging, no switching.
+ *     Recover  still rooted, barrels venting. The punish window.
+ *
+ * Both are parried, stunned or staggered out of like anything else; a stun or
+ * a tumble cancels the attack outright rather than pausing it.
+ */
+enum class DuelAttack : uint8_t {
+    None = 0,
+    LancerCharge, LancerLock, LancerRecover,
+    ConeWindup, ConeFire, ConeRecover
+};
+
 struct EnemyComponent {
     uint32_t entityId = 0;
 
@@ -670,6 +804,11 @@ struct EnemyComponent {
     // pause. Without it a low fire_rate reads as a hose: continuous fire has
     // no rhythm to learn and no gap to move into.
     int   shotsInBurst = 0;
+    // Charged burst (burst_windup): charge, then a committed volley.
+    bool  burstCharging = false;
+    int   volleyLeft = 0;
+    float volleyTimer = 0.f;
+    bool  burstBusy() const { return burstCharging || volleyLeft > 0; }
     float shotPauseTimer = 0.f;         // >0 = between bursts (drives a visible sway)
     float shotClearTimer = 0.f;         // Time since the last round left the barrel.
     // Melee units will not commit until it
@@ -712,6 +851,30 @@ struct EnemyComponent {
     float   turretBurstBaseAngle = 0.f;  // Fan centre, locked at wind-up end
     float   turretMuzzleFlash = 0.f;
 
+    // Turret vision (TurretSystem). The gun has its own eye: a cone along
+    // turretAngle. AISystem ORs turretSees into the hull's own sight, so
+    // either one spotting you triggers both -- they share one brain.
+    bool         turretSees = false;
+    float        turretScanPhase = 0.f;  // PATROL / ALERT sweep clock
+    sf::Vector2f turretLook;             // ALERT: where the brain last saw you
+    bool         turretHasLook = false;
+
+    // SHOTGUN BLAST (TurretSystem): close-range cone, telegraphed.
+    // 0 none, 1 tracking, 2 locked. Fires on the frame the lock runs out.
+    uint8_t shotgunState = 0;
+    float   shotgunTimer = 0.f;
+    float   shotgunDuration = 0.f;
+    float   shotgunCooldown = 0.f;
+    float   shotgunFlash = 0.f;          // >0 just after it went off: wedge flares
+
+    // SUMMON (AISystem, the Barge): the hull charges and spits Wardogs out
+    // of both sponsons. 0 none, 1 windup, 2 recover.
+    uint8_t  summonState = 0;
+    float    summonTimer = 0.f;
+    float    summonDuration = 0.f;
+    float    summonCooldown = -1000.f;   // sentinel: first delay not rolled yet
+    uint32_t summonedBy = 0;             // a summoned Wardog: who called it in
+
     // ---- Ram charge ----
     RamState     ramState = RamState::None;
     float        ramTimer = 0.f;
@@ -741,6 +904,7 @@ struct EnemyComponent {
     float        bashCooldown = 0.f;
     sf::Vector2f bashDir;                 // Locked at lunge start
     bool         bashStrikePending = false;
+    uint32_t     bashTargetId = 0;        // 0 = the player; else a ship (feral, death-chaos)
     bool         bashConnected = false;   // Strike resolved this lunge (hit OR parried)
 
     // ---- Mine run ----
@@ -753,6 +917,21 @@ struct EnemyComponent {
     float        mineRunDrop = 0.f;
     sf::Vector2f mineRunDir;
     float        mineRunCooldown = 0.f;
+    // The carpet can bend: 0 straight, 1 arc (bends round the player's
+    // side), 2 S-curve (flips half way). Signed turn rate, deg/s.
+    uint8_t      mineRunShape = 0;
+    float        mineRunCurve = 0.f;
+
+    // ---- Mine toss (Maniac) ----
+    // Get-off-me: he brakes, spins, and throws a ring of armed, lit mines
+    // round himself. 0 none, 1 windup, 2 spin, 3 recover.
+    uint8_t      tossState = 0;
+    float        tossTimer = 0.f;
+    float        tossDuration = 0.f;
+    float        tossCooldown = 0.f;
+    int          tossThrown = 0;
+    float        tossSpin = 1.f;         // +1 / -1
+    float        tossBaseAngle = 0.f;    // radians, first mine's bearing
 
     // ---- Frenzy (Maniac suicide charge) ----
     FrenzyState  frenzyState = FrenzyState::None;
@@ -803,6 +982,84 @@ struct EnemyComponent {
 
     /// Dormant or still rebooting: engines and guns are cold.
     bool powered() const { return !dormant && wakeTimer <= 0.f; }
+
+    // ---- Duelist (Bloodseeker): two modes and the moves between them ----
+    // Units with `duel_enabled = false` never touch any of this. AISystem
+    // owns the state machine; DamageSystem reads duelShift for the dodge and
+    // dive contracts, RenderSystem reads duelMode for the flame tell.
+    DuelMode     duelMode = DuelMode::Melee;
+    DuelShift    duelShift = DuelShift::None;
+    float        duelModeTimer = -1.f;    // Seconds to the next switch roll. <0 = unset
+    float        duelSwitchChance = 0.5f; // Chance of the next roll; +step per miss
+    float        duelShiftTimer = 0.f;
+    float        duelShiftDuration = 0.f;
+    sf::Vector2f duelDir;                 // Dive heading (steered, not railed)
+    float        duelEvadeTimer = 0.f;    // >0 = post-stun perfect-dodge window
+    bool         duelStunEvade = false;   // This stun came from a parry or a
+                                          // parried round: arm the window when
+                                          // it ends. Set by DamageSystem.
+    float        duelEvadeKick = 0.f;     // Disengage: cooldown between sidesteps
+
+    // ---- RANGE attacks (lancer / cone) ----
+    DuelAttack   duelAttack = DuelAttack::None;
+    float        duelAtkTimer = 0.f;
+    float        duelAtkDuration = 0.f;
+    sf::Vector2f duelAtkDir;              // Lancer aim / cone centre line
+    float        duelAtkFire = 0.f;       // Cone: time to the next round
+    float        duelLancerCd = 0.f;
+    float        duelConeCd = 0.f;
+    float        duelConeHalf = 22.f;     // deg, cached for RenderSystem
+    float        duelConeRange = 700.f;   // px, cached for RenderSystem
+
+    // ---- MELEE tricks (feint / ram cancel) ----
+    bool         duelTrick = false;       // This dive is a ram cancel: it must
+                                          // not reset the mode timer on landing
+    bool         bashFeint = false;       // This bash windup will break off
+    bool         bashHonest = false;      // Next bash was PROMISED (dive or ram
+                                          // cancel hand-off): it may not feint
+    bool         lastBashFeinted = false; // Halves the next feint roll
+    int          feintShotsLeft = 0;
+    float        feintShotTimer = 0.f;
+    bool         ramCancelRolled = false; // One reactive roll per ram link
+    float        ramCancelAt = -1.f;      // Planned cancel: charge time left
+                                          // at which it fires. <0 = none
+
+    /// Disengaging, or inside the post-stun window: plasma and Rift bolts
+    /// pass through (DamageSystem).
+    // ---- Pack (Bloodseeker aura / execution / death-chaos) ----
+    // Written by AISystem each frame; read by AISystem, TurretSystem and
+    // RenderSystem. 1.0 for every unit outside a pack, so nothing changes.
+    float        packMult = 1.f;          // Move speed + attack-cadence multiplier
+    uint8_t      packTier = 0;            // 0 none, 1 aura, 2 execution buff, 3 feral
+    float        execBuffTimer = 0.f;     // >0 = +exec_bonus from a recent execution
+    float        execBonus = 0.f;
+    float        feralTimer = 0.f;        // >0 = death-chaos: fights whoever is nearest
+    float        feralRetarget = 0.f;
+    float        feralRetargetTime = 1.f; // Stamped from death_chaos_retarget
+    uint32_t     feralTargetId = 0;       // 0 = the player
+    float        feralFrenzy = 0.25f;     // packMult bonus while feral
+    float        feralDamage = 1.5f;      // feralMult stamped on its rounds
+    bool         executed = false;        // Killed by a Bloodseeker: no scrap
+    uint32_t     execTargetId = 0;        // Bloodseeker: who he is going to kill
+    float        execCd = -1000.f;        // Bloodseeker: time to the next attempt.
+                                          // -1000 = unset: exec_first_delay
+    float        execRoll = 0.f;
+
+    bool duelEvading() const {
+        return duelShift == DuelShift::Disengage || duelEvadeTimer > 0.f;
+    }
+    /// Mid-dive: hull contact is not an attack (DamageSystem).
+    bool duelDiving() const {
+        return duelShift == DuelShift::DiveWindup || duelShift == DuelShift::Dive;
+    }
+    /// Any shift a stun, stagger or parry should break: everything except
+    /// the disengage, which a stun only pauses (and switches its dodge off).
+    bool duelBreakable() const {
+        return duelShift == DuelShift::DiveWindup || duelShift == DuelShift::Dive
+            || duelShift == DuelShift::DiveRecover || duelShift == DuelShift::FeintBreak
+            || duelShift == DuelShift::FeintFallback || duelShift == DuelShift::ExecApproach
+            || duelShift == DuelShift::ExecStrike;
+    }
 };
 
 // Debug-only area-of-effect marker (drawn as a fading ring by DebugSystem).

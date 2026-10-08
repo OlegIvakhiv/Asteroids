@@ -41,6 +41,7 @@
 #include <SFML/Graphics.hpp>
 #include <cmath>
 #include <algorithm>
+#include <cstdio>
 
 class HudSystem : public ISystem {
 public:
@@ -146,6 +147,21 @@ public:
 
         if (enRatio > costRatio) {
             drawCostMarker(x, y, 260.f, 13.f, enRatio - costRatio);
+        }
+
+        // ---- Perfect dodge verdict: beside the bar the refund lands in ----
+        // In the player's own dodge paint; a chain shows its count.
+        if (ps.dodgeVerdictFlash > 0.f && m_font) {
+            const float a = clamp01(ps.dodgeVerdictFlash / 0.9f);
+            const float bar = clamp01(a * 1.6f);
+            quad(x, y, 260.f * enRatio, 13.f, sf::Color(255, 255, 255, static_cast<uint8_t>(110 * bar)), 12.f);
+            char vb[48];
+            const char* what = ps.dodgeVerdictBash ? "PERFECT SHOULDER BASH" : "PERFECT DODGE";
+            if (ps.dodgeChain > 1) std::snprintf(vb, sizeof(vb), "%s x%d", what, ps.dodgeChain);
+            else                   std::snprintf(vb, sizeof(vb), "%s", what);
+            const sf::Color pc = ps.livery.paint.dodge;
+            ui::label(*m_window, m_font, x + 282.f, y - 3.f, vb, 15,
+                ui::alpha(sf::Color(pc.r, pc.g, pc.b), a));
         }
         y += 20.f;
 

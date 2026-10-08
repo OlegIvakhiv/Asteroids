@@ -274,6 +274,24 @@ weapon = {
     reflect_turn_rate = 420.0,  -- deg/sec steering authority
     reflect_lifetime  = 3.0,
 
+    -- ===== PARRIED MANIAC ROCKET: a seeker (playtest) =====
+    -- Picks a RANDOM victim in range -- any enemy ship or rock, never you;
+    -- ships weigh 3, rocks 1 -- marks it with a closing yellow ring, then
+    -- weaves drunkenly at it and ALWAYS arrives: no collisions on the way,
+    -- the weave tightens as it closes, detonation on its centre. Victim
+    -- dies first: it picks another. Nothing in range: plain wild flight.
+    parry_rocket_seek_range  = 1300.0,
+    parry_rocket_ship_weight = 3.0,
+    parry_rocket_rock_weight = 1.0,
+    parry_rocket_seek_speed  = 900.0,
+    parry_rocket_seek_turn   = 600.0,  -- deg/s; climbs x3 inside 200px
+    parry_rocket_wobble      = 55.0,   -- deg of weave far out; ~0 at the end
+    parry_rocket_hit_radius  = 30.0,
+
+    -- ===== MIRRORED LANCER (Bloodseeker beam parried) =====
+    lancer_reflect_damage    = 380.0,  -- to ships too big to destroy outright
+    lancer_reflect_kill_hp   = 500.0,  -- max HP at or under this: destroyed
+
     -- ===== DODGE PUNISH (was staggering on ~29% of all bullets) =====
     dodge_punish_chance     = 45.0,
     dodge_punish_min_damage = 40.0,  -- basic shots (25) never trigger it
@@ -336,27 +354,50 @@ overdrive_exit_heat  = 0.0     -- Heat set when overdrive ends. 0 = the plain
                                -- alone does not close the loop in playtesting.
 
 
--- ===== PERFECT PARRY =====
--- A parry counts as PERFECT when it connects in the first slice of its active
--- window -- i.e. you pressed just before the hit landed rather than pressing
--- early and waiting. Perfect parries on BULLETS and SHIPS skip the recovery
--- entirely and grant brief i-frames.
+-- ===== PARRY RE-ARM =====
+-- Every successful parry of a BULLET or a SHIP (and a mirrored lancer, and a
+-- parried rocket) skips the recovery -- re-armed at once, so a stream of
+-- rounds can be parried one after another -- and grants brief i-frames.
+-- (Until Oct 2026 this hid behind a "perfect timing" test that nearly always
+-- passed and nobody could feel; it was named "perfect parry". Same effect,
+-- honest rule. The old parry_perfect_* keys are still read as a fallback.)
 --
 -- Asteroids are excluded on purpose. Parrying a rock already pays out a kinetic
 -- weapon, which is the largest single reward in the game; adding free recovery
 -- and i-frames on top would make rock-parrying strictly better than every other
 -- defensive option. Rocks are also big and slow, so the timing is not the
 -- achievement there.
-parry_perfect_fraction = 0.45  -- First 45% of parry_window counts as perfect
-parry_perfect_cooldown = 0.12  -- Instead of parry_cooldown (1.0)
-parry_perfect_iframes  = 0.22  -- THIS is what fixes "parried one bullet and the
+parry_rearm_cooldown   = 0.12  -- Instead of parry_cooldown (1.0)
+parry_rearm_iframes    = 0.22  -- THIS is what fixes "parried one bullet and the
                                -- next one hit me anyway". Cancelling recovery
                                -- lets you parry again; it does not help against
                                -- a shot already in flight when the first
                                -- connected. Only i-frames cover that.
-parry_perfect_chain_falloff = 0.75  -- Each chained perfect gets this fraction
+parry_rearm_chain_falloff = 0.75    -- Each chained re-arm gets this fraction
                                     -- of the i-frames, so a parry-lock cannot
                                     -- be held indefinitely.
+
+-- ===== PERFECT DODGE (refit ships) =====
+-- A dodge whose i-frames actually EAT an enemy attack -- a round, a pellet,
+-- a bash, a ram, a dive, the lancer beam, a blast -- pays out once: the
+-- energy comes back and the dodge re-arms on the spot, with a ghost of the
+-- ship in your dodge paint. Rocks and scenery never count. Light and medium
+-- hulls also PHASE through enemy hulls for the i-frames, so a dodge through
+-- a ram or a Blood Dive passes through the attacker. The enemy is NOT
+-- slowed by any of this: a dodged bash or ram chain keeps coming -- dodging
+-- well is your reward, never theirs to back off from. The heavy keeps its
+-- shoulder bash instead -- and a shoulder bash inside a perfect dodge is a
+-- PERFECT SHOULDER BASH: it breaks the charge and you take nothing.
+-- A dodge's i-frames now also cover blasts (mines, rockets, suicides).
+dodge_perfect_refund        = 1.0   -- share of the dodge's energy back
+dodge_perfect_chain_falloff = 0.7   -- each chained payout refunds this x less
+dodge_perfect_chain_time    = 1.5   -- s without a payout and the chain resets
+dodge_perfect_trail_time    = 0.35  -- s of afterimage trail after a perfect dodge
+-- A NEAR MISS counts, not only a hit through the hull: inside the dodge's
+-- i-frames, an attacking hull (ram, dive, bash lunge) within this many px of
+-- the ship's edge, or an enemy round within this many px of its centre.
+dodge_graze_hull            = 55.0
+dodge_graze_bullet          = 40.0
 
 -- ============================================================================
 -- KEY BINDINGS
@@ -446,7 +487,7 @@ refit = {
 hull_classes = {
     light = {
         dash_distance = 290, dash_duration = 0.18, dash_iframes = 0.26,
-        dash_recovery = 0.22, dash_cost = 12, dash_carry = 0.20, dash_drift = 0.22,
+        dash_recovery = 0.12, dash_cost = 10, dash_carry = 0.20, dash_drift = 0.22,   -- WAS 0.22 / 12
         heat_capacity = 0.75, heat_cool = 1.40, heat_vent = 1.35, qte_window = 1.45,
         parry_window = 1.15, regen = 1.20,
 
@@ -460,7 +501,7 @@ hull_classes = {
     },
     medium = {
         dash_distance = 250, dash_duration = 0.21, dash_iframes = 0.20,
-        dash_recovery = 0.40, dash_cost = 15, dash_carry = 0.28, dash_drift = 0.32,
+        dash_recovery = 0.20, dash_cost = 15, dash_carry = 0.28, dash_drift = 0.32,   -- WAS 0.40
         heat_capacity = 1.0, heat_cool = 1.0, heat_vent = 1.0, qte_window = 1.0,
         parry_window = 1.0, regen = 1.0,
 
@@ -474,7 +515,7 @@ hull_classes = {
     },
     heavy = {
         dash_distance = 200, dash_duration = 0.27, dash_iframes = 0.12,
-        dash_recovery = 0.70, dash_cost = 20, dash_carry = 0.38, dash_drift = 0.45,
+        dash_recovery = 0.40, dash_cost = 20, dash_carry = 0.38, dash_drift = 0.45,   -- WAS 0.70
         heat_capacity = 1.35, heat_cool = 0.72, heat_vent = 0.80, qte_window = 0.65,
         parry_window = 0.85, regen = 0.85,
 

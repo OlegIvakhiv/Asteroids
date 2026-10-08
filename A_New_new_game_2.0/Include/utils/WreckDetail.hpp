@@ -80,13 +80,17 @@
  * authored hull unit; widths and hardware sizes are multiplied by it so a
  * scaled hull keeps its proportions.
  *
+ * 1.1: dead turrets are utils/TurretModel.hpp at Source::turretSize (the
+ * live gun's size), not a small ring. Rakshari wrecks carry no nozzles.
+ *
  * @author Oleg Ivakhiv
- * @version 1.0
+ * @version 1.1
  */
 
 #pragma once
 
 #include "core/EnemyArchetypes.hpp"   // enemyarch::geom
+#include "utils/TurretModel.hpp"      // the same gun the live hull carries
 #include <SFML/Graphics.hpp>
 #include <vector>
 #include <array>
@@ -120,6 +124,7 @@ namespace wreckdetail {
         std::vector<std::vector<sf::Vector2f>> scars;   ///< Polylines
         float scarWidth = 1.6f;                         ///< Authored units
         float unit = 1.f;                               ///< Pixels per authored unit
+        float turretSize = 10.f;                        ///< Pixels: live turret_size at this scale
     };
 
     struct Hole { sf::Vector2f c; float r = 0.f; std::vector<sf::Vector2f> pts; };
@@ -777,7 +782,10 @@ namespace wreckdetail {
         }
 
         // ---- 8. dead thrusters -----------------------------------------------
-        // Only where the hull still is: a nozzle floating past a bitten-off
+        // Player stock hulls only (stockNozzles): those drives are real
+        // hardware on the live ship. Rakshari hulls have no nozzle hardware
+        // -- their flame comes from bare emitters -- so their wrecks and
+        // dormant disguises draw none either. Only where the hull still is: a nozzle floating past a bitten-off
         // engine block reads as a bug, not as damage.
         for (const auto& t : src.thrusters) {
             if (!inside(t, m.hull)) continue;
@@ -792,29 +800,34 @@ namespace wreckdetail {
             fan(out, rect(2.1f, 1.6f), sf::Color(2, 3, 5));                     // cold bore
         }
 
-        // ---- 9. dead turrets, barrels drooping -------------------------------
-        static const std::array<sf::Vector2f, 8> BARREL{ {
-            { -3.f, 4.f }, { 3.f, 4.f }, { 3.f, -4.f }, { 1.f, -4.f },
-            { 1.f, -12.f }, { -1.f, -12.f }, { -1.f, -4.f }, { -3.f, -4.f } } };
+        // ---- 9. dead turrets: the live model, cold and slumped -----------
+        // TurretModel's polygons at the live gun's size (src.turretSize), so a
+        // dormant hull's gun is the one that wakes up and a dead hull's gun is
+        // the one that was shooting you. Slumped ~100 deg off the firing line;
+        // the small per-mount offset keeps two dead guns out of unison.
         for (const auto& tu : src.turrets) {
             if (!inside(tu, m.hull)) continue;
-            std::vector<sf::Vector2f> ring;
-            for (int k = 0; k < 14; ++k) {
-                const float a = k / 14.f * TAU;
-                ring.push_back({ tu.x + std::cos(a) * 5.2f * u, tu.y + std::sin(a) * 5.2f * u });
-            }
-            fan(out, ring, scale(cold, 0.25f));
-            loop(out, ring, thin, edgeLit, true);
-
-            // Slumped off its firing line; the tiny offset per mount keeps two
-            // dead turrets from drooping in perfect unison.
             const float rot = 1.75f + (tu.x / std::max(0.01f, u)) * 0.02f;
             const float cr = std::cos(rot), sr = std::sin(rot);
-            std::vector<sf::Vector2f> barrel;
-            for (const auto& p : BARREL)
-                barrel.push_back({ tu.x + (p.x * cr - p.y * sr) * u, tu.y + (p.x * sr + p.y * cr) * u });
-            fill(out, barrel, scale(cold, 0.30f));
-            loop(out, barrel, thin, edgeLit, true);
+            const auto place = [&](const std::vector<sf::Vector2f>& p) {
+                std::vector<sf::Vector2f> w;
+                w.reserve(p.size());
+                for (const auto& v : p)
+                    w.push_back({ tu.x + v.x * cr - v.y * sr, tu.y + v.x * sr + v.y * cr });
+                return w;
+                };
+            for (const auto& part : turretmodel::parts(src.turretSize)) {
+                const auto w = place(part.pts);
+                using turretmodel::Part;
+                switch (part.part) {
+                case Part::Rear:    fan(out, w, scale(cold, 0.22f)); loop(out, w, thin, edgeDim, true); break;
+                case Part::Barrel:  fan(out, w, scale(cold, 0.34f)); loop(out, w, thin, edgeDim, true); break;
+                case Part::Brake:   fan(out, w, scale(cold, 0.28f)); loop(out, w, thin, edgeLit, true); break;
+                case Part::Mantlet: fan(out, w, scale(cold, 0.30f)); loop(out, w, thin, edgeLit, true); break;
+                case Part::Housing: fan(out, w, scale(cold, 0.46f)); loop(out, w, thin, edgeLit, true); break;
+                case Part::Lane:    fan(out, w, sf::Color(2, 3, 5)); break;   // dead charge lane
+                }
+            }
         }
 
         // ---- 10. hard outline ------------------------------------------------

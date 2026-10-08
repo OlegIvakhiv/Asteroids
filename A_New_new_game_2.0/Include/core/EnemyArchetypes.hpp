@@ -46,7 +46,7 @@
  * fan sees straight through the gap. Ear clipping produces the real polygon.
  *
  * @author Oleg Ivakhiv
- * @version 1.1 -- scars (decals) and per-unit exhaust
+ * @version 1.3 -- plate trim (tint / tint_mix), elite plate edges, mode lamp
  */
 
 #pragma once
@@ -359,10 +359,40 @@ namespace enemyarch {
             std::vector<sf::Vector2f> tris;    ///< Ear-clipped at load
             float shade = 1.f;                 ///< Multiplies the LIVE hull fill
             bool  accent = false;              ///< Outline in the unit's accent
+
+            /// Trim: pull the plate toward a FIXED colour by `tintMix`
+            /// (0 = pure hull shade, the old look). This is the elite
+            /// gold / bone-white channel. It is a mix, not a replacement, so
+            /// a trimmed plate still whitens on a hit flash and still darkens
+            /// under stagger -- just less than the bare hull does, which
+            /// reads as metal that was never painted.
+            sf::Color tint{ 255, 255, 255 };
+            float     tintMix = 0.f;
+
+            /// Accent-plate edge as a triangle strip, built once at load
+            /// when the archetype sets `plate_edge_width` (see below).
+            std::vector<sf::Vector2f> edgeStrip;
         };
         /// Mirrored at load: author the starboard side only, unless the plate
         /// sets `mirror = false` (a centreline plate would double up).
         std::vector<Plate> plates;
+
+        /// ELITE TRIM: accent plates get a hard edge in this colour.
+        /// `plate_edge = { r=, g=, b= }` + `plate_edge_width` (px). Width 0
+        /// (the default) = off, which is every unit but the elites -- the
+        /// rank-and-file stay a patchwork of red shades.
+        sf::Color plateEdge{ 205, 160, 80 };
+        float     plateEdgeWidth = 0.f;
+
+        /// MODE LAMP: one small polygon on the hull drawn in a live, fixed
+        /// colour that does NOT follow the hull's state colour -- the
+        /// Bloodseeker's mode light (orange MELEE, blue-cyan RANGE).
+        /// `mode_lamp = { {x,y}, ... }` (whole shape, not mirrored).
+        std::vector<sf::Vector2f> lamp;          ///< CCW, scaled
+        std::vector<sf::Vector2f> lampTris;
+        sf::Vector2f              lampCentre;
+        sf::Color lampMelee{ 255, 140, 40 };
+        sf::Color lampRange{ 70, 200, 255 };
 
         /// Engine nozzle mounts, local space. Empty in Lua means the legacy
         /// single nozzle at (0, 22) -- which is exactly where EffectsSystem
@@ -570,6 +600,16 @@ namespace enemyarch {
                 base.shade = (*e)["shade"].get_or(1.35f);
                 base.accent = (*e)["accent"].get_or(false);
 
+                // Optional trim: `tint = { r=, g=, b= }` plus `tint_mix`.
+                sol::optional<sol::table> tint = (*e)["tint"];
+                if (tint) {
+                    base.tint = sf::Color(
+                        static_cast<uint8_t>(std::clamp((*tint)["r"].get_or(255.f), 0.f, 255.f)),
+                        static_cast<uint8_t>(std::clamp((*tint)["g"].get_or(255.f), 0.f, 255.f)),
+                        static_cast<uint8_t>(std::clamp((*tint)["b"].get_or(255.f), 0.f, 255.f)));
+                    base.tintMix = std::clamp((*e)["tint_mix"].get_or(0.7f), 0.f, 1.f);
+                }
+
                 sol::optional<sol::table> pts = (*e)["points"];
                 if (!pts) continue;
                 for (size_t k = 1; k <= pts->size(); ++k) {
@@ -605,6 +645,17 @@ namespace enemyarch {
                 }
             }
             return out;
+        }
+
+        /// `field = { r=, g=, b= }`, falling back channel by channel.
+        static sf::Color readColor(const sol::table& t, const char* field, sf::Color def) {
+            sol::object o = t[field];
+            if (!o.valid() || !o.is<sol::table>()) return def;
+            sol::table ct = o.as<sol::table>();
+            return sf::Color(
+                static_cast<uint8_t>(std::clamp(ct["r"].get_or(static_cast<float>(def.r)), 0.f, 255.f)),
+                static_cast<uint8_t>(std::clamp(ct["g"].get_or(static_cast<float>(def.g)), 0.f, 255.f)),
+                static_cast<uint8_t>(std::clamp(ct["b"].get_or(static_cast<float>(def.b)), 0.f, 255.f)));
         }
 
         static std::vector<sf::Vector2f> readPoints(const sol::table& t, const char* field) {
@@ -688,6 +739,30 @@ namespace enemyarch {
             // ---- Armour plates ----
             d.plates = readPlates(t, scale, key, d.visual);
 
+            // ---- Elite trim ----
+            d.plateEdgeWidth = std::max(0.f, t["plate_edge_width"].get_or(0.f));
+            d.plateEdge = readColor(t, "plate_edge", d.plateEdge);
+            if (d.plateEdgeWidth > 0.f)
+                for (auto& pl : d.plates)
+                    if (pl.accent) pl.edgeStrip = geom::outlineStrip(pl.points, d.plateEdgeWidth);
+
+            // ---- Mode lamp ----
+            d.lamp = readPoints(t, "mode_lamp");
+            for (auto& v : d.lamp) { v.x *= scale; v.y *= scale; }
+            if (d.lamp.size() >= 3) {
+                if (geom::signedArea(d.lamp) < 0.f) std::reverse(d.lamp.begin(), d.lamp.end());
+                if (!plateInsideHull(d.lamp, d.visual))
+                    std::cerr << "[EnemyRegistry] \"" << key << "\" mode_lamp pokes outside the "
+                        "hull. Drawn anyway -- fix the points.\n";
+                d.lampTris = geom::triangulate(d.lamp);
+                sf::Vector2f c(0.f, 0.f);
+                for (const auto& v : d.lamp) c += v;
+                d.lampCentre = c / static_cast<float>(d.lamp.size());
+            }
+            else d.lamp.clear();
+            d.lampMelee = readColor(t, "mode_lamp_melee", d.lampMelee);
+            d.lampRange = readColor(t, "mode_lamp_range", d.lampRange);
+
             // ---- Decals ----
             d.decalSegs = readPolylineSegs(t, "scars", scale);
 
@@ -733,6 +808,7 @@ namespace enemyarch {
                 << "  hitbox/silhouette=" << ratio
                 << "  turrets=" << d.turrets.size()
                 << "  plates=" << d.plates.size()
+                << (d.lamp.empty() ? "" : "  lamp=yes")
                 << "  scars=" << (d.decalSegs.size() / 2)
                 << "  nozzles=" << d.thrusters.size()
                 << "  r=" << d.radius << "\n";

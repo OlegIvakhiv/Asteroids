@@ -72,7 +72,7 @@ namespace ship {
         float dashDistancePx = 250.f;   ///< Ground covered by the burst itself (drift adds more)
         float dashDuration = 0.21f;     ///< Seconds of controlled burst
         float dashIframes = 0.20f;      ///< Invulnerability from the press
-        float dashRecovery = 0.40f;     ///< Seconds after the burst before the next dodge
+        float dashRecovery = 0.20f;     ///< Seconds after the burst before the next dodge
         float dashEnergyCost = 15.f;
         float dashCarry = 0.28f;        ///< Share of the burst's average speed kept when it ends
         float dashDrift = 0.32f;        ///< Seconds to bleed that carry back to your entry speed
@@ -120,7 +120,7 @@ namespace ship {
         switch (c) {
         case HullClass::Light:
             f.dashDistancePx = 290.f; f.dashDuration = 0.18f; f.dashIframes = 0.26f;
-            f.dashRecovery = 0.22f;   f.dashEnergyCost = 12.f;
+            f.dashRecovery = 0.12f;   f.dashEnergyCost = 10.f;
             f.dashCarry = 0.20f;      f.dashDrift = 0.22f;
             f.heatCapacity = 0.75f;   f.heatCool = 1.40f; f.heatVent = 1.35f; f.qteWindow = 1.45f;
             f.parryWindow = 1.15f;    f.regen = 1.20f;
@@ -132,7 +132,7 @@ namespace ship {
             break;   // all defaults
         case HullClass::Heavy:
             f.dashDistancePx = 200.f; f.dashDuration = 0.27f; f.dashIframes = 0.12f;
-            f.dashRecovery = 0.70f;   f.dashEnergyCost = 20.f;
+            f.dashRecovery = 0.40f;   f.dashEnergyCost = 20.f;
             f.dashCarry = 0.38f;      f.dashDrift = 0.45f;
             f.heatCapacity = 1.35f;   f.heatCool = 0.72f; f.heatVent = 0.80f; f.qteWindow = 0.65f;
             f.parryWindow = 0.85f;    f.regen = 0.85f;
