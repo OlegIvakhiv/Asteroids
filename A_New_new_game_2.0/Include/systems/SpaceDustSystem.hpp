@@ -48,7 +48,7 @@ class SpaceDustSystem : public ISystem {
 public:
     void init(const SystemContext& ctx) override {
         m_em = ctx.em;
-        m_window = ctx.window;
+        m_window = ctx.drawTarget();
         m_lua = ctx.lua;
         m_playerEntityId = ctx.playerEntityId;
         m_view = ctx.gameView;
@@ -202,7 +202,7 @@ private:
     sf::VertexArray m_verts{ sf::PrimitiveType::Lines };
 
     EntityManager* m_em = nullptr;
-    sf::RenderWindow* m_window = nullptr;
+    sf::RenderTarget* m_window = nullptr;   ///< ctx.drawTarget(): the window, or a hidden world's texture
     sol::state* m_lua = nullptr;
     sf::View* m_view = nullptr;
     zonearch::ZoneState* m_zone = nullptr;

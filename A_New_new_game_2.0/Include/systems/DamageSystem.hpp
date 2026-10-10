@@ -950,6 +950,7 @@ public:
                 sf::Vector2f deathPos = m_em->transforms[i].position;
 
                 if (type == BodyType::Asteroid) {
+                    if (m_em->healths[i].codexKey[0]) m_em->codexKills.emplace_back(m_em->healths[i].codexKey);
                     // Salvage pays out in scrap; plain rock (scrapMax 0) does
                     // not. scoreRewards is no longer credited anywhere -- it
                     // survives only as the size tag parry and Rift read.
@@ -1046,6 +1047,10 @@ public:
                     }
                 }
                 else if (type == BodyType::Enemy) {
+                    if (m_registry && i < m_em->enemies.size()) {
+                        const auto* ad = m_registry->byId(m_em->enemies[i].archetype);
+                        if (ad) m_em->codexKills.push_back(ad->key);
+                    }
                     // Executed by a Bloodseeker: the Rakshari kept that
                     // salvage. Only kills the PLAYER's fight caused pay out.
                     const bool executed = i < m_em->enemies.size() && m_em->enemies[i].executed;

@@ -42,7 +42,7 @@ public:
      */
     void init(const SystemContext& ctx) override {
         m_em = ctx.em;
-        m_window = ctx.window;
+        m_window = ctx.drawTarget();
     }
 
     /**
@@ -156,5 +156,5 @@ private:
 
     // ---- System dependencies (set via init) ----
     EntityManager* m_em = nullptr;
-    sf::RenderWindow* m_window = nullptr;
+    sf::RenderTarget* m_window = nullptr;   ///< ctx.drawTarget(): the window, or a hidden world's texture
 };

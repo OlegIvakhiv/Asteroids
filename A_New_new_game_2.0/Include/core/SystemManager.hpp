@@ -16,6 +16,7 @@
 #include "utils/DevState.hpp"
 #include "utils/ZoneArchetypes.hpp"
 #include "utils/LuaConfig.hpp"
+#include "utils/HunterRecord.hpp"
 
 // Include all system headers
 #include "systems/ISystem.hpp"
@@ -53,12 +54,21 @@ public:
     }
 
     ~SystemManager() {
+        // Window closed mid-run: it still counts as a contract, abandoned.
+        endRun(false);
+        m_record.saveIfDirty();
         if (b2World_IsValid(m_worldId)) {
             b2DestroyWorld(m_worldId);
         }
     }
 
     void init() {
+        // 0. The terminal's memory and its codex text. Both optional: a
+        //    missing record is a first launch, a missing codex.lua is a codex
+        //    with names and no field notes.
+        m_record.load();
+        loadCodexScript();
+
         // 1. Box2D World
         b2WorldDef worldDef = b2DefaultWorldDef();
         worldDef.gravity = { 0.0f, 0.0f };
@@ -126,6 +136,10 @@ public:
         m_refitSystem.setDesign(&m_shipDesign);
         m_refitSystem.setLivery(&m_livery);
 
+        m_menuSystem.setRecord(&m_record);
+        m_hunterLosses = m_record.lost();
+        m_menuSystem.setHunterLosses(m_hunterLosses);
+
         m_state = GameState::MainMenu;
     }
 
@@ -137,6 +151,9 @@ public:
         m_zoneSystem.applyIfDirty();
 
         m_menuSystem.setState(m_state, m_entityManager.scrap);
+        m_menuSystem.setShip(&m_shipDesign, &m_livery, m_refitSystem.shipName());
+        m_menuSystem.setRunSeconds(m_runTime);
+        if (m_state == GameState::Playing && m_runActive) m_runTime += realDt;
 
         // ====================================================================
         // 1. MENU STATES (no game logic)
@@ -243,9 +260,17 @@ public:
         // ----- 3f. HUD -----
         m_hudSystem.update(realDt);
 
+        // ----- 3f2. TUBE ON: the terminal switched the screen off on the way
+        //      out; flight switches it back on. No-op once it has finished.
+        m_menuSystem.overlay(realDt);
+
         // ----- 3g. GAME OVER OVERLAY -----
         if (m_state == GameState::GameOver) {
             m_menuSystem.update(realDt);
+            // Routes now finish their close animation before acting, so the
+            // action arrives here rather than from the keyboard path.
+            const MenuAction clicked = m_menuSystem.takeClickAction();
+            if (clicked != MenuAction::None) requestAction(clicked);
         }
 
         // ----- 3h. DEV MENU -- last, on top, and the only place dev actions
@@ -273,6 +298,8 @@ public:
             m_lua.script_file("scripts/asteroids.lua");
             m_lua.script_file("scripts/enemy.lua");
             m_enemyRegistry.load(m_lua);
+            loadCodexScript();
+            m_menuSystem.reloadText();
 
             // zones.lua is reloaded in the same breath, and the registry MUST
             // be rebuilt with it: every ZoneDef holds a sol::table into the old
@@ -408,12 +435,19 @@ public:
         switch (action) {
         case MenuAction::StartGame:
         case MenuAction::RestartGame:
+            endRun(false);              // PURGE AND RESTART abandons the live run
             restart();
+            m_record.beginRun();
+            m_runActive = true;
+            m_runTime = 0.f;
+            m_record.save();
             break;
         case MenuAction::ResumeGame:
             m_state = GameState::Playing;
             break;
         case MenuAction::QuitGame:
+            endRun(false);
+            m_record.saveIfDirty();
             m_window.close();
             break;
         case MenuAction::ShowTutorial:
@@ -437,6 +471,7 @@ public:
                 m_state = m_tutorialReturnTo;
             }
             else {
+                if (m_state == GameState::Paused) endRun(false);   // ABANDON
                 m_state = GameState::MainMenu;
             }
             m_menuSystem.setState(m_state);
@@ -497,15 +532,64 @@ private:
 
         m_devSystem.endPass();
 
+        // ---- CODEX: kills from this pass, sightings a few times a second ----
+        for (const auto& k : m_entityManager.codexKills) m_record.kill(k);
+        m_entityManager.codexKills.clear();
+        m_seenScan -= passDt;
+        if (m_seenScan <= 0.f) { m_seenScan = 0.25f; scanSightings(); }
+
         size_t playerIdx = m_entityManager.getEntityIndex(m_playerEntityId);
         if (playerIdx == (size_t)-1 && m_state != GameState::GameOver) {
             // Edge-triggered: this block re-runs every pass while dead,
             // so anything stateful in here MUST check the transition.
             m_state = GameState::GameOver;
-            m_hunterLosses++;
+            endRun(true);
+            m_hunterLosses = m_record.lost();
             m_menuSystem.setHunterLosses(m_hunterLosses);
         }
         return dt;
+    }
+
+    /// Close the live run into the record, once. Death passes lost = true.
+    void endRun(bool lost) {
+        if (!m_runActive) return;
+        m_runActive = false;
+        m_record.endRun(m_runTime, lost, m_entityManager.scrap);
+        m_record.save();
+    }
+
+    /// Open codex entries for everything currently on screen. Dormant hulls
+    /// are skipped: an ambush posing as a wreck must not show up in the
+    /// bestiary before it wakes.
+    void scanSightings() {
+        const size_t pi = m_entityManager.getEntityIndex(m_playerEntityId);
+        if (pi == (size_t)-1) return;
+        const sf::Vector2f c = m_cameraSystem.getWorldView().getCenter();
+        const sf::Vector2f half = m_cameraSystem.getWorldView().getSize() * 0.5f;
+        for (size_t i = 0; i < m_entityManager.physics.size(); ++i) {
+            if (i == pi || !b2Body_IsValid(m_entityManager.physics[i].bodyId)) continue;
+            const sf::Vector2f d = m_entityManager.transforms[i].position - c;
+            if (std::fabs(d.x) > half.x || std::fabs(d.y) > half.y) continue;
+            const BodyUserData* ud = bodyUD(m_entityManager.physics[i].bodyId);
+            if (!ud) continue;
+            if (ud->type == BodyType::Enemy && i < m_entityManager.enemies.size()) {
+                if (m_entityManager.enemies[i].dormant) continue;
+                const auto* a = m_enemyRegistry.byId(m_entityManager.enemies[i].archetype);
+                if (a) m_record.see(a->key);
+            }
+            else if (ud->type == BodyType::Asteroid && m_entityManager.healths[i].codexKey[0]) {
+                m_record.see(m_entityManager.healths[i].codexKey);
+            }
+        }
+    }
+
+    /// scripts/codex.lua: field notes for the CODEX. Never fatal.
+    void loadCodexScript() {
+        try { m_lua.script_file("scripts/codex.lua"); }
+        catch (const std::exception& e) {
+            std::cerr << "[SystemManager] scripts/codex.lua not loaded: " << e.what()
+                << "\n  The codex will show names without field notes.\n";
+        }
     }
 
     void serviceDevRequests() {
@@ -536,6 +620,12 @@ private:
     GameState m_tutorialReturnTo = GameState::MainMenu;
 
     int m_hunterLosses = 0;
+
+    // ---- The terminal's memory (saves/hunter_record.txt) ----
+    record::HunterRecord m_record;
+    bool  m_runActive = false;   ///< a contract is in progress and not yet recorded
+    float m_runTime = 0.f;       ///< seconds in the field, real time while Playing
+    float m_seenScan = 0.f;
 
     ship::ShipDesign m_shipDesign = ship::ShipDesign::stock();
     ship::Livery     m_livery;   ///< Paint, decals, cockpit. Persists across runs.

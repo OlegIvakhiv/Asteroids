@@ -79,6 +79,12 @@ Every gameplay input read goes through `isPressed()`. That is the one
 chokepoint that lets the dev menu block WASD without touching a single
 system.
 
+It is also what lets a hidden world be flown by an AI: while a
+`VirtualScope` holds a `VirtualPad`, `isPressed()` answers from the pad
+(physical key names, exactly what `key_bindings` maps to) and
+`virtualAim()` replaces InputSystem's mouse read with a world point.
+Nothing the player holds in the menu can leak into it.
+
 ================================================================================
 SHIP DESIGN — the player-authored hull
 ================================================================================
@@ -153,6 +159,55 @@ Handles three things every screen was doing badly:
      table so the Enter that opened a screen cannot immediately close it.
   3. Clip-local coordinates — widgets drawn inside a `beginClip()`
      hit-test correctly without the caller converting coordinates by hand.
+
+Optional DESIGN SPACE: `setDesignSize({1920, 1080})` authors a screen on a
+fixed canvas, letterboxed into the window at a uniform scale. The terminal
+uses it; the refit bay does not (yet).
+
+### `TermDraw.hpp`
+Batched flat geometry for the live terminal panels (one draw call for a
+whole feed frame), plus hull meshes: the player's refit-bay design with
+its livery, and enemy archetypes coloured as in flight. Anything the menu
+draws of a SHIP comes through here, so a hull edit shows up on F5.
+
+### `ShadowWorld.hpp`
+A second, hidden copy of the game: its own EntityManager, factory, Box2D
+world, camera and every gameplay system, wired the way SystemManager wires
+the real ones, rendering into its own `sf::RenderTexture` (through
+`SystemContext::target`). The hunter is flown through a `VirtualPad`
+(InputRegistry) instead of the keyboard, installed only while its logic
+runs. Cut off from the real game on purpose: its own ZoneState (never
+dirty, no ZoneSystem), its own DevState, no HunterRecord, no game over.
+Must not move after `build()` (systems hold pointers into it); `build()`
+again restarts the scene.
+
+### `HunterPilot.hpp`
+An AI that flies a player ship by pressing the player's keys -- move,
+lead-aim, fire, dash across rams and rounds (late: a perfect dodge), parry
+bashes / rounds / rocks, Rift Bolt into a cluster detonated at the closest
+pass, answer the vent QTE, collect scrap. `Skill` makes feed hunters
+mortal; `Orders` let a doctrine scene script the ship without leaving the
+real input path.
+
+### `LiveFeed.hpp`
+The tactical feed: a ShadowWorld running the real director, asteroid
+spawner and AI, with a random hunter (class, paint, skill). The camera is
+the game's CameraSystem, leaned toward the hunter's target. A quiet field
+gets a new pack. At zero hull the feed ends its hunter (own-hull wreckage),
+SIGNAL LOST, and drops in the next one.
+
+### `DoctrineStage.hpp`
+FIELD DOCTRINE: eight looping scenes of real gameplay (flight, gunnery,
+turbo, salvage; dodge, parry, rift bolt, vent) on a ShadowWorld with the
+player's own ship and paints and the real HUD. Each scene places the
+enemy / rocks and gives the pilot orders; the pilot reacts to the enemy's
+actual state, so the perfect dodge in DODGE is a real ram eaten by real
+i-frames. `lit()` drives the keycaps.
+
+### `HunterRecord.hpp`
+The terminal's memory, `saves/hunter_record.txt`: contracts, hunters
+lost, the last 16 runs, and CODEX sightings / kills. Plain text, one
+record per line, written at the end of a run and on quit.
 
 ### `ZoneArchetypes.hpp`
 Zone definitions loaded from `zones.lua` — the "tileset" layer. A zone

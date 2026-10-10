@@ -818,6 +818,13 @@ public:
             const size_t n = std::min(ct.size(), sizeof(dst) - 1);
             std::memcpy(dst, ct.data(), n);
             dst[n] = '\0';
+
+            // CODEX: which bestiary entry this object opens when seen/killed.
+            const std::string ck = config["codex"].get_or<std::string>("");
+            auto& kdst = em.healths.back().codexKey;
+            const size_t kn = std::min(ck.size(), sizeof(kdst) - 1);
+            std::memcpy(kdst, ck.data(), kn);
+            kdst[kn] = '\0';
         }
 
         em.bullets.push_back({ entityId });

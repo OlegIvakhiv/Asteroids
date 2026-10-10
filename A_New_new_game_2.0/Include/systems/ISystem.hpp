@@ -54,6 +54,15 @@ struct SystemContext {
     /// def() returning nullptr is the supported "no zones.lua" path -- every
     /// consumer falls back to its pre-zone behaviour rather than failing.
     zonearch::ZoneState* zone = nullptr;
+    /// Where world-drawing systems draw. Null = the window. A hidden world
+    /// (utils/ShadowWorld: the terminal's live feed and doctrine scenes) sets
+    /// its own sf::RenderTexture here; `window` stays the real window, which
+    /// only input code reads.
+    sf::RenderTarget* target = nullptr;
+
+    sf::RenderTarget* drawTarget() const {
+        return target ? target : static_cast<sf::RenderTarget*>(window);
+    }
 };
 
 /**

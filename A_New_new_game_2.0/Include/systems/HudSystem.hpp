@@ -47,7 +47,7 @@ class HudSystem : public ISystem {
 public:
     void init(const SystemContext& ctx) override {
         m_em = ctx.em;
-        m_window = ctx.window;
+        m_window = ctx.drawTarget();
         m_lua = ctx.lua;
         m_playerEntityId = ctx.playerEntityId;
         m_time = 0.f;
@@ -410,7 +410,7 @@ private:
     // MEMBERS
     // ========================================================================
     EntityManager* m_em = nullptr;
-    sf::RenderWindow* m_window = nullptr;
+    sf::RenderTarget* m_window = nullptr;   ///< ctx.drawTarget(): the window, or a hidden world's texture
     sol::state* m_lua = nullptr;
     const sf::Font* m_font = nullptr;
     uint32_t m_playerEntityId = 0;

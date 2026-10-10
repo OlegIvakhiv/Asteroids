@@ -202,6 +202,7 @@ public:
         debris.clear();
         wreckShards.clear();
         scrapPickups.clear();
+        codexKills.clear();
         // NOTE: `stars` is deliberately NOT cleared -- the starfield is
         // cosmetic background, not game state, and initBackground() is
         // expensive-ish (regenerates 800 stars with an RNG loop).
@@ -262,6 +263,11 @@ public:
 
     // ===== Scrap: the currency =====
     int scrap = 0;                                ///< Player's scrap balance this run
+
+    /// CODEX kills raised this pass (archetype keys, asteroid `codex` keys).
+    /// DamageSystem pushes, SystemManager drains into the hunter record after
+    /// every logic pass -- so this never grows past one pass of deaths.
+    std::vector<std::string> codexKills;
     std::vector<ScrapPickup> scrapPickups;        ///< Loose scrap in the field
 
     /**

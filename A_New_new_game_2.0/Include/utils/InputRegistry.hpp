@@ -4,6 +4,28 @@
 #include <map>
 #include <string>
 
+/**
+ * @brief A pretend keyboard + mouse for a ship nobody is holding.
+ *
+ * The terminal's live feed and the doctrine scenes run the REAL gameplay
+ * systems on a hidden world (utils/ShadowWorld). Their hunter is flown by an
+ * AI pilot (utils/HunterPilot) that writes here instead of touching hardware.
+ * Keys are PHYSICAL names ("W", "Space", "MouseLeft"), exactly what
+ * key_bindings maps actions to, so the systems cannot tell the difference.
+ */
+struct VirtualPad {
+    std::map<std::string, bool> keys;   ///< physical key name -> held
+    bool         aimSet = false;
+    sf::Vector2f aim{ 0.f, 0.f };       ///< world-space mouse position
+
+    void clear() { keys.clear(); aimSet = false; }
+    void set(const std::string& key, bool down) { if (!key.empty()) keys[key] = down; }
+    bool held(const std::string& key) const {
+        const auto it = keys.find(key);
+        return it != keys.end() && it->second;
+    }
+};
+
 class InputRegistry {
 public:
     static void init() {
@@ -37,6 +59,9 @@ public:
     }
 
     static bool isPressed(const std::string& name) {
+        // A virtual pad, while one is installed, IS the keyboard: nothing the
+        // player is holding in the menu may leak into a hidden world.
+        if (s_pad) return s_pad->held(name);
         if (s_keyMap.count(name))   return !s_blockKeys && sf::Keyboard::isKeyPressed(s_keyMap[name]);
         if (s_mouseMap.count(name)) return !s_blockMouse && sf::Mouse::isButtonPressed(s_mouseMap[name]);
         return false;
@@ -57,10 +82,36 @@ public:
         s_blockMouse = mouse;
     }
 
+    /// The aim point, when a virtual pad provides one (InputSystem's mouse read).
+    static bool virtualAim(sf::Vector2f& out) {
+        if (!s_pad || !s_pad->aimSet) return false;
+        out = s_pad->aim;
+        return true;
+    }
+    static bool virtualActive() { return s_pad != nullptr; }
+
+    /**
+     * @brief Install a virtual pad for the lifetime of this object.
+     *
+     * Scoped on purpose: ShadowWorld wraps its logic passes in one, so the
+     * real keyboard is back the instant the hidden world finishes stepping,
+     * even if a system throws.
+     */
+    class VirtualScope {
+    public:
+        explicit VirtualScope(const VirtualPad* pad) : m_prev(s_pad) { s_pad = pad; }
+        ~VirtualScope() { s_pad = m_prev; }
+        VirtualScope(const VirtualScope&) = delete;
+        VirtualScope& operator=(const VirtualScope&) = delete;
+    private:
+        const VirtualPad* m_prev;
+    };
+
 private:
     // inline static = defined here, no separate .cpp needed (C++17)
     inline static std::map<std::string, sf::Keyboard::Key> s_keyMap;
     inline static std::map<std::string, sf::Mouse::Button> s_mouseMap;
     inline static bool s_blockKeys = false;
     inline static bool s_blockMouse = false;
+    inline static const VirtualPad* s_pad = nullptr;
 };

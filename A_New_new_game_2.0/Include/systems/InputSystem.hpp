@@ -266,11 +266,16 @@ public:
             rotationSpeed *= 0.25f + 0.75f * u * u;
         }
 
-        sf::View savedView = m_window->getView();
-        m_window->setView(m_gameView ? *m_gameView : savedView);
-        sf::Vector2i mousePos = sf::Mouse::getPosition(*m_window);
-        sf::Vector2f worldPos = m_window->mapPixelToCoords(mousePos);
-        m_window->setView(savedView);
+        // A hidden-world pilot aims in world space directly (InputRegistry::
+        // VirtualPad); only a real player goes through the mouse.
+        sf::Vector2f worldPos;
+        if (!InputRegistry::virtualAim(worldPos)) {
+            sf::View savedView = m_window->getView();
+            m_window->setView(m_gameView ? *m_gameView : savedView);
+            sf::Vector2i mousePos = sf::Mouse::getPosition(*m_window);
+            worldPos = m_window->mapPixelToCoords(mousePos);
+            m_window->setView(savedView);
+        }
 
         b2Vec2 b2Pos = b2Body_GetPosition(bodyId);
         sf::Vector2f currentPos(b2Pos.x * SCALE, b2Pos.y * SCALE);

@@ -172,6 +172,10 @@ public:
     bool wantsExit() const { return m_exit; }
     void clearExit() { m_exit = false; }
 
+    /// The hangar name of the design in the bay ("" = never named). The main
+    /// terminal shows it as the hunter's callsign.
+    const std::string& shipName() const { return m_shipName; }
+
     void update(float dt) override {
         if (!m_window || !m_font || !m_design) return;
         dt = std::clamp(dt, 0.f, 0.1f);

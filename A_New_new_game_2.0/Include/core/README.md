@@ -22,6 +22,11 @@ half-constructed world. It is also why anything MUTABLE the systems need
 by `SystemManager` — a value would freeze at whatever it was when the game
 started.
 
+`target` is where world-drawing systems draw (`drawTarget()`: the window
+when null). A hidden world (utils/ShadowWorld: the terminal's live feed and
+doctrine scenes) points it at its own render texture; `window` stays the
+real one for input code.
+
 Nothing in `core/` derives from `ISystem`. It is the interface, not an
 implementation.
 

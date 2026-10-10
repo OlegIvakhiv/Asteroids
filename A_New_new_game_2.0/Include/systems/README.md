@@ -198,14 +198,17 @@ uses comes from `UiPalette.hpp` — do not hardcode a colour here, the HUD
 and menu are supposed to speak the same language.
 
 ### `MenuSystem.hpp`
-The terminal front end. Main menu, pause, game over, tutorial. Boot
-sequence on cold start only — coming back from a dead run snaps in,
-because the machine is already awake.
+The terminal front end. Boot, main menu, CODEX, field doctrine (live
+reels), pause, game over. Boot sequence on cold start only — coming back
+from a dead run snaps in, because the machine is already awake.
 
-Purely screen-space. Owns its own selection state. Does NOT own the
-GameState itself; `SystemManager` calls `setState()` so this system knows
-which screen to draw, and reads `confirmSelection()`'s result to
-transition.
+Purely screen-space, on a 1920x1080 design canvas. Owns its own pages,
+selection state and transitions. Does NOT own the GameState itself;
+`SystemManager` calls `setState()` so this system knows which screen to
+draw. Routes are taken AFTER the page has folded shut on its centre line:
+`confirmSelection()` starts the close and the resulting `MenuAction`
+arrives through `takeClickAction()`, which SystemManager polls in every
+menu state (game over included).
 
 ### `RefitSystem.hpp`
 The refit bay. Hull editor (hitbox), model editor (silhouette), paint

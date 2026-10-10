@@ -570,6 +570,11 @@ struct HealthComponent {
     // worse in every way than 16 bytes inline.
     char childType[16] = { 0 };
 
+    /// CODEX entry this object opens (`codex` in asteroids.lua): ASTEROID,
+    /// MAGMATIC, SALVAGE, WRECK... Same inline-buffer reasoning as childType.
+    /// Empty = not catalogued (nothing is recorded for it).
+    char codexKey[16] = { 0 };
+
     /// A SECOND thing it can break into, and the percent chance per child.
     /// Rolled independently for each fragment, so a dying Barge can shed one
     /// reactor and two scrap piles rather than all-or-nothing.

@@ -48,8 +48,18 @@
  * active clip origin and hit-tests against localMouse(), so a button works
  * identically inside or outside a clip and callers never convert by hand.
  *
+ * ============================================================================
+ * DESIGN SPACE (1.1)
+ * ============================================================================
+ * setDesignSize({1920, 1080}) switches the layer from window pixels to a fixed
+ * design canvas, letterboxed to fit the window at a uniform scale. Layout is
+ * then authored once, in one coordinate system, and a 1632x918 window shows
+ * exactly the screen a 1920x1080 one does -- the terminal used to re-flow its
+ * fractions per window and squeeze text that does not scale. Off by default:
+ * screens that never call it (the refit bay) keep working in window pixels.
+ *
  * @author Oleg Ivakhiv
- * @version 1.0
+ * @version 1.1 (design space)
  */
 
 #pragma once
@@ -195,19 +205,44 @@ namespace tui {
         // VIEW & LAYOUT
         // ------------------------------------------------------------------
 
-        /// Screen-space view matching the CURRENT framebuffer. Never getDefaultView().
-        sf::View uiView() const {
-            const sf::Vector2u s = m_window->getSize();
-            return sf::View(sf::FloatRect({ 0.f, 0.f },
-                { static_cast<float>(std::max(1u, s.x)),
-                  static_cast<float>(std::max(1u, s.y)) }));
+        /// Fixed design canvas, letterboxed into the window. {0,0} = off.
+        void setDesignSize(sf::Vector2f s) { m_design = s; }
+        bool designed() const { return m_design.x > 0.f && m_design.y > 0.f; }
+
+        /// The normalised window rect the design canvas occupies.
+        sf::FloatRect letterbox() const {
+            if (!designed()) return sf::FloatRect({ 0.f, 0.f }, { 1.f, 1.f });
+            const sf::Vector2f w = windowSize();
+            const float sx = w.x / m_design.x, sy = w.y / m_design.y;
+            const float s = std::min(sx, sy);
+            const float vw = m_design.x * s / w.x, vh = m_design.y * s / w.y;
+            return sf::FloatRect({ (1.f - vw) * 0.5f, (1.f - vh) * 0.5f }, { vw, vh });
         }
 
-        sf::Vector2f size() const {
+        /// Screen-space view matching the CURRENT framebuffer. Never getDefaultView().
+        /// In design mode: the design canvas, letterboxed.
+        sf::View uiView() const {
+            if (designed()) {
+                sf::View v(sf::FloatRect({ 0.f, 0.f }, m_design));
+                v.setViewport(letterbox());
+                return v;
+            }
+            const sf::Vector2f s = windowSize();
+            return sf::View(sf::FloatRect({ 0.f, 0.f }, s));
+        }
+
+        /// Whole window in raw pixels, letterbox bars included.
+        sf::View windowView() const {
+            return sf::View(sf::FloatRect({ 0.f, 0.f }, windowSize()));
+        }
+
+        sf::Vector2f windowSize() const {
             const sf::Vector2u s = m_window->getSize();
             return { static_cast<float>(std::max(1u, s.x)),
                      static_cast<float>(std::max(1u, s.y)) };
         }
+
+        sf::Vector2f size() const { return designed() ? m_design : windowSize(); }
 
         Rect frac(float x, float y, float w, float h) const {
             const sf::Vector2f s = size();
@@ -269,12 +304,16 @@ namespace tui {
         void beginClip(const Rect& r) {
             const sf::Vector2u ws = m_window->getSize();
             if (ws.x == 0 || ws.y == 0 || r.w <= 0.f || r.h <= 0.f) return;
-            const float W = static_cast<float>(ws.x), H = static_cast<float>(ws.y);
+            // Normalised against the canvas, then placed inside its letterbox.
+            const sf::Vector2f S = size();
+            const sf::FloatRect lb = letterbox();
 
             sf::View v;
             v.setSize({ r.w, r.h });
             v.setCenter({ r.w * 0.5f, r.h * 0.5f });
-            v.setViewport(sf::FloatRect({ r.x / W, r.y / H }, { r.w / W, r.h / H }));
+            v.setViewport(sf::FloatRect(
+                { lb.position.x + r.x / S.x * lb.size.x, lb.position.y + r.y / S.y * lb.size.y },
+                { r.w / S.x * lb.size.x, r.h / S.y * lb.size.y }));
             m_window->setView(v);
 
             m_clip = r;
@@ -628,6 +667,8 @@ namespace tui {
         sf::RenderWindow* m_window = nullptr;
         sf::Font* m_font = nullptr;
         sf::Font* m_mono = nullptr;
+
+        sf::Vector2f m_design{ 0.f, 0.f };   ///< {0,0} = window pixels
 
         float m_time = 0.f;
         float m_openTimer = 0.f;

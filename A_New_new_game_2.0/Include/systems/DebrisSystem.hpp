@@ -54,7 +54,7 @@ class DebrisSystem : public ISystem {
 public:
     void init(const SystemContext& ctx) override {
         m_em = ctx.em;
-        m_window = ctx.window;
+        m_window = ctx.drawTarget();
     }
 
     void update(float dt) override {
@@ -284,5 +284,5 @@ private:
     sf::VertexArray m_wreckVerts{ sf::PrimitiveType::Triangles };
 
     EntityManager* m_em = nullptr;
-    sf::RenderWindow* m_window = nullptr;
+    sf::RenderTarget* m_window = nullptr;   ///< ctx.drawTarget(): the window, or a hidden world's texture
 };
