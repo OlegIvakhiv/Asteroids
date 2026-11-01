@@ -55,6 +55,7 @@
 #include <memory>
 #include <algorithm>
 #include <cmath>
+#include <functional>
 
 #include "core/EntityManager.hpp"
 #include "core/EntityFactory.hpp"
@@ -93,11 +94,11 @@ public:
         float             spawnAngle = 0.f;      ///< degrees, 0 = nose up (screen -Y)
         ship::ShipDesign  design = ship::ShipDesign::preset(ship::HullClass::Medium);
         ship::Livery      livery;
-        bool director  = false;                  ///< faction spawn director (real enemy waves)
+        bool director = false;                  ///< faction spawn director (real enemy waves)
         bool asteroids = false;                  ///< the real asteroid spawner
-        bool hud       = false;                  ///< draw the real HUD into the texture
-        bool god       = false;                  ///< hunter takes no damage (EntityManager::godMode)
-        int  stars     = 260;
+        bool hud = false;                  ///< draw the real HUD into the texture
+        bool god = false;                  ///< hunter takes no damage (EntityManager::godMode)
+        int  stars = 260;
         std::size_t capacity = 4096;             ///< ECS reserve -- load-bearing, see reserveAll()
     };
 
@@ -210,7 +211,6 @@ public:
         if (!ready()) return;
         realDt = std::clamp(realDt, 0.f, 0.05f);
         if (realDt <= 0.f) return;
-        m_lastDt = 0.f;
         {
             InputRegistry::VirtualScope scope(&m_pad);
             const int passes = realDt > 1.f / 30.f ? 2 : 1;
@@ -222,7 +222,10 @@ public:
     }
 
     /// Draw the frame into the texture (does not touch the window).
-    void render(sf::Color voidColor = sf::Color(3, 5, 8)) {
+    /// `overlay` runs last, in texture pixels (default view), before display:
+    /// the doctrine draws its captions, callouts and inset window there.
+    void render(sf::Color voidColor = sf::Color(3, 5, 8),
+        const std::function<void(sf::RenderTexture&)>& overlay = {}) {
         if (!ready()) return;
         sf::RenderTexture& t = *m_rt;
         t.clear(voidColor);
@@ -237,8 +240,35 @@ public:
         t.setView(t.getDefaultView());
         m_render.drawScreenSpace();
         if (m_setup.hud) m_hud.update(m_lastDt);
+        if (overlay) { t.setView(t.getDefaultView()); overlay(t); }
         t.display();
+        // Draw-side integration (particles, debris) consumes the time stepped
+        // since the last frame: a frame with no step -- a doctrine freeze --
+        // draws a still picture.
+        m_lastDt = 0.f;
     }
+
+    /**
+     * @brief Draw the world-space pass again through another view.
+     *
+     * For an inset window: give `v` a viewport and the same world is drawn a
+     * second time into that corner of the texture. dt 0 -- nothing advances,
+     * the inset only LOOKS. Call from inside render()'s overlay.
+     */
+    void drawWorld(const sf::View& v) {
+        if (!ready()) return;
+        m_rt->setView(v);
+        m_dust.update(0.f);
+        m_debris.update(0.f);
+        m_scrapSys.draw();
+        m_particle.update(0.f);
+        m_render.update(0.f);
+        m_rt->setView(m_rt->getDefaultView());
+    }
+
+    /// Where the real HUD put each bar last frame (texture px).
+    const HudSystem::Layout& hudLayout() const { return m_hud.layout(); }
+    sf::Vector2f shakeOffset() const { return m_camera.getShakeOffset(); }
 
     // ---- Access for the pilot and the scene director ----
     VirtualPad& pad() { return m_pad; }
@@ -263,9 +293,11 @@ public:
 
     /// Spawn a unit by archetype key, ignoring the director (EnemySystem::summon).
     uint32_t summon(const std::string& key, sf::Vector2f pos) { return m_enemy.summon(key, pos); }
-    /// Spawn one asteroid of an asteroids.lua type.
+    /// Spawn one asteroid of an asteroids.lua type. `vel` is in PIXELS/s
+    /// like everything else here; EnemySystem::spawnAsteroid takes metres/s
+    /// (it goes straight to Box2D), so it is converted on the way in.
     uint32_t rock(const std::string& type, sf::Vector2f pos, sf::Vector2f vel = { 0.f, 0.f }) {
-        return m_enemy.spawnAsteroid(type, pos, vel);
+        return m_enemy.spawnAsteroid(type, pos, vel / SCALE);
     }
 
 private:
@@ -286,6 +318,9 @@ private:
         // Nobody records a hidden world's kills: count them, then drop them.
         m_kills += static_cast<int>(m_em.codexKills.size());
         m_em.codexKills.clear();
+        // Same for sound: the feed and doctrine raise it like the real game,
+        // and nobody plays it yet. Cleared so it cannot pile up.
+        m_em.sounds.clear();
         return dt;
     }
 

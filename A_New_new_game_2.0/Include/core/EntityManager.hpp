@@ -74,6 +74,23 @@ struct BodyUserData {
     uint32_t entityId;
 };
 
+/**
+ * @brief One sound request (see EntityManager::sounds, AudioSystem).
+ *
+ * `id` is a key in scripts/sounds.lua and MUST be a string literal: only the
+ * pointer is kept. A null id with a key is a STOP for whatever plays under
+ * that key.
+ */
+struct SoundEvent {
+    const char*  id = nullptr;
+    sf::Vector2f pos{ 0.f, 0.f };
+    bool         positional = true;   ///< false = screen sound (terminal, HUD)
+    float        gain = 1.f;
+    float        pitch = 1.f;
+    float        offset = 0.f;        ///< start this many seconds into the file
+    uint64_t     key = 0;             ///< retrigger / stop handle; 0 = fire and forget
+};
+
 // ----------------------------------------------------------------------------
 // BodyUserData access -- the ONE place the void* cast lives.
 // Every entity body gets a BodyUserData in EntityFactory; a null result means
@@ -157,6 +174,7 @@ public:
         wreckShards.reserve(256);
         // A kill drops at most 12 cubes; they live ~30s unless collected.
         scrapPickups.reserve(512);
+        sounds.reserve(256);
     }
 
 
@@ -203,6 +221,7 @@ public:
         wreckShards.clear();
         scrapPickups.clear();
         codexKills.clear();
+        sounds.clear();
         // NOTE: `stars` is deliberately NOT cleared -- the starfield is
         // cosmetic background, not game state, and initBackground() is
         // expensive-ish (regenerates 800 stars with an RNG loop).
@@ -270,6 +289,25 @@ public:
     std::vector<std::string> codexKills;
     std::vector<ScrapPickup> scrapPickups;        ///< Loose scrap in the field
 
+    // ===== SOUND =====
+    /// Sound requests raised this frame. Any system pushes (sfx / sfxUi),
+    /// AudioSystem drains it once per frame -- the same raise-then-drain
+    /// shape as codexKills. A ShadowWorld clears its own copy every pass, so
+    /// the terminal's hidden games never leak sound into the real one.
+    /// `id` must be a string literal: only the pointer is stored.
+    std::vector<SoundEvent> sounds;
+
+    /// A world sound at a position (attenuated and panned from the camera).
+    void sfx(const char* id, sf::Vector2f pos, float gain = 1.f, float pitch = 1.f) {
+        SoundEvent e; e.id = id; e.pos = pos; e.gain = gain; e.pitch = pitch;
+        sounds.push_back(e);
+    }
+    /// A screen sound: terminal, HUD. No position, never time-scaled.
+    void sfxUi(const char* id, float gain = 1.f, float pitch = 1.f) {
+        SoundEvent e; e.id = id; e.positional = false; e.gain = gain; e.pitch = pitch;
+        sounds.push_back(e);
+    }
+
     /**
      * @brief Throw `total` scrap out of a kill as a burst of cubes.
      *
@@ -300,6 +338,7 @@ public:
             p.size = std::min(8.5f, 3.2f + 1.3f * std::sqrt(static_cast<float>(p.value)));
             scrapPickups.push_back(p);
         }
+        sfx("scrap.drop", pos);
     }
 
     // ===== DEV =====

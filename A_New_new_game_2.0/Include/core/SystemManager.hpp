@@ -43,6 +43,7 @@
 #include "systems/VentQTESystem.hpp"        // vent QTE and overdrive
 #include "systems/DevSystem.hpp"            // tilde dev menu
 #include "systems/ZoneSystem.hpp"           // zone visuals + background props
+#include "systems/AudioSystem.hpp"          // sound: sounds.lua, voices, watchers
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -128,6 +129,7 @@ public:
         m_menuSystem.init(ctx);
         m_zoneSystem.init(ctx);
         m_devSystem.init(ctx);
+        m_audioSystem.init(ctx);            // loads scripts/sounds.lua on the first call
         m_devSystem.setSystems(&m_enemySystem, &m_aiSystem, &m_debugSystem, &m_zoneSystem);
         if (m_shipDesign.mountedGuns().empty() && m_shipDesign.mountedEngines().empty())
             m_shipDesign.autoMount();
@@ -306,6 +308,7 @@ public:
             // Lua tables and re-running the script replaces those. Same
             // stale-handle trap the enemy registry has.
             reloadZones();
+            m_audioSystem.reload();         // sounds.lua: gains, caps, new files
             std::cout << "Scripts reloaded!" << std::endl;
             return true;
         }
@@ -314,6 +317,12 @@ public:
             return false;
         }
     }
+
+    /**
+     * @brief Sound, once per frame, in every state. Called by game.cpp after
+     *        update(): by then every system has raised this frame's sounds.
+     */
+    void updateAudio(float realDt) { m_audioSystem.frame(realDt, m_state); }
 
     // Accessors for main.cpp (if needed)
     EntityManager& getEntityManager() { return m_entityManager; }
@@ -374,7 +383,11 @@ public:
     /// Called by game.cpp when the menu confirms StartGame/RestartGame.
     void restart() {
         // 1. Free BodyUserData + clear all ECS vectors (does NOT touch Box2D)
+        //    Sounds raised this frame survive it: the ENGAGE clamp that asked
+        //    for this restart was raised a moment ago and has not played yet.
+        std::vector<SoundEvent> pendingSounds = std::move(m_entityManager.sounds);
         m_entityManager.reset();
+        m_entityManager.sounds = std::move(pendingSounds);
 
         // 2. Tear down and recreate the Box2D world
         if (b2World_IsValid(m_worldId)) {
@@ -420,6 +433,7 @@ public:
         m_menuSystem.init(ctx);
         m_zoneSystem.init(ctx);
         m_devSystem.init(ctx);
+        m_audioSystem.init(ctx);            // new ids: forget every per-entity sound
         if (m_shipDesign.mountedGuns().empty() && m_shipDesign.mountedEngines().empty())
             m_shipDesign.autoMount();
 
@@ -533,7 +547,10 @@ private:
         m_devSystem.endPass();
 
         // ---- CODEX: kills from this pass, sightings a few times a second ----
-        for (const auto& k : m_entityManager.codexKills) m_record.kill(k);
+        for (const auto& k : m_entityManager.codexKills) {
+            if (!k.empty() && !m_record.seen(k)) m_entityManager.sfxUi("term.codex.entry");
+            m_record.kill(k);
+        }
         m_entityManager.codexKills.clear();
         m_seenScan -= passDt;
         if (m_seenScan <= 0.f) { m_seenScan = 0.25f; scanSightings(); }
@@ -558,6 +575,13 @@ private:
         m_record.save();
     }
 
+    /// A sighting. The first one for a key opens its codex entry -- and says so.
+    void catalogue(const std::string& key) {
+        if (key.empty()) return;
+        if (!m_record.seen(key)) m_entityManager.sfxUi("term.codex.entry");
+        m_record.see(key);
+    }
+
     /// Open codex entries for everything currently on screen. Dormant hulls
     /// are skipped: an ambush posing as a wreck must not show up in the
     /// bestiary before it wakes.
@@ -575,10 +599,10 @@ private:
             if (ud->type == BodyType::Enemy && i < m_entityManager.enemies.size()) {
                 if (m_entityManager.enemies[i].dormant) continue;
                 const auto* a = m_enemyRegistry.byId(m_entityManager.enemies[i].archetype);
-                if (a) m_record.see(a->key);
+                if (a) catalogue(a->key);
             }
             else if (ud->type == BodyType::Asteroid && m_entityManager.healths[i].codexKey[0]) {
-                m_record.see(m_entityManager.healths[i].codexKey);
+                catalogue(m_entityManager.healths[i].codexKey);
             }
         }
     }
@@ -652,6 +676,7 @@ private:
     DebrisSystem m_debrisSystem;
     ScrapSystem  m_scrapSystem;
     MenuSystem m_menuSystem;
+    AudioSystem m_audioSystem;
 
     // ---- Zones ----
     zonearch::ZoneRegistry m_zoneRegistry;

@@ -1065,6 +1065,23 @@ struct EnemyComponent {
             || duelShift == DuelShift::FeintFallback || duelShift == DuelShift::ExecApproach
             || duelShift == DuelShift::ExecStrike;
     }
+
+    // ---- Scene direction (utils/DoctrineStage). Inert in the game. ----
+    // A doctrine scene has to play out the same way on every loop, so it can
+    // take the unit's own choices away: no ram / bash / shooting of its own,
+    // rounds aimed exactly at the hunter, and `cue` = start that ONE attack
+    // now, every range, cooldown, squad and dice gate skipped. The attack
+    // itself -- windup, tell, lunge, damage, stagger -- runs on the normal
+    // code, which is the point.
+    enum class Cue : uint8_t { None = 0, Ram, Bash, Shoot };
+    struct Direction {
+        bool on = false;
+        bool noRam = false, noBash = false, noShoot = false;
+        bool perfectAim = false;
+        Cue  cue = Cue::None;
+    };
+    Direction direct;
+    bool cued(Cue c) const { return direct.on && direct.cue == c; }
 };
 
 // Debug-only area-of-effect marker (drawn as a fading ring by DebugSystem).

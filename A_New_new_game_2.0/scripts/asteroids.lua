@@ -22,6 +22,7 @@ asteroid_types = {
     -- Fast, fragile, low point value.
     -- ========================================================================
     SMALL = {
+        codex = "ASTEROID",   -- CODEX entry (scripts/codex.lua)
         color = { r = 100, g = 100, b = 110 },     -- Light gray-blue tint
         base_size = 0.3,                           -- Radius in meters (9 pixels at 30px/m)
         density = 2.0,                             -- Low density = lightweight
@@ -52,6 +53,7 @@ asteroid_types = {
     -- Balanced speed and durability.
     -- ========================================================================
     MEDIUM = {
+        codex = "ASTEROID",   -- CODEX entry (scripts/codex.lua)
         color = { r = 60, g = 55, b = 50 },        -- Dark brown/gray
         base_size = 0.7,                           -- Radius in meters (21 pixels)
         density = 5.5,                             -- Medium density
@@ -82,6 +84,7 @@ asteroid_types = {
     -- Slow but very durable, high point value.
     -- ========================================================================
     LARGE = {
+        codex = "ASTEROID",   -- CODEX entry (scripts/codex.lua)
         color = { r = 60, g = 55, b = 50 },        -- Dark brown/gray (same as medium)
         base_size = 1.5,                           -- Radius in meters (45 pixels)
         density = 10.0,                            -- High density = heavy
@@ -114,6 +117,7 @@ asteroid_types = {
     -- Strategy: Keep your distance or use as a weapon against enemies.
     -- ========================================================================
     MAGMATIC = {
+        codex = "MAGMATIC",   -- CODEX entry (scripts/codex.lua)
         color = { r = 255, g = 80, b = 40 },        -- Bright lava orange/red
         base_size = 0.9,                            -- Between medium and large (27 pixels)
         density = 6.0,                              -- Quite heavy
@@ -198,6 +202,7 @@ asteroid_types = {
 
     -- Two lumps welded together. Kept simple: at 10px across, detail is noise.
     SCRAP_CHUNK = {
+        codex = "SALVAGE",   -- CODEX entry (scripts/codex.lua)
         color     = { r = 168, g = 128, b = 98 },
         base_size = 0.32, density = 2.2, hp = 12, score_reward = 12,
         speed_range = { 6.5, 8.5 },
@@ -209,6 +214,7 @@ asteroid_types = {
 
     -- Medium pile -- same size band as a MEDIUM asteroid, on purpose.
     SCRAP = {
+        codex = "SALVAGE",   -- CODEX entry (scripts/codex.lua)
         color     = { r = 104, g = 74, b = 56 },
         base_size = 0.70, density = 4.0, hp = 32, score_reward = 55,
         speed_range = { 5.5, 7.0 },
@@ -222,6 +228,7 @@ asteroid_types = {
     -- A mountain of strapped salvage -- same band as a LARGE asteroid.
     -- Five lobes: the most knotted thing in the field.
     SCRAP_LARGE = {
+        codex = "SALVAGE",   -- CODEX entry (scripts/codex.lua)
         color     = { r = 58, g = 40, b = 28 },
         base_size = 1.50, density = 5.0, hp = 115, score_reward = 190,
         speed_range = { 4.2, 5.6 },
@@ -276,6 +283,7 @@ asteroid_types = {
     -- ---------------- WRECKS: player stock hulls ----------------
 
     WRECK_LIGHT = {
+        codex = "WRECK",   -- CODEX entry (scripts/codex.lua)
         color = { r = 78, g = 80, b = 85 },
         wreck_of_class = "LIGHT",
         wreck_damage = { light = 3, heavy = 4 },
@@ -288,6 +296,7 @@ asteroid_types = {
     },
 
     WRECK_MEDIUM = {
+        codex = "WRECK",   -- CODEX entry (scripts/codex.lua)
         color = { r = 75, g = 75, b = 79 },
         wreck_of_class = "MEDIUM",
         wreck_damage = { light = 3, heavy = 4 },
@@ -304,6 +313,7 @@ asteroid_types = {
     -- Tier 2 gives 3 fragments; child_alt at 100% turns exactly one of them
     -- into a live core, so a heavy wreck always reads as "2 piles and a bomb".
     WRECK_HEAVY = {
+        codex = "WRECK",   -- CODEX entry (scripts/codex.lua)
         color = { r = 66, g = 67, b = 70 },
         wreck_of_class = "HEAVY",
         wreck_damage = { light = 3, heavy = 4 },
@@ -320,6 +330,7 @@ asteroid_types = {
     -- ---------------- WRECKS: Rakshari roster ----------------
 
     WRECK_RAIDER = {
+        codex = "WRECK",   -- CODEX entry (scripts/codex.lua)
         color = { r = 74, g = 60, b = 56 },
         wreck_of = "RAIDER",
         wreck_damage = { light = 3, heavy = 4 },
@@ -332,6 +343,7 @@ asteroid_types = {
     },
 
     WRECK_BERSERKER = {
+        codex = "WRECK",   -- CODEX entry (scripts/codex.lua)
         color = { r = 76, g = 58, b = 54 },
         wreck_of = "BERSERKER",
         wreck_damage = { light = 3, heavy = 4 },
@@ -344,6 +356,7 @@ asteroid_types = {
     },
 
     WRECK_MANIAC = {
+        codex = "WRECK",   -- CODEX entry (scripts/codex.lua)
         color = { r = 80, g = 64, b = 50 },
         wreck_of = "MANIAC",
         wreck_damage = { light = 3, heavy = 4 },
@@ -356,6 +369,7 @@ asteroid_types = {
     },
 
     WRECK_BARGE = {
+        codex = "WRECK",   -- CODEX entry (scripts/codex.lua)
         color = { r = 78, g = 62, b = 56 },
         wreck_of = "BARGE",
         wreck_damage = { light = 3, heavy = 4 },
@@ -381,6 +395,7 @@ asteroid_types = {
     -- six plates, open vents) -- the same object as UNSTABLE_CORE below, just
     -- smaller and only ever coughed up by a heavy hull.
     REACTOR = {
+        codex = "REACTOR",   -- CODEX entry (scripts/codex.lua)
         color = { r = 96, g = 52, b = 34 },
         detail = "unstable_core",
         base_size = 0.55, density = 6.5, hp = 48, score_reward = 120,
@@ -403,6 +418,7 @@ asteroid_types = {
     -- as salvage, not geology. Open space keeps MAGMATIC, whose model is
     -- untouched. On detonation it throws four SCRAP_CHUNKs after the blast.
     UNSTABLE_CORE = {
+        codex = "UNSTABLE_CORE",   -- CODEX entry (scripts/codex.lua)
         color = { r = 85, g = 29, b = 12 },
         detail = "unstable_core",
         base_size = 0.90, density = 6.0, hp = 50, score_reward = 75,

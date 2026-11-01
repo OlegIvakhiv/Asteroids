@@ -66,6 +66,14 @@ timers, telegraph state, ram state, etc.). If RenderSystem or DamageSystem
 needs to know something about an enemy's behaviour, it goes on
 `EnemyComponent`, not `AIState`.
 
+**Direction (Field Doctrine only):** `EnemyComponent::direct` turns an
+enemy into an actor. `noRam` / `noBash` / `noShoot` gate its attacks; a
+`cue` (Ram / Bash / Shoot) starts that attack now, skipping cooldowns,
+range checks and squad grants, and is cleared when it starts; a cued bash
+is always honest (no feint); `perfectAim` drops lead and spread. A
+directed enemy never dodges or flinches. Off by default: in a real run
+nothing sets it.
+
 ### `TurretSystem.hpp`
 Independently-aiming turrets. Runs immediately AFTER AISystem so the hull
 transform for this frame is final before mount points resolve into world

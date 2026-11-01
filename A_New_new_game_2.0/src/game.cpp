@@ -261,6 +261,7 @@ int main() {
         // UPDATE ALL GAME SYSTEMS (includes rendering)
         // =====================================================================
         manager.update(dt);
+        manager.updateAudio(dt);
 
         // ---- Present the frame ----
         window.display();

@@ -186,8 +186,7 @@ An AI that flies a player ship by pressing the player's keys -- move,
 lead-aim, fire, dash across rams and rounds (late: a perfect dodge), parry
 bashes / rounds / rocks, Rift Bolt into a cluster detonated at the closest
 pass, answer the vent QTE, collect scrap. `Skill` makes feed hunters
-mortal; `Orders` let a doctrine scene script the ship without leaving the
-real input path.
+mortal. Used by the tactical feed; Field Doctrine scripts its own hands.
 
 ### `LiveFeed.hpp`
 The tactical feed: a ShadowWorld running the real director, asteroid
@@ -197,12 +196,19 @@ gets a new pack. At zero hull the feed ends its hunter (own-hull wreckage),
 SIGNAL LOST, and drops in the next one.
 
 ### `DoctrineStage.hpp`
-FIELD DOCTRINE: eight looping scenes of real gameplay (flight, gunnery,
-turbo, salvage; dodge, parry, rift bolt, vent) on a ShadowWorld with the
-player's own ship and paints and the real HUD. Each scene places the
-enemy / rocks and gives the pilot orders; the pilot reacts to the enemy's
-actual state, so the perfect dodge in DODGE is a real ram eaten by real
-i-frames. `lit()` drives the keycaps.
+FIELD DOCTRINE: sixteen directed scenes of real gameplay on a ShadowWorld
+with the player's own ship, paints and HUD -- basic (movement, HUD,
+gunnery, turbo, salvage, dodge) and advanced (parry x3, perfect dodge,
+Rift Bolt x4, vent, poise). They play back like a recording: fixed 1/60 s
+ticks, the same random seed every loop, a scripted timeline that presses
+the real keys, and enemies directed through `EnemyComponent::direct`
+(see systems/README, AISystem) so they only do what the scene cues. Cuts
+put the actors back on their marks; a freeze holds the world on the
+moment to read (VENT). The camera fits the hunter and the scene's
+subjects into the reel; the one exception, the hijacked rock, gets an
+inset window. Callouts point at HUD bars (HudSystem::layout) or world
+objects; captions and a readout say what is happening. `lit()` drives
+the keycaps.
 
 ### `HunterRecord.hpp`
 The terminal's memory, `saves/hunter_record.txt`: contracts, hunters

@@ -1423,8 +1423,13 @@ private:
 
         case RamState::None: {
             if (!config["ram_enabled"].get_or(false)) return false;
-            if (ec.ramCooldown > 0.f) return false;
-            if (ai.currentState != EnemyState::COMBAT) return false;
+            // Scene direction (EnemyComponent::Direction): a cue skips the
+            // gates that decide WHETHER to ram, never the ones that keep two
+            // commits from overlapping.
+            const bool cued = ec.cued(EnemyComponent::Cue::Ram);
+            if (ec.direct.on && ec.direct.noRam && !cued) return false;
+            if (!cued && ec.ramCooldown > 0.f) return false;
+            if (!cued && ai.currentState != EnemyState::COMBAT) return false;
             if (ec.bashState != BashState::None) return false;   // one commit at a time
             if (ec.summonState != 0) return false;               // mid-summon: the charge is the hatch, not the hull
             if (ec.burstBusy()) return false;                    // charged burst runs to its end
@@ -1439,9 +1444,9 @@ private:
             const float farT = config["ram_far_trigger"].get_or(700.f);
             const float nearT = config["ram_near_trigger"].get_or(210.f);
             const float maxT = config["ram_max_trigger"].get_or(1.0e9f);
-            if (dist < nearT || (dist > farT && dist < maxT)) {
+            if (cued || dist < nearT || (dist > farT && dist < maxT)) {
                 // Squad: a whole chain is one commit (note 43).
-                {
+                if (!cued) {
                     const float w = config["ram_windup"].get_or(0.85f);
                     const float hold = (w + config["ram_charge_duration"].get_or(1.3f))
                         * std::max(1, config["ram_chain_max"].get_or(1));
@@ -1450,7 +1455,7 @@ private:
                 float chance = config["ram_trigger_chance"].get_or(0.9f);
                 if (ec.timesHit == 0)
                     chance *= config["ram_surprise_bonus"].get_or(2.0f);
-                if ((rand() % 100) / 100.f > std::min(1.f, chance)) {
+                if (!cued && (rand() % 100) / 100.f > std::min(1.f, chance)) {
                     ec.ramCooldown = config["ram_reroll_delay"].get_or(2.0f);
                     return false;
                 }
@@ -1459,6 +1464,7 @@ private:
                 const int cMin = std::max(1, config["ram_chain_min"].get_or(1));
                 const int cMax = std::max(cMin, config["ram_chain_max"].get_or(1));
                 ec.ramChainLeft = (cMin + rand() % (cMax - cMin + 1)) - 1;
+                if (cued) { ec.ramChainLeft = 0; ec.direct.cue = EnemyComponent::Cue::None; }   // one charge, every loop
 
                 ec.ramState = RamState::Windup;
                 ec.ramDuration = config["ram_windup"].get_or(0.85f);
@@ -2563,16 +2569,18 @@ private:
 
         case BashState::None: {
             if (!config["bash_enabled"].get_or(false)) return false;
-            if (ec.bashCooldown > 0.f) return false;
+            const bool cued = ec.cued(EnemyComponent::Cue::Bash);   // see updateRam
+            if (ec.direct.on && ec.direct.noBash && !cued) return false;
+            if (!cued && ec.bashCooldown > 0.f) return false;
             if (ec.burstBusy()) return false;   // charged burst runs to its end
-            if (ai.currentState != EnemyState::COMBAT) return false;
-            if (ec.microRecover > 0.f) return false;
+            if (!cued && ai.currentState != EnemyState::COMBAT) return false;
+            if (!cued && ec.microRecover > 0.f) return false;
             if (ec.ramState != RamState::None) return false;
-            if (dist > config["bash_trigger_range"].get_or(150.f)) return false;
+            if (!cued && dist > config["bash_trigger_range"].get_or(150.f)) return false;
             // Own rounds still in the air: wait. A lunge arriving alongside
             // its own bullets asks for a dodge and a parry in the same beat.
-            if (ec.shotClearTimer > 0.f) return false;
-            {
+            if (!cued && ec.shotClearTimer > 0.f) return false;
+            if (!cued) {
                 const float w = config["bash_windup"].get_or(0.38f);
                 if (!squadGrant(w + config["bash_lunge_time"].get_or(0.15f)
                     + config["bash_recover"].get_or(0.35f), true, false, w)) return false;
@@ -2590,6 +2598,8 @@ private:
             // likely straight after a feint, so it stays a mix-up rather
             // than becoming the pattern.
             ec.bashFeint = false;
+            if (cued) ec.direct.cue = EnemyComponent::Cue::None;
+            if (ec.direct.on) ec.bashHonest = true;          // a directed bash never feints
             if (ec.bashHonest) ec.bashHonest = false;
             else if (config["feint_enabled"].get_or(false)) {
                 float c = config["feint_chance"].get_or(0.3f);
@@ -4682,6 +4692,7 @@ private:
     void triggerDodgeBurst(AIState& ai, EnemyComponent& ec, sf::Vector2f dir,
         float strength, float ttiSeconds = 99.f)
     {
+        if (ec.direct.on) return;          // a directed actor (Doctrine) never breaks its mark
         if (ai.dodgeCooldown > 0.f) return;
         if (ai.dodgeBurstTimer > 0.f) return;
 
@@ -4728,7 +4739,7 @@ private:
     }
 
     void triggerFlinch(AIState& ai, EnemyComponent& ec, sf::Vector2f dir, float tti) {
-        if (ai.flinchTimer > 0.f) return;
+        if (ai.flinchTimer > 0.f || ec.direct.on) return;
         ai.flinchDuration = std::min(0.30f, std::max(0.12f, tti));
         ai.flinchTimer = ai.flinchDuration;
         ai.flinchDir = dir;
@@ -4776,8 +4787,9 @@ private:
         // spraying while it closes forces the player to dodge a bullet and
         // parry a lunge on the same beat, and neither read survives that.
         // One threat at a time is the whole point of the unit.
+        const bool cuedShot = ec.cued(EnemyComponent::Cue::Shoot);
         const float holdFire = config["hold_fire_range"].get_or(0.f);
-        if (holdFire > 0.f && dist < holdFire && !m_vsShip) {
+        if (!cuedShot && holdFire > 0.f && dist < holdFire && !m_vsShip) {
             ec.telegraphActive = false;
             ec.telegraphTimer = 0.f;
             ec.shotsInBurst = 0;
@@ -4804,22 +4816,23 @@ private:
             return;
         }
 
-        if (ec.fireTimer > 0.f || dist > attackRange) return;
-        if (ec.shotPauseTimer > 0.f) return;
+        if (ec.direct.on && ec.direct.noShoot && !cuedShot) return;
+        if (!cuedShot && (ec.fireTimer > 0.f || dist > attackRange)) return;
+        if (!cuedShot && ec.shotPauseTimer > 0.f) return;
         if (ec.microRecover > 0.f) return;     // reloading, not shooting
         if (ec.rocketsLeft > 0) return;        // mid-volley: one weapon at a time
 
         const float bulletSpeed = config["bullet_speed"].get_or(550.f);
         const float travelTime = dist / bulletSpeed;
 
-        const float leadFactor = 0.55f + (rand() % 35) / 100.f;
+        const float leadFactor = ec.direct.perfectAim ? 0.f : 0.55f + (rand() % 35) / 100.f;
         const sf::Vector2f predicted = playerPos + playerVel * (travelTime * leadFactor);
 
         sf::Vector2f aim = predicted - tf.position;
         const float al = std::sqrt(aim.x * aim.x + aim.y * aim.y);
         if (al > 0.01f) aim /= al;
 
-        const float spreadDeg = config["aim_spread"].get_or(18.f);
+        const float spreadDeg = ec.direct.perfectAim ? 0.f : config["aim_spread"].get_or(18.f);
         const float spread = ((rand() % 200) - 100) / 100.f * (spreadDeg * 3.14159f / 180.f);
 
         ec.telegraphDir = {
@@ -4830,10 +4843,11 @@ private:
         ec.telegraphDuration = telegraph * (0.85f + (rand() % 30) / 100.f);
         // Squad (note 43): a telegraphed round is a commit. Untelegraphed
         // spray (Wardogs) is the harassment itself and never waits.
-        if (ec.telegraphDuration > 0.f && !squadGrant(ec.telegraphDuration + 0.25f, false, true)) {
+        if (!cuedShot && ec.telegraphDuration > 0.f && !squadGrant(ec.telegraphDuration + 0.25f, false, true)) {
             ec.fireTimer = m_sqCfg.retryDelay * (0.6f + (rand() % 80) / 100.f);
             return;
         }
+        if (cuedShot) ec.direct.cue = EnemyComponent::Cue::None;
         ec.telegraphTimer = ec.telegraphDuration;
         ec.telegraphActive = true;
     }
@@ -4870,7 +4884,8 @@ private:
 
         const auto aimNow = [&]() {
             const float tt = dist / std::max(1.f, config["bullet_speed"].get_or(550.f));
-            sf::Vector2f aim = playerPos + playerVel * (tt * 0.7f) - tf.position;
+            const float lead = ec.direct.perfectAim ? 0.f : 0.7f;   // scene direction: dead on
+            sf::Vector2f aim = playerPos + playerVel * (tt * lead) - tf.position;
             const float al = std::sqrt(aim.x * aim.x + aim.y * aim.y);
             return al > 0.01f ? aim / al : ec.telegraphDir;
             };
@@ -4880,8 +4895,8 @@ private:
             ec.telegraphDir = aimNow();
             ec.volleyTimer -= dt;
             if (ec.volleyTimer <= 0.f) {
-                const float sp = config["aim_spread"].get_or(10.f) * 0.5f * 3.14159f / 180.f
-                    * (((rand() % 200) - 100) / 100.f);
+                const float sp = (ec.direct.perfectAim ? 0.f : config["aim_spread"].get_or(10.f))
+                    * 0.5f * 3.14159f / 180.f * (((rand() % 200) - 100) / 100.f);
                 const sf::Vector2f d = ec.telegraphDir;
                 fireShot(i, tf, ec, entityId,
                     { d.x * std::cos(sp) - d.y * std::sin(sp), d.x * std::sin(sp) + d.y * std::cos(sp) }, config);
@@ -4919,15 +4934,19 @@ private:
         }
 
         // ---- START (only here do hold-fire and range apply) ----
+        const bool cued = ec.cued(EnemyComponent::Cue::Shoot);   // scene direction, see updateRam
+        if (ec.direct.on && ec.direct.noShoot && !cued) return;
         const float holdFire = config["hold_fire_range"].get_or(0.f);
-        if (holdFire > 0.f && dist < holdFire && !m_vsShip) return;
-        if (ec.fireTimer > 0.f || dist > config["attack_range"].get_or(480.f)) return;
-        if (ec.shotPauseTimer > 0.f || ec.microRecover > 0.f || ec.rocketsLeft > 0) return;
+        if (!cued && holdFire > 0.f && dist < holdFire && !m_vsShip) return;
+        if (!cued && (ec.fireTimer > 0.f || dist > config["attack_range"].get_or(480.f))) return;
+        if (!cued && ec.shotPauseTimer > 0.f) return;
+        if (ec.microRecover > 0.f || ec.rocketsLeft > 0) return;
         if (ec.bashState != BashState::None || ec.ramState != RamState::None) return;
-        if (!squadGrant(windup + count * config["burst_interval"].get_or(0.07f) + 0.2f, false, true)) {
+        if (!cued && !squadGrant(windup + count * config["burst_interval"].get_or(0.07f) + 0.2f, false, true)) {
             ec.fireTimer = m_sqCfg.retryDelay * (0.6f + (rand() % 80) / 100.f);
             return;
         }
+        if (cued) ec.direct.cue = EnemyComponent::Cue::None;
 
         ec.burstCharging = true;
         ec.telegraphDir = aimNow();

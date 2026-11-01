@@ -535,6 +535,7 @@ public:
                             // -- and then the charge lands anyway. That second
                             // half was missing: this used to `continue` here.
                             const sf::Vector2f op = m_em->transforms[otherIdx].position;
+                            m_em->sfx("player.parry.ram_fail", op);
                             m_em->spawnExplosion(op, sf::Color(255, 120, 60), 14, 2.4f);
                             m_em->spawnShockRing(op, 14.f, 120.f, 0.25f,
                                 sf::Color(255, 120, 60), 3.f, 180.f);
@@ -575,7 +576,7 @@ public:
                             m_em->healths[otherIdx].wasParryLaunched = true;
                             m_em->healths[otherIdx].isHoming = true;
                         }
-                        onParrySuccess(playerIdx, (playerPos + otherPos) * 0.5f);
+                        onParrySuccess(playerIdx, (playerPos + otherPos) * 0.5f, "player.parry.rock");
                         continue;
                     }
 
@@ -643,7 +644,7 @@ public:
                             }
 
                             m_em->spawnExplosion(otherPos, parryColor(), 10, 1.5f);
-                            onParrySuccess(playerIdx, otherPos);
+                            onParrySuccess(playerIdx, otherPos, "player.parry.round");
                             // ---- Parry re-arm (every bullet parry) ----
                             onParryRearm(playerIdx, otherPos);
                             continue;
@@ -671,11 +672,13 @@ public:
                         m_em->spawnImpact(op, sf::Color(220, 210, 190),
                             (op - m_em->transforms[playerIdx].position) * 6.f);
                         m_em->addTrauma(0.08f);
+                        m_em->sfx("player.ram.rock", op);
                         continue;
                     }
                     const float dealt = m_feel.ramBaseDamage + over * m_feel.ramDamagePerSpeed;
                     if (tier == 1) {
                         m_em->healths[otherIdx].currentHp -= dealt * 2.f;   // medium rocks crack
+                        m_em->sfx("player.ram.rock", op, 1.f, 0.85f);       // heavier: it does not just vanish
                     }
                     else if (otherType == BodyType::Enemy && !isRamInvulnerable(otherIdx)
                         && !isBashCommitted(otherIdx)) {
@@ -693,6 +696,7 @@ public:
                     // Hull damage by what you hit. Rocks by size; anything else as before.
                     float hullDamage = isRock ? rockCfg(tier, "damage", 15.f) : 15.f;
                     if (ramming && tier == 1) hullDamage *= m_feel.ramMediumTaken;
+                    if (isRock) m_em->sfx("rock.hit.hull", m_em->transforms[playerIdx].position);
                     m_em->damagePlayer(playerIdx, hullDamage);
                     m_em->healths[playerIdx].invulTimer = 1.0f;
 
@@ -854,6 +858,7 @@ public:
                         else if (astHp.isKineticWeapon || astHp.wasParryLaunched) {
                             // ---- RAM IMMUNITY: charging enemies ignore kinetic damage ----
                             if (!isRamInvulnerable(enIdx)) {
+                                m_em->sfx("player.kinetic.hit", m_em->transforms[enIdx].position);
                                 // Damage scales with SIZE and IMPACT SPEED.
                                 const float base = wcfg("kinetic_base_damage", 170.f);
                                 const float speedF = std::clamp(relSpd / 22.f, 0.40f, 1.35f);
@@ -955,6 +960,7 @@ public:
                     // not. scoreRewards is no longer credited anywhere -- it
                     // survives only as the size tag parry and Rift read.
                     dropScrap(i, rollScrap(m_em->healths[i].scrapMin, m_em->healths[i].scrapMax));
+                    sfxFieldBreak(i, deathPos);
                     bool isExplosive = m_em->healths[i].isExplosive;
 
                     if (isExplosive) {
@@ -1112,6 +1118,11 @@ private:
 
     /// Impact feedback scaled to how big the projectile actually was.
     void spawnHitFx(const BulletComponent& blt, sf::Vector2f pos, size_t targetIdx, bool isEnemy) {
+        // Stone thuds, plate rings -- the audio half of "yellow sparks vs grey
+        // chips". A reflected round lands a little harder.
+        if (blt.isRiftBolt) m_em->sfx("player.rift.overload", pos, 0.7f);
+        else m_em->sfx((isEnemy || m_em->healths[targetIdx].metallic)
+            ? "player.plasma.hit_metal" : "player.plasma.hit_stone", pos, blt.isReflected ? 1.25f : 1.f);
         if (blt.isRiftBolt) {
             m_em->addTrauma(vcfg("rift_direct_hit_trauma", 0.40f));
             m_em->spawnShockRing(pos, 12.f, 170.f, 0.34f,
@@ -1260,6 +1271,7 @@ private:
         m_em->spawnShockRing(contact, 8.f, breaksCharge ? 150.f : 95.f, 0.24f,
             sf::Color(255, 205, 90), 6.f, 255.f);
         m_em->spawnImpact(contact, sf::Color(255, 225, 160), ps.dashDir * 520.f);
+        m_em->sfx("player.bash", contact);   // PERFECT is layered on by the verdict watcher
         if (breaksCharge) m_em->spawnScreenFlash(sf::Color(255, 210, 140), 0.14f, 60.f);
         return true;
     }
@@ -1468,8 +1480,22 @@ private:
     // PARRY
     // ========================================================================
 
+    /// A field object breaks: material and size pick the sound. Magma and
+    /// cores are their own blast; plate is salvage (or a whole wreck when it is
+    /// a big hull); stone is rock.
+    void sfxFieldBreak(size_t i, sf::Vector2f p) {
+        const HealthComponent& h = m_em->healths[i];
+        if (h.isExplosive) { m_em->sfx(h.metallic ? "core.explode" : "rock.magma.explode", p); return; }
+        static const char* rock[] = { "rock.break.small", "rock.break.medium", "rock.break.large" };
+        static const char* salv[] = { "salvage.break.small", "salvage.break.medium", "salvage.break.large" };
+        const int t = std::min<int>(h.asteroidTier, 2);
+        if (h.metallic) m_em->sfx((t >= 2 && h.visualRadius > 48.f) ? "wreck.break" : salv[t], p);
+        else m_em->sfx(rock[t], p);
+    }
+
     /// Shared parry-success reaction (was a lambda inside update()).
-    void onParrySuccess(size_t playerIdx, sf::Vector2f contactPos) {
+    void onParrySuccess(size_t playerIdx, sf::Vector2f contactPos, const char* sfx) {
+        m_em->sfx(sfx, contactPos);   // which parry it was: rock, round, bash, beam, rocket, bomb
         // This flag was never being set before 1.3, so the whiff penalty
         // fired on every parry including the ones that connected.
         m_em->players[playerIdx].parryHitSomething = true;
@@ -1526,7 +1552,7 @@ private:
         m_em->spawnExplosion(otherPos, parryColor(), 22, 3.0f);
 
         const sf::Vector2f mid = (playerPos + otherPos) * 0.5f;
-        onParrySuccess(playerIdx, mid);
+        onParrySuccess(playerIdx, mid, "player.parry.bash");
         onParryRearm(playerIdx, mid);
     }
 
@@ -1831,7 +1857,7 @@ private:
                     m_em->spawnShockRing(entry, 4.f, 46.f, 0.16f, parryColor(), 3.f, 240.f);
                     m_em->spawnExplosion(entry, sf::Color(250, 244, 230), 18, 2.6f);
                     m_em->spawnScreenFlash(sf::Color(250, 244, 230), 0.12f, 70.f);
-                    onParrySuccess(playerIdx, entry);
+                    onParrySuccess(playerIdx, entry, "player.parry.lance");
                     onParryRearm(playerIdx, entry);
                     traceBeam(playerIdx, r);
                     break;
@@ -2179,7 +2205,7 @@ private:
 
         m_em->spawnExplosion(rPos, parryColor(), 14, 2.2f);
         m_em->spawnShockRing(rPos, 5.f, 52.f, 0.20f, sf::Color(255, 240, 90), 3.f, 240.f);
-        onParrySuccess(playerIdx, rPos);
+        onParrySuccess(playerIdx, rPos, "player.parry.rocket");
         onParryRearm(playerIdx, rPos);
     }
 
@@ -2265,7 +2291,7 @@ private:
 
             m_em->spawnExplosion(ePos, parryColor(), 26, 3.4f);
             m_em->spawnShockRing(ePos, 14.f, 150.f, 0.28f, lighten(parryColor(), 0.55f), 4.f, 240.f);
-            onParrySuccess(playerIdx, (pPos + ePos) * 0.5f);
+            onParrySuccess(playerIdx, (pPos + ePos) * 0.5f, "player.parry.bomb");
             onParryRearm(playerIdx, ePos);
             return;
         }
@@ -2288,6 +2314,8 @@ private:
         ec.detonated = true;
 
         const sf::Vector2f pos = m_em->transforms[i].position;
+        // Shot down mid-charge goes off smaller -- and sounds it.
+        m_em->sfx("maniac.detonate", pos, full ? 1.f : 0.7f, full ? 1.f : 1.15f);
 
         // Three sizes, and the ordering is the design:
         //   thrown  > full > shot down
@@ -2351,12 +2379,19 @@ private:
             return;
         }
 
+        // Below this line the death is ours to voice (the two branches above
+        // are Maniac blasts, which blowUpManiac voices itself).
+        if (adef && adef->key == "BARGE") m_em->sfx("barge.death", deathPos);
+        else if (adef && adef->key == "BLOODSEEKER") m_em->sfx("bloodseeker.death", deathPos);
+
         if (adef && adef->config["death_style"].get_or<std::string>("standard") == "visceral") {
+            if (adef->key != "BLOODSEEKER") m_em->sfx("enemy.death.visceral", deathPos);
             spawnVisceralDeath(i, deathPos, *adef);
             return;
         }
 
         // ---- Standard: the 1.3 blast, and now the hull comes apart in it ----
+        if (!adef || adef->key != "BARGE") m_em->sfx("enemy.death", deathPos);
         if (adef) spawnWreckage(i, *adef, WRECK_STANDARD);
         m_em->spawnExplosion(deathPos, sf::Color::Red, 35, 5.0f);
         m_em->spawnExplosion(deathPos, sf::Color::Yellow, 15, 2.5f);

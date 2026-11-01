@@ -758,6 +758,7 @@ private:
 
         // ---- MODE 1: AIR BURST ----
         if (nearestIdx == (size_t)-1 || nearestDist > impactThreshold) {
+            m_em->sfx("player.rift.burst", boltPos);
             const float power = playerStats.kit.valid ? playerStats.kit.riftPower : 1.f;
             const float burstRadius = (*m_lua)["rift_burst_radius"].get_or(120.f) * std::sqrt(power);
             const float burstDamage = (*m_lua)["rift_burst_damage"].get_or(20.f) * power;
@@ -833,6 +834,7 @@ private:
 
         // ---- MODE 2: KINETIC HIJACK ----
         else if (nearestType == BodyType::Asteroid) {
+            m_em->sfx("player.rift.hijack", boltPos);
             const float homingSpeed = (*m_lua)["homing_missile_speed"].get_or(800.f);
 
             size_t enemyIdx = (size_t)-1;
@@ -878,6 +880,7 @@ private:
 
         // ---- MODE 3: SYSTEMS OVERLOAD ----
         else if (nearestType == BodyType::Enemy) {
+            m_em->sfx("player.rift.overload", boltPos);
             const float riftDamage = (*m_lua)["rift_damage"].get_or(45.f)
                 * wcfg("rift_overload_multiplier", 4.f)
                 * (playerStats.kit.valid ? playerStats.kit.riftPower : 1.f);

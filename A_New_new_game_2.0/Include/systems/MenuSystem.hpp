@@ -108,6 +108,7 @@ public:
     /// the intercept stream.
     void init(const SystemContext& ctx) override {
         m_window = ctx.window;
+        m_em = ctx.em;   // sound only: the terminal raises UI sounds into the real game's queue
         m_lua = ctx.lua;
         m_reg = ctx.enemyRegistry;
         m_ui.attach(ctx.window);
@@ -137,6 +138,7 @@ public:
         if (!m_window) return;
         m_ui.begin(dt);
         tick(dt);
+        soundEdges();
         draw();
     }
 
@@ -457,6 +459,75 @@ private:
                 if (m_ui.keyEdge(sf::Keyboard::Key::D) || m_ui.keyEdge(sf::Keyboard::Key::Right)) jumpReelGroup(true);
             }
         }
+    }
+
+    // ========================================================================
+    // SOUND
+    //
+    // Heard by comparing the terminal's own state with last frame's, so none of
+    // the transition code had to change: input arrives from game.cpp BETWEEN
+    // updates, which is why the memory is kept across frames rather than
+    // snapshotted inside update().
+    // ========================================================================
+
+    void ui(const char* id, float gain = 1.f) { if (m_em) m_em->sfxUi(id, gain); }
+
+    /// A terminal bed (a `loop = true` row): raise it every frame it should
+    /// sound, stop and it fades. Keyed so the AudioSystem keeps ONE voice.
+    void uiHold(const char* id, uint32_t tag, float gain = 1.f) {
+        if (!m_em) return;
+        SoundEvent e; e.id = id; e.positional = false; e.gain = gain;
+        e.key = (static_cast<uint64_t>(0xFFFFFFFFu) << 8) | tag;   // no entity has this id
+        m_em->sounds.push_back(e);
+    }
+
+    void soundEdges() {
+        // ---- Boot: power, one teletype burst per log line, the greeting ----
+        if (m_page == Page::Boot) {
+            const float a = m_sndBootT, b = m_bootT;
+            if (a <= 0.f && b > 0.f) ui("term.boot.power");
+            for (int i = 0; i < 9; ++i) {             // the nine lines of the boot log
+                const float t = BOOT_LOG_T0 + i * BOOT_LOG_DT;
+                if (a < t && b >= t) { ui("term.boot.line"); if (i == 2) ui("term.boot.roused"); }
+            }
+            if (a < BOOT_SLAB_T && b >= BOOT_SLAB_T) ui("term.boot.greeting");
+        }
+        m_sndBootT = (m_page == Page::Boot) ? m_bootT : 0.f;
+
+        // ---- Pages opening ----
+        if (m_page != m_sndPage && m_page != Page::Boot && m_page != Page::None) {
+            if (m_page == Page::Pause) ui("term.pause");
+            else if (m_page == Page::GameOver) ui("term.gameover");
+            else ui("term.page.open");
+        }
+        // ---- The cursor moving (keys or mouse) ----
+        else if (m_page == m_sndPage && (m_page == Page::Main || m_page == Page::Pause || m_page == Page::GameOver)
+            && currentSel() != m_sndSel) ui("term.hover");
+
+        // ---- Confirm: a clack, then the fold once the blink is done ----
+        if (m_closing && !m_sndClosing) ui("term.select");
+        if (m_closing && m_sndCloseT < 0.f && m_closeT >= 0.f) ui("term.page.close");
+        if (m_denyT != m_sndDenyT) ui("term.sealed");
+        if ((m_clickAction == MenuAction::StartGame || m_clickAction == MenuAction::RestartGame)
+            && m_clickAction != m_sndClick) ui("term.engage");
+
+        // ---- The main terminal's panels: the stream, the feed, the caution ----
+        if (m_page == Page::Main && !m_closing) {
+            uiHold("term.intercept.bed", 1);
+            if (m_wallSerial != m_sndWallSerial && !m_wall.empty() && m_wall.back().signal)
+                ui("term.intercept.signal");                  // the 1 line in 40 that says something
+            if (corruption() > 70) uiHold("term.corruption.caution", 2);   // same test as the hatching
+            if (m_feed.lost() && !m_sndFeedLost) ui("term.feed.lost");
+        }
+        m_sndWallSerial = m_wallSerial;
+        m_sndFeedLost = m_feed.lost();
+
+        m_sndPage = m_page;
+        m_sndSel = (m_page == Page::Main || m_page == Page::Pause || m_page == Page::GameOver) ? currentSel() : -1;
+        m_sndClosing = m_closing;
+        m_sndCloseT = m_closeT;
+        m_sndDenyT = m_denyT;
+        m_sndClick = m_clickAction;
     }
 
     // ========================================================================
@@ -1217,6 +1288,7 @@ private:
     bool codexSeen(const CodexEntry& e) const { return m_record && m_record->seen(e.key); }
 
     void stepCodex(int dir) {
+        ui("term.hover");
         if (m_codexList.empty()) return;
         const int n = static_cast<int>(m_codexList.size());
         m_codexSel = ((m_codexSel + dir) % n + n) % n;
@@ -1399,6 +1471,7 @@ private:
     // ========================================================================
 
     void stepReel(int dir) {
+        ui("term.hover");
         const int n = static_cast<int>(doctrine::lessons().size());
         m_reel = ((m_reel + dir) % n + n) % n;
         m_stage.play(m_reel);
@@ -1427,23 +1500,25 @@ private:
                 fill({ x + gw, y + 9.f, w - gw, 1.f }, tdraw::alpha(ui::CYAN_LOW, 0.6f));
                 y += 24.f;
             }
-            const Rect hit{ x, y, w, 46.f };
+            // 16 scenes: rows are tighter than the main list's.
+            const float rowH = 32.f;
+            const Rect hit{ x, y, w, rowH };
             if (!busy() && (m_mouseLive || m_ui.leftEdge()) && m_ui.hovering(hit) && m_reel != i) { m_reel = i; m_stage.play(m_reel); m_selT = m_time; }
             const bool on = (i == m_reel);
             if (on) {
                 sf::ConvexShape bar(4);
                 bar.setPoint(0, { x + SKEW, y }); bar.setPoint(1, { x + w + SKEW, y });
-                bar.setPoint(2, { x + w, y + 46.f }); bar.setPoint(3, { x, y + 46.f });
+                bar.setPoint(2, { x + w, y + rowH }); bar.setPoint(3, { x, y + rowH });
                 bar.setFillColor(ui::AMBER);
                 m_window->draw(bar);
             }
-            else fill({ x, y + 46.f, w, 1.f }, tdraw::alpha(ui::CYAN_LOW, 0.7f));
+            else fill({ x, y + rowH, w, 1.f }, tdraw::alpha(ui::CYAN_LOW, 0.7f));
             char num[16]; std::snprintf(num, sizeof num, "%02d", i + 1);
-            txt(num, x + 16.f, y + 14.f, 14, on ? ui::INK : ui::TEXT_DIM);
-            txt(L[i].name, x + 58.f, y + 10.f, 20, on ? ui::INK : ui::TEXT);
+            txt(num, x + 16.f, y + 9.f, 12, on ? ui::INK : ui::TEXT_DIM);
+            txt(L[i].name, x + 50.f, y + 6.f, 16, on ? ui::INK : ui::TEXT);
             char len[16]; std::snprintf(len, sizeof len, "0:%02d", static_cast<int>(std::ceil(L[i].length)));
-            txtR(len, x + w - 10.f, y + 17.f, 10, on ? ui::INK : ui::TEXT_DIM);
-            y += 54.f;
+            txtR(len, x + w - 10.f, y + 11.f, 10, on ? ui::INK : ui::TEXT_DIM);
+            y += rowH + 6.f;
         }
         y += 20.f;
         fill({ x, y, w, 1.f }, tdraw::alpha(ui::CYAN_LOW, 0.6f));
@@ -1941,6 +2016,16 @@ private:
     // ========================================================================
 
     sf::RenderWindow* m_window = nullptr;
+    EntityManager* m_em = nullptr;   ///< Sound queue only (see soundEdges)
+
+    // Last frame's terminal state, for soundEdges()
+    Page  m_sndPage = Page::None;
+    int   m_sndSel = -1;
+    bool  m_sndClosing = false;
+    float m_sndCloseT = 0.f, m_sndBootT = 0.f, m_sndDenyT = -10.f;   // = m_denyT at rest: no phantom SEALED
+    MenuAction m_sndClick = MenuAction::None;
+    int  m_sndWallSerial = 0;
+    bool m_sndFeedLost = false;
     sf::Font* m_font = nullptr;
     sf::Font* m_mono = nullptr;
     sol::state* m_lua = nullptr;

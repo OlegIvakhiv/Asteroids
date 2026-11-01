@@ -1,0 +1,31 @@
+# VOID HUNTER // hunter record. Plain text; safe to read.
+contracts 20
+lost 0
+run 4.47248 0 0
+run 195.051 0 102
+run 83.4003 0 12
+run 456.216 0 165
+run 396.632 0 139
+run 25.306 0 0
+run 836.228 0 127
+run 314.671 0 161
+run 8.01402 0 0
+run 0.999867 0 0
+run 354.641 0 195
+run 149.58 0 71
+run 12.4384 0 5
+run 282.103 0 156
+run 37.3921 0 0
+run 487.028 0 202
+codex ASTEROID 1 1055 6
+codex BARGE 1 9 6
+codex BERSERKER 1 26 3
+codex BLOODSEEKER 1 14 3
+codex MAGMATIC 1 49 6
+codex MANIAC 1 13 6
+codex RAIDER 1 70 3
+codex REACTOR 1 2 9
+codex SALVAGE 1 401 7
+codex UNSTABLE_CORE 1 32 7
+codex WARDOG 1 63 6
+codex WRECK 1 29 7

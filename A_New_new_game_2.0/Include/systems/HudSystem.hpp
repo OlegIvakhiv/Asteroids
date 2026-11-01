@@ -63,6 +63,15 @@ public:
     /// Fonts are owned by game.cpp; pass one in after init().
     void setFont(const sf::Font* font) { m_font = font; }
 
+    /// Where each widget was drawn last frame, in screen px. The doctrine
+    /// scenes (utils/DoctrineStage) point their callouts at the real bars
+    /// with this, so a HUD layout change moves the callouts with it.
+    struct Layout {
+        sf::FloatRect hull, poise, energy, rift, heat, scrap;
+        bool hasPoise = false;
+    };
+    const Layout& layout() const { return m_layout; }
+
     void update(float dt) override {
         if (!m_em || !m_window) return;
 
@@ -109,6 +118,7 @@ public:
             ? pulse(sf::Color(255, 60, 60), sf::Color(255, 160, 160), 8.f)
             : sf::Color(235, 55, 70);
 
+        m_layout.hull = { { x, y }, { 272.f, 22.f } };
         drawBar(x, y, 260.f, 22.f, hpRatio, hpCol,
             /*ghost*/ ghostRatio, sf::Color(150, 40, 45, 190),
             /*segment*/ 25.f / std::max(1.f, hp.maxHp),
@@ -118,7 +128,9 @@ public:
         // ---- Poise: thin amber strip under the hull bar, only if the class has any ----
         // White when it just absorbed a hit, red when it just broke. Reading it
         // is the whole skill of a heavy: "can I eat this one?"
+        m_layout.hasPoise = ps.poiseMax > 0.f;
         if (ps.poiseMax > 0.f) {
+            m_layout.poise = { { x, y - 3.f }, { 265.f, 5.f } };
             const float pr = clamp01(ps.poise / ps.poiseMax);
             sf::Color pc = (ps.poiseBreakFlash > 0.f) ? pulse(sf::Color(255, 60, 40), sf::Color(255, 180, 160), 14.f)
                 : (ps.poiseHitFlash > 0.f) ? sf::Color(255, 245, 220)
@@ -141,6 +153,7 @@ public:
         const float dashCost = ps.dashEnergyCost;
         const float costRatio = clamp01(dashCost / std::max(1.f, ps.maxEnergyDrive));
 
+        m_layout.energy = { { x, y }, { 272.f, 13.f } };
         drawBar(x, y, 260.f, 13.f, enRatio, enCol,
             -1.f, sf::Color::Transparent,
             20.f / std::max(1.f, ps.maxEnergyDrive), false);
@@ -174,6 +187,7 @@ public:
             const sf::Color violet = full
                 ? pulse(sf::Color(175, 95, 255), sf::Color(215, 170, 255), 3.f)
                 : sf::Color(95, 55, 140);
+            m_layout.rift = { { x, y - 4.f }, { 264.f, 4.f } };
             quad(x, y - 4.f, 260.f, 4.f, sf::Color(20, 16, 30, 220), 4.f);
             quad(x, y - 4.f, 260.f * ready, 4.f, violet, 4.f);
         }
@@ -188,12 +202,14 @@ public:
         const float bw = 260.f + 80.f * m_qteOpen;   // 260 -> 340
         const float bh = 13.f + 15.f * m_qteOpen;    // 13  -> 28
 
+        m_layout.heat = { { x - 3.f, y - 3.f }, { bw + 6.f, bh + 6.f } };
         drawHeatWidget(x, y, bw, bh, ps);
         y += bh + 13.f + 18.f * m_qteOpen;
 
         // ================================================================
         // SCRAP
         // ================================================================
+        m_layout.scrap = { { x, y }, { 140.f, 34.f } };
         drawScrap(x, y);
     }
 
@@ -411,6 +427,7 @@ private:
     // ========================================================================
     EntityManager* m_em = nullptr;
     sf::RenderTarget* m_window = nullptr;   ///< ctx.drawTarget(): the window, or a hidden world's texture
+    Layout m_layout;
     sol::state* m_lua = nullptr;
     const sf::Font* m_font = nullptr;
     uint32_t m_playerEntityId = 0;
