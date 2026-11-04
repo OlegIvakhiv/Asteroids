@@ -416,6 +416,7 @@ key_bindings = {
     sprint = "LShift",      -- Turbo / energy boost (consumes energy)
     parry = "R",            -- Parry button!
     rift_detonate_key   = "MouseRight",
+    map    = "M",           -- Full sector map (AUSPEX)
     vent   = "E",           -- Overheat vent QTE
 
     -- NOT the fire button, deliberately. Players mash fire the instant they

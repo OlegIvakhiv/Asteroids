@@ -18,6 +18,7 @@
 #include "utils/GameConfig.hpp"
 #include <SFML/Graphics.hpp>
 #include <cmath>
+#include <algorithm>
 
  /**
   * @class BackgroundSystem
@@ -41,6 +42,7 @@ public:
         m_em = ctx.em;
         m_window = ctx.drawTarget();
         m_playerEntityId = ctx.playerEntityId;
+        m_zone = ctx.zone;
     }
 
     /**
@@ -99,9 +101,15 @@ public:
         sf::VertexArray& va = m_starVerts;
         va.resize(m_em->stars.size() * 6);   // every vertex is overwritten below
 
+        // Near the Void the stars thin out: each star has a fixed threshold,
+        // so they go out one by one rather than all fading together.
+        const float thin = m_zone ? std::clamp(m_zone->voidFade, 0.f, 1.f) * 0.92f : 0.f;
+
         size_t vertexIndex = 0;
-        for (const auto& star : m_em->stars) {
+        for (size_t si = 0; si < m_em->stars.size(); ++si) {
+            const auto& star = m_em->stars[si];
             float halfSize = star.size / 2.0f;
+            if (thin > 0.f && static_cast<float>((si * 2654435761u) % 1000u) / 1000.f < thin) halfSize = 0.f;
             sf::Vector2f p = star.position;
 
             // Each star is a quad (2 triangles = 6 vertices)
@@ -130,4 +138,5 @@ private:
     EntityManager* m_em = nullptr;
     sf::RenderTarget* m_window = nullptr;   ///< ctx.drawTarget(): the window, or a hidden world's texture
     uint32_t m_playerEntityId = 0;
+    zonearch::ZoneState* m_zone = nullptr;
 };

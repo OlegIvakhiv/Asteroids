@@ -81,6 +81,7 @@ public:
         // so force one apply so the starfield and props match whatever zone
         // is live rather than whatever the last run left behind.
         if (m_zone) m_zone->dirty = true;
+        m_applied.valid = false;   // the rebuild may have wiped the starfield: repaint it
     }
 
     /**
@@ -98,10 +99,29 @@ public:
         const zonearch::ZoneDef* z = m_zone->def();
         if (!z) return;   // zones.lua missing -- leave the pre-zone look alone
 
-        applySky(*z);
-        m_citadelRT.clear();   // landmark slots are about to mean different props
-        seedLayer(z->junk, m_junk);
-        seedLayer(z->landmarks, m_landmarks);
+        // SUB-ZONES. Crossing between two sub-zones of one archetype (the
+        // same `sky_group`) keeps the sky and any prop layer that did not
+        // change -- otherwise every cell border of a level would re-roll the
+        // starfield and pop the junk around the player.
+        // A reload (F5) invalidates every PropDef pointer the live props hold,
+        // so after one everything is applied from scratch.
+        const uint32_t gen = m_zone->registry ? m_zone->registry->generation() : 0;
+        const bool was = m_applied.valid && m_applied.generation == gen;
+        const bool sameSky = was && m_applied.sky == skyGroup(*z)
+            && m_applied.stars == z->starCount && m_applied.tint == z->starTint;
+        if (!sameSky) applySky(*z);
+        if (!was || !sameLayer(m_applied.landmarks, z->landmarks)) {
+            m_citadelRT.clear();   // landmark slots are about to mean different props
+            seedLayer(z->landmarks, m_landmarks);
+        }
+        if (!was || !sameLayer(m_applied.junk, z->junk)) seedLayer(z->junk, m_junk);
+        m_applied.valid = true;
+        m_applied.generation = gen;
+        m_applied.sky = skyGroup(*z);
+        m_applied.stars = z->starCount;
+        m_applied.tint = z->starTint;
+        m_applied.junk = z->junk;
+        m_applied.landmarks = z->landmarks;
     }
 
     /**
@@ -140,6 +160,14 @@ private:
     // ========================================================================
     // APPLY
     // ========================================================================
+
+    static std::string skyGroup(const zonearch::ZoneDef& z) {
+        return z.config.valid() ? z.config["sky_group"].get_or(z.key) : z.key;
+    }
+    static bool sameLayer(const zonearch::PropLayer& a, const zonearch::PropLayer& b) {
+        return a.count == b.count && a.props == b.props && a.depthMin == b.depthMin
+            && a.depthMax == b.depthMax && a.scaleMin == b.scaleMin && a.scaleMax == b.scaleMax;
+    }
 
     /**
      * @brief Rebuild the starfield at the zone's density and tint.
@@ -442,6 +470,15 @@ private:
     sf::View* m_view = nullptr;
     zonearch::ZoneState* m_zone = nullptr;
 
+    /// What was last applied, by value (sub-zone diffing; see applyIfDirty).
+    struct Applied {
+        bool valid = false;
+        uint32_t generation = 0;
+        std::string sky;
+        int stars = 0;
+        sf::Color tint;
+        zonearch::PropLayer junk, landmarks;
+    } m_applied;
     std::vector<Prop> m_junk;        ///< Near layer: drifting scrap
     std::vector<Prop> m_landmarks;   ///< Far layer: stations and bases
 

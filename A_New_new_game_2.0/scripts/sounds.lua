@@ -21,13 +21,17 @@
 --   time_scaled   slides down with hitstop / slow-mo. Default: yes, except the
 --                 player's rewards (parry, perfect dodge, vent), the terminal
 --                 and ambience.
+--   bus           the player's volume channel (MACHINE RITES): "effects",
+--                 "tells", "ambience" or "interface". Default from the id:
+--                 tell.* = tells, amb.* = ambience, term.* / hud.* = interface,
+--                 everything else = effects.
 --
 -- Missing ids are reported ONCE on the console ("[Audio] no sound 'x'"):
 -- that is how a typo here shows up -- sol2's get_or would otherwise hide it.
 -- ============================================================================
 
 audio = {
-    master      = 0.8,     -- the future MACHINE RITES volume slider
+    master      = 0.8,     -- the mix's own ceiling; the player's MACHINE RITES levels sit on top
     hear_radius = 1900,    -- px from the camera centre; beyond it, silence
     pause_gain  = 0.45,    -- the frozen world under the pause screen (also muffled)
     pan_width   = 0.75,    -- 0 = mono, 1 = hard left/right at the screen edge
@@ -50,15 +54,15 @@ sounds = {
     ["player.energy.dry"] = { files = { "sfx/player.energy.dry.wav" },
         gain = 0.70, max_voices = 1, priority = 1, min_interval = 1.00 },  -- Energy dry
     ["player.dash.light"] = { files = { "sfx/player.dash.light.wav" },
-        gain = 0.80, pitch_var = 0.05, max_voices = 2, priority = 2 },  -- Dash · light
+        gain = 0.80, pitch_var = 0.05, max_voices = 2, priority = 2 },  -- Dash · light   (synth: thruster roar + plasma whine + electric arc, 0.26 s)
     ["player.dash.medium"] = { files = { "sfx/player.dash.medium.wav" },
-        gain = 0.80, pitch_var = 0.05, max_voices = 2, priority = 2 },  -- Dash · medium
+        gain = 0.80, pitch_var = 0.05, max_voices = 2, priority = 2 },  -- Dash · medium  (same voice, lower, 0.30 s)
     ["player.dash.heavy"] = { files = { "sfx/player.dash.heavy.wav" },
-        gain = 0.85, pitch_var = 0.05, max_voices = 2, priority = 2 },  -- Dash · heavy
+        gain = 0.85, pitch_var = 0.05, max_voices = 2, priority = 2 },  -- Dash · heavy   (lowest, slowest arc, 0.38 s)
     ["player.dash.phase"] = { files = { "sfx/player.dash.phase.wav" },
-        gain = 0.50, max_voices = 1, priority = 3 },  -- Dash phase-through (slow-mo)
+        gain = 0.50, max_voices = 1, priority = 3 },  -- Dash phase-through: the perfect dodge's wave, small (0.40 s)
     ["player.dodge.perfect"] = { files = { "sfx/player.dodge.perfect.wav" },
-        gain = 0.90, max_voices = 2, priority = 1 },  -- Perfect dodge (slow-mo snatch)
+        gain = 0.90, max_voices = 2, priority = 1 },  -- Perfect dodge: dash, a hole of silence, then a trembling phase wave + falling ghost echoes (0.85 s)
 
     -- Player · weapons --------------------------------------------------
     ["player.plasma.fire"] = { files = { "sfx/player.plasma.fire_1.wav", "sfx/player.plasma.fire_2.wav", "sfx/player.plasma.fire_3.wav" },

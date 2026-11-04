@@ -35,6 +35,13 @@
  * under the pause screen, and silenced in the terminal. UI sounds (terminal)
  * are none of those.
  *
+ * CHANNELS (MACHINE RITES). Every sound belongs to one of four channels the
+ * player sets in the settings page: EFFECTS (the default), TELLS (`tell.*`,
+ * the enemy attack cues), AMBIENCE (`amb.*`) and INTERFACE (`term.*`,
+ * `hud.*`). A sounds.lua row may name its own: `bus = "tells"`. The player's
+ * levels multiply on top of everything above, the sounds.lua master
+ * included -- an F5 reload never overwrites what the player chose.
+ *
  * TERMINAL LOOPS. The menu has no watcher here, so it raises its beds
  * (intercept static, the corruption caution) as events: a `loop = true` row
  * raised WITH a key is a keep-alive request, exactly like wantLoop. Raise it
@@ -44,7 +51,7 @@
  * sounds too; ShadowWorld clears them every pass, so nothing leaks.
  *
  * @author Oleg Ivakhiv
- * @version 1.1
+ * @version 1.2 (channels for MACHINE RITES)
  */
 
 #pragma once
@@ -74,6 +81,9 @@
 class AudioSystem : public ISystem {
 public:
     static constexpr int VOICES = 32;
+
+    /// The player's mixer channels (MACHINE RITES).
+    enum Bus : uint8_t { BUS_EFFECTS = 0, BUS_TELLS, BUS_AMBIENCE, BUS_INTERFACE, BUS_COUNT };
 
     void init(const SystemContext& ctx) override {
         m_em = ctx.em;
@@ -148,6 +158,7 @@ public:
             d.loop = e["loop"].get_or(false);
             d.peakAt = e["peak_at"].get_or(-1.f);
             d.timeScaled = e["time_scaled"].get_or(defaultTimeScaled(id));
+            d.bus = busOf(id, e["bus"].get_or(std::string()));
             if (sol::optional<sol::table> files = e["files"]) {
                 for (const auto& f : *files) {
                     if (!f.second.is<std::string>()) continue;
@@ -225,8 +236,18 @@ public:
         updateVoices(realDt);
     }
 
-    /// Master volume 0..1 (the future MACHINE RITES slider).
+    /// sounds.lua's own master (the mix). The player's levels are separate.
     void setMaster(float v) { m_master = std::clamp(v, 0.f, 1.f); }
+
+    /// The player's levels, 0..1 each (MACHINE RITES). Applied to playing
+    /// voices on the next frame.
+    void setUserVolumes(float master, float effects, float tells, float ambience, float ui) {
+        m_userMaster = std::clamp(master, 0.f, 1.f);
+        m_userBus[BUS_EFFECTS] = std::clamp(effects, 0.f, 1.f);
+        m_userBus[BUS_TELLS] = std::clamp(tells, 0.f, 1.f);
+        m_userBus[BUS_AMBIENCE] = std::clamp(ambience, 0.f, 1.f);
+        m_userBus[BUS_INTERFACE] = std::clamp(ui, 0.f, 1.f);
+    }
 
 private:
     // ========================================================================
@@ -238,7 +259,20 @@ private:
         int   maxVoices = 4, priority = 3;
         bool  loop = false, timeScaled = true;
         float lastPlay = -1e9f;
+        Bus   bus = BUS_EFFECTS;
     };
+
+    /// Which channel a sound is on: its own `bus` field, else its id prefix.
+    static Bus busOf(const std::string& id, const std::string& named) {
+        if (named == "tells") return BUS_TELLS;
+        if (named == "ambience") return BUS_AMBIENCE;
+        if (named == "interface") return BUS_INTERFACE;
+        if (named == "effects") return BUS_EFFECTS;
+        if (id.rfind("tell.", 0) == 0) return BUS_TELLS;
+        if (id.rfind("amb.", 0) == 0) return BUS_AMBIENCE;
+        if (id.rfind("term.", 0) == 0 || id.rfind("hud.", 0) == 0) return BUS_INTERFACE;
+        return BUS_EFFECTS;
+    }
 
     /// The player's rewards and the terminal must not slide down in slow-mo:
     /// a parry plays DURING its own hitstop, and slowing it would bury it.
@@ -281,6 +315,7 @@ private:
         uint64_t key = 0;
         float env = 1.f, envTarget = 1.f, envRate = 0.f;
         float started = 0.f;
+        Bus bus = BUS_EFFECTS;
         void stop() { snd.reset(); active = false; loop = false; key = 0; alive = false; }
     };
 
@@ -357,6 +392,7 @@ private:
         v.positional = e.positional;
         v.id = id;
         v.priority = d.priority;
+        v.bus = d.bus;
         v.defGain = d.gain;
         v.gain = e.gain;
         const float r = std::uniform_real_distribution<float>(-1.f, 1.f)(m_rng);
@@ -399,7 +435,7 @@ private:
         float atten = 1.f, pan = 0.f;
         if (v.positional) spatial(v.pos, atten, pan);
         const float bus = v.ui ? 1.f : m_worldBus;
-        const float vol = m_master * v.defGain * v.gain * v.env * atten * bus;
+        const float vol = m_master * m_userMaster * m_userBus[v.bus] * v.defGain * v.gain * v.env * atten * bus;
         v.snd->setVolume(std::clamp(vol * 100.f, 0.f, 100.f));
         v.snd->setPan(pan);
         v.snd->setPitch(std::max(0.05f, v.pitch * ((v.timeScaled && !v.ui) ? m_timeFactor : 1.f)));
@@ -1066,6 +1102,9 @@ private:
 
     // Settings (sounds.lua `audio` table)
     float m_master = 0.8f, m_hearRadius = 1900.f, m_pauseGain = 0.45f, m_panWidth = 0.75f;
+    // The player's levels (MACHINE RITES): never touched by a reload.
+    float m_userMaster = 1.f;
+    std::array<float, BUS_COUNT> m_userBus{ 1.f, 1.f, 1.f, 1.f };
     std::string m_assetRoot = "assets/";
 
     // Buses

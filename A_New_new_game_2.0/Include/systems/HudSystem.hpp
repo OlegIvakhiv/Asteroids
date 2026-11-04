@@ -62,6 +62,7 @@ public:
 
     /// Fonts are owned by game.cpp; pass one in after init().
     void setFont(const sf::Font* font) { m_font = font; }
+    const sf::Font* font() const { return m_font; }
 
     /// Where each widget was drawn last frame, in screen px. The doctrine
     /// scenes (utils/DoctrineStage) point their callouts at the real bars

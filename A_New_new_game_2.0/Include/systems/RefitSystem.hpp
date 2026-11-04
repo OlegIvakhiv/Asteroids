@@ -52,8 +52,39 @@
  * heats with the hull, like enemy plates) or a fixed COLOUR. The hull itself
  * may be see-through; parts set UNDER the hull then show through it.
  *
+ * ============================================================================
+ * 4.0: THE TERMINAL FRAME
+ * ============================================================================
+ * Playtest: "still the old design; everything is cramped, and PAINT with
+ * DETAILS is the least friendly -- half the figures reshape, half do not,
+ * and the canopy goes against how every other ship is built". Now:
+ *
+ *  - SAME MACHINE AS THE TERMINAL. 1920x1080 design canvas, letterboxed;
+ *    header with a breadcrumb, footer keycaps, dot grid, scanlines. Panels
+ *    open on the centre line and fold away again when you leave.
+ *
+ *  - FOUR STAGES, ONE JOB EACH (left column, M / Tab steps through them):
+ *      HULL     hitbox, guns, drives          STRUCTURE
+ *      MODEL    the silhouette they shoot at  STRUCTURE
+ *      COLOURS  hull, outline, effects        PAINT
+ *      PARTS    plates, stripes, rings        PAINT
+ *    Under them: the FRAME class and the SHIP FILE. The centre is the canvas
+ *    with that stage's tools on a strip above it; the right column holds
+ *    that stage's windows and re-opens when the stage changes.
+ *
+ *  - EVERY PART IS A PLATE. LINE, PANEL, FRAME, OVAL, RING, WEDGE, FIN,
+ *    HALF, CHEVRON, HEX: all move, turn, size AND reshape the same way, and
+ *    any of them can be FILLED or an OUTLINE band. PARTS has a catalog, the
+ *    list of parts on the ship (click to select, layer up / down), and an
+ *    inspector with the part's ink and colour right there.
+ *
+ *  - NO CANOPY CATALOG. A canopy is a few simple parts, so it is built
+ *    from them. Old figures and canopies become plates when a ship enters
+ *    the bay (ship::migrateLivery), so nothing an old ship had is lost.
+ *
  * @author Oleg Ivakhiv
- * @version 3.2 -- Phase 1: plates, PAINT tools, point editing, TONE ink,
+ * @version 4.0 -- terminal frame, four stages, every part a plate
+ *          3.2 -- Phase 1: plates, PAINT tools, point editing, TONE ink,
  *                 see-through hull
  *          3.1 -- Phase 0: undo/redo, zoom/pan, anchored gizmo with
  *                 clamp-to-limit, exact fit tests, picker fix, new Details panel
@@ -88,6 +119,7 @@ public:
         m_window = ctx.window;
         m_lua = ctx.lua;
         m_ui.attach(ctx.window);
+        m_ui.setDesignSize({ DW, DH });   // 4.0: the terminal's canvas, letterboxed
     }
 
     void setFont(sf::Font* f) { m_font = f; m_ui.setFonts(m_font, m_mono); }
@@ -164,6 +196,18 @@ public:
         m_skipCommit = false;
 
         m_inputLock = 0.12f;   // belt and braces against fast re-entry
+        m_closeT = -1.f;
+        m_stageT = 0.f;
+        m_pathT = 0.f;
+        m_layerScroll = 0;
+
+        // 4.0: figures and the canopy become plates the first time the bay
+        // sees them. Before the undo history starts, so it cannot be undone
+        // into a state the editor no longer offers.
+        if (m_livery && m_design) {
+            const int n = ship::migrateLivery(*m_livery, m_design->envelope());
+            if (n > 0) toast(std::to_string(n) + " OLD PART" + (n == 1 ? "" : "S") + " NOW EDITABLE PLATES");
+        }
 
         m_ui.primeInput();
         m_ui.resetReveal();
@@ -175,12 +219,20 @@ public:
     /// The hangar name of the design in the bay ("" = never named). The main
     /// terminal shows it as the hunter's callsign.
     const std::string& shipName() const { return m_shipName; }
+    /// The ship restored at launch keeps its hangar name (SAVE / OVERWRITE stay honest).
+    void setShipName(const std::string& n) { m_shipName = n; m_nameBuf = n; }
 
     void update(float dt) override {
         if (!m_window || !m_font || !m_design) return;
         dt = std::clamp(dt, 0.f, 0.1f);
         m_time += dt;
         if (m_openTimer < 3.f) m_openTimer += dt;
+        if (m_stageT < 3.f) m_stageT += dt;
+        m_pathT += dt;
+        if (m_closeT >= 0.f) {
+            m_closeT += dt;
+            if (m_closeT >= CLOSE_TOTAL) { m_closeT = -1.f; m_exit = true; }
+        }
         m_rejectFlash = std::max(0.f, m_rejectFlash - dt * 1.6f);
         if (m_toastTimer > 0.f) m_toastTimer -= dt;
 
@@ -193,7 +245,7 @@ public:
         openGesture(lDownNow);
 
         m_inputLock = std::max(0.f, m_inputLock - dt);
-        if (m_inputLock <= 0.f && !m_ui.glossaryOpen()) handleInput();
+        if (m_inputLock <= 0.f && !m_ui.glossaryOpen() && m_closeT < 0.f) handleInput();
         m_wheel = 0.f;
         draw();
 
@@ -220,11 +272,18 @@ private:
     static inline const sf::Color TEXT_DEAD = ui::TEXT_DEAD;
     /// The Rift's own colour -- WeaponSystem's bolt, charge sparks and rings.
     static inline const sf::Color VIOLET = ui::VIOLET;
+    /// Knocked-out text on a lit bar.
+    static inline const sf::Color INK = ui::INK;
 
     static constexpr float OPEN_DUR = 0.30f;
     static constexpr float HANDLE_R = 7.f;
 
     enum class Mode { Hull, Model, Paint };
+    /// PAINT is two stages: what colours the ship and its effects are, and the parts on it.
+    enum class PaintPage { Colours, Parts };
+
+    static constexpr float DW = 1920.f, DH = 1080.f;
+    static constexpr float CLOSE_TOTAL = 0.52f;   ///< the fold-away on the way out
 
     /// What a palette click paints. Part = the selected figure or plate.
     enum class PaintTarget { Hull, Outline, Plasma, Thrust, Turbo, Dodge, Parry, Homing, Cockpit, Part };
@@ -474,22 +533,27 @@ private:
     /// The bottom row of buttons. One function places them for drawing AND
     /// for the preview's hit tests, so the two cannot drift apart.
     struct ControlRects {
-        Rect back, mirror, third, cls[ship::HULL_CLASS_COUNT], undo, redo, hangar;
+        Rect back, mirror, third, fit, tool[4], cls[ship::HULL_CLASS_COUNT], undo, redo, hangar, exportB;
     };
 
+    /// Every button that is not inside a stage window: the canvas tool strip,
+    /// the FRAME rows and the SHIP FILE buttons. Shared by drawing and the
+    /// stat preview's hover tests.
     ControlRects controlRects() const {
-        const sf::Vector2f size = viewSize();
-        const float y = size.y - 92.f, w = 150.f, h = 38.f, gap = 10.f;
-        float x = size.x * 0.015f;
         ControlRects c;
-        c.back = { x, y, 170.f, h };   x += 170.f + gap * 2.f;
-        c.mirror = { x, y, w, h };     x += w + gap;
-        c.third = { x, y, w, h };      x += w + gap * 2.f;
-        for (int i = 0; i < ship::HULL_CLASS_COUNT; ++i) { c.cls[i] = { x, y, 150.f, h }; x += 150.f + gap; }
-        x += gap;
-        c.undo = { x, y, 110.f, h };   x += 110.f + gap;
-        c.redo = { x, y, 110.f, h };   x += 110.f + gap * 2.f;
-        c.hangar = { x, y, 140.f, h };
+        const Rect cp = canvasPanel(), fr = frameRect(), sh = shipRect();
+        const float ty = cp.y + 12.f, th = 32.f;
+        c.mirror = { cp.x + 16.f, ty, 150.f, th };
+        c.third = { cp.x + 176.f, ty, 180.f, th };
+        c.fit = { cp.x + cp.w - 16.f - 110.f, ty, 110.f, th };
+        for (int i = 0; i < 4; ++i) c.tool[i] = { cp.x + 376.f + static_cast<float>(i) * 94.f, ty, 88.f, th };
+        for (int i = 0; i < ship::HULL_CLASS_COUNT; ++i)
+            c.cls[i] = { fr.x + 20.f, fr.y + 30.f + static_cast<float>(i) * 52.f, fr.w - 40.f, 44.f };
+        c.hangar = { sh.x + 20.f, sh.y + 92.f, 125.f, 32.f };
+        c.exportB = { sh.x + 155.f, sh.y + 92.f, 125.f, 32.f };
+        c.undo = { sh.x + 20.f, sh.y + 134.f, 125.f, 32.f };
+        c.redo = { sh.x + 155.f, sh.y + 134.f, 125.f, 32.f };
+        c.back = { sh.x + 20.f, sh.y + sh.h - 58.f, sh.w - 40.f, 40.f };
         return c;
     }
 
@@ -644,7 +708,7 @@ private:
         const HangarEntry& e = m_hangar[i];
         if (!e.ok) { m_hangarMsg = "CANNOT LOAD - " + e.err; m_hangarMsgBad = true; return; }
         *m_design = e.design;
-        if (m_livery) *m_livery = e.livery;
+        if (m_livery) { *m_livery = e.livery; ship::migrateLivery(*m_livery, m_design->envelope()); }
         deselect();
         m_viewInit = false;
         m_viewManual = false;
@@ -709,7 +773,7 @@ private:
         refreshHangar();
     }
 
-    Rect hangarRect() const { return hullRect(); }
+    Rect hangarRect() const { return canvasPanel(); }
 
     /// While the hangar is open it owns the keyboard: typing goes to the name.
     void handleHangarInput() {
@@ -760,28 +824,48 @@ private:
     // LAYOUT
     // ========================================================================
 
-    /// Screen view matching the CURRENT framebuffer. Rebuilt every frame --
-    /// getDefaultView() is frozen at creation size.
-    sf::View uiView() const {
-        const sf::Vector2u s = m_window->getSize();
-        return sf::View(sf::FloatRect({ 0.f, 0.f },
-            { static_cast<float>(s.x), static_cast<float>(s.y) }));
+    /// 4.0: the design canvas (1920x1080), letterboxed into the window exactly
+    /// like the terminal -- one layout at every window size.
+    sf::View uiView() const { return m_ui.uiView(); }
+    sf::Vector2f viewSize() const { return { DW, DH }; }
+
+    // Left column: stages, frame, ship file. Centre: the canvas (tool strip
+    // on top, the editor under it). Right column: the stage's windows.
+    Rect stagesRect()  const { return { 38.f, 116.f, 300.f, 330.f }; }
+    Rect frameRect()   const { return { 38.f, 478.f, 300.f, 196.f }; }
+    Rect shipRect()    const { return { 38.f, 706.f, 300.f, 254.f }; }
+    Rect canvasPanel() const { return { 376.f, 116.f, 900.f, 844.f }; }
+    Rect hullRect()    const { return { 377.f, 172.f, 898.f, 787.f }; }   ///< the editor, under the tool strip
+    Rect statsRect()   const { return { 1314.f, 116.f, 568.f, 440.f }; }
+    Rect mountRect()   const { return { 1314.f, 588.f, 568.f, 180.f }; }
+    Rect statusRect()  const { return { 1314.f, 800.f, 568.f, 160.f }; }
+    Rect targetsRect() const { return { 1314.f, 116.f, 568.f, 326.f }; }
+    Rect pickerRect()  const { return { 1314.f, 474.f, 568.f, 486.f }; }
+    Rect catalogRect() const { return { 1314.f, 116.f, 568.f, 206.f }; }
+    Rect layersRect()  const { return { 1314.f, 354.f, 568.f, 250.f }; }
+    Rect inspectRect() const { return { 1314.f, 636.f, 568.f, 324.f }; }
+
+    // ---- Stages: HULL, MODEL, COLOURS, PARTS ----------------------------------
+    int stage() const {
+        if (m_mode == Mode::Hull) return 0;
+        if (m_mode == Mode::Model) return 1;
+        return m_paintPage == PaintPage::Colours ? 2 : 3;
+    }
+    bool partsStage() const { return m_mode == Mode::Paint && m_paintPage == PaintPage::Parts; }
+
+    void setStage(int s) {
+        s = ((s % 4) + 4) % 4;
+        if (s == stage()) return;
+        const Mode m = s == 0 ? Mode::Hull : (s == 1 ? Mode::Model : Mode::Paint);
+        m_paintPage = (s == 3) ? PaintPage::Parts : PaintPage::Colours;
+        setMode(m);
+        if (s == 2) { m_paintTarget = PaintTarget::Hull; syncPickerFrom(targetColor(m_paintTarget)); }
+        m_stageT = 0.f;      // the stage's windows open again
+        m_pathT = 0.f;       // and the breadcrumb retypes its last part
     }
 
-    sf::Vector2f viewSize() const {
-        const sf::Vector2u s = m_window->getSize();
-        return { static_cast<float>(s.x), static_cast<float>(s.y) };
-    }
-
-    Rect frac(float x, float y, float w, float h) const {
-        const sf::Vector2f s = viewSize();
-        return { x * s.x, y * s.y, w * s.x, h * s.y };
-    }
-
-    Rect hullRect()   const { return frac(0.015f, 0.105f, 0.600f, 0.775f); }
-    Rect statsRect()  const { return frac(0.632f, 0.112f, 0.353f, 0.420f); }
-    Rect mountRect()  const { return frac(0.632f, 0.560f, 0.353f, 0.180f); }
-    Rect statusRect() const { return frac(0.632f, 0.768f, 0.353f, 0.112f); }
+    /// Leave through the fold-away; wantsExit() turns true when it is done.
+    void requestExit() { if (m_closeT < 0.f) m_closeT = 0.f; }
 
     sf::Vector2f toLocal(sf::Vector2f screen) const {
         const Rect r = hullRect();
@@ -877,6 +961,12 @@ private:
         const bool model = (m_mode == Mode::Model);
         const bool paint = (m_mode == Mode::Paint);
 
+        // The parts list scrolls with the wheel; the canvas zooms with it.
+        if (partsStage() && m_wheel != 0.f && layersRect().contains(m_mouse)) {
+            m_layerScroll -= static_cast<int>(std::round(m_wheel));
+            m_wheel = 0.f;
+        }
+
         // ---- Shared by every mode: view, undo/redo, mirror ----
         handleViewInput(inPanel);
 
@@ -899,14 +989,16 @@ private:
         updateHover(inPanel);
 
         if (paint) {
-            handlePaintInput(lDown, rDown, inPanel);
+            // COLOURS has no parts to grab: the canvas there is a preview,
+            // only the picker takes the mouse.
+            handlePaintInput(lDown, rDown, inPanel && partsStage());
             const bool mKeyP = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::M)
                 || sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Tab);
-            if (mKeyP && !m_kM) setMode(Mode::Hull);
+            if (mKeyP && !m_kM) setStage(stage() + 1);
             m_kM = mKeyP;
             const bool exitKeyP = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Escape)
                 || sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Enter);
-            if (exitKeyP && !m_kExit) m_exit = true;
+            if (exitKeyP && !m_kExit) requestExit();
             m_kExit = exitKeyP;
             m_lDown = lDown;
             m_rDown = rDown;
@@ -916,7 +1008,7 @@ private:
         // ---- Mode ----
         const bool mKey = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::M)
             || sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Tab);
-        if (mKey && !m_kM) setMode(model ? Mode::Paint : Mode::Model);
+        if (mKey && !m_kM) setStage(stage() + 1);
         m_kM = mKey;
 
         // ---- Left drag ----
@@ -989,7 +1081,7 @@ private:
 
         const bool exitKey = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Escape)
             || sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Enter);
-        if (exitKey && !m_kExit) m_exit = true;
+        if (exitKey && !m_kExit) requestExit();
         m_kExit = exitKey;
 
         m_lDown = lDown;
@@ -1812,9 +1904,24 @@ private:
         // Small hulls: shrink the stamp until it fits rather than refusing.
         for (int tries = 0; tries < 4 && !ship::plateFits(p, env); ++tries) { p.w *= 0.75f; p.h *= 0.75f; }
         if (!ship::plateFits(p, env)) { reject("NO ROOM INSIDE THE MODEL LIMIT"); return; }
+        // A new part never lands exactly on another one: step along the
+        // centreline until the spot is free (or give up and stack).
+        const auto taken = [&](sf::Vector2f at) {
+            for (const auto& q : m_livery->plates)
+                if (std::fabs(q.pos.x - at.x) < 2.f && std::fabs(q.pos.y - at.y) < 2.f) return true;
+            return false;
+            };
+        if (taken(p.pos)) {
+            const sf::Vector2f base = p.pos;
+            for (int k = 1; k <= 12; ++k) {
+                Plate q = p;
+                q.pos = { base.x, base.y + static_cast<float>((k + 1) / 2) * 8.f * ((k % 2) ? 1.f : -1.f) };
+                if (!taken(q.pos) && ship::plateFits(q, env)) { p = q; break; }
+            }
+        }
         m_livery->plates.push_back(p);
         select({ SelKind::Plate, static_cast<int>(m_livery->plates.size()) - 1, false });
-        toast(std::string(ship::plateStampName(kind)) + " PLATE ADDED - T TO RESHAPE");
+        toast(std::string(ship::plateStampName(kind)) + " ADDED - W E R T TO SHAPE IT");
     }
 
     /// A figure becomes a plate with the same look, so its outline can be edited.
@@ -1982,7 +2089,8 @@ private:
         deselect();
         m_hover = {};
         toast(m == Mode::Model ? "MODEL - SHAPE WHAT THE SHIP LOOKS LIKE"
-            : m == Mode::Paint ? "PAINT - PARTS, COLOURS, CANOPY   W E R T TOOLS"
+            : m == Mode::Paint ? (m_paintPage == PaintPage::Parts ? "PARTS - ADD, PICK, SHAPE   W E R T TOOLS"
+                : "COLOURS - PICK A TARGET, DRAG IN THE PICKER")
             : "HULL - HITBOX AND MOUNTS");
     }
 
@@ -2062,89 +2170,164 @@ private:
     void beginClip(const Rect& r) { m_ui.beginClip({ r.x, r.y, r.w, r.h }); }
     void endClip() { m_ui.endClip(); }
 
-    float revealOf(float delay) const {
-        const float t = m_openTimer - delay;
-        return (t <= 0.f) ? 0.f : std::clamp(t / OPEN_DUR, 0.f, 1.f);
-    }
+    float revealOf(float delay) const { return panelP(delay, false); }
 
     // ========================================================================
     // DRAW
     // ========================================================================
 
     void draw() {
+        // Whole window first, letterbox bars included, then the design canvas.
+        m_window->setView(m_ui.windowView());
+        {
+            sf::RectangleShape bg(m_ui.windowSize());
+            bg.setFillColor(VOID_BG);
+            m_window->draw(bg);
+        }
         m_window->setView(uiView());
-        const sf::Vector2f size = viewSize();
 
-        sf::RectangleShape bg(size);
-        bg.setPosition({ 0.f, 0.f });
-        bg.setFillColor(VOID_BG);
-        m_window->draw(bg);
+        // A faint dot grid: the gutters read as a surface, as in the terminal.
+        {
+            sf::VertexArray dots(sf::PrimitiveType::Triangles);
+            const sf::Color dc(CYAN_LOW.r, CYAN_LOW.g, CYAN_LOW.b, 110);
+            for (float y = 120.f; y < 980.f; y += 40.f)
+                for (float x = 40.f; x < DW - 30.f; x += 40.f) {
+                    dots.append({ { x, y }, dc }); dots.append({ { x + 1.f, y }, dc }); dots.append({ { x + 1.f, y + 1.f }, dc });
+                    dots.append({ { x, y }, dc }); dots.append({ { x + 1.f, y + 1.f }, dc }); dots.append({ { x, y + 1.f }, dc });
+                }
+            m_window->draw(dots);
+        }
+
+        // Sliders publish their rects while their panel draws; a hidden one
+        // must not keep last frame's.
+        m_svRect = m_hueRect = m_alphaRect = m_shadeRect = Rect{ -1e6f, -1e6f, 0.f, 0.f };
 
         updatePreview();   // after input, before anything reads it
-        drawHeader(size);
-        drawHullPanel();
-        drawStatsPanel();
-        drawMountPanel();
-        drawStatusPanel();
-        drawHints(size);
-        drawHangar();      // over the canvas; the controls below stay visible but locked
-        drawControls(size);
+        drawHeader();
+        drawFooter();
+
+        drawStagesPanel();
+        drawFramePanel();
+        drawShipPanel();
+
+        drawHullPanel();   // the canvas (and its tool strip)
+        if (m_mode == Mode::Paint) {
+            if (m_paintPage == PaintPage::Colours) { drawTargetsPanel(); drawPickerPanel(); }
+            else { drawCatalogPanel(); drawLayersPanel(); drawInspectorPanel(); }
+        }
+        else {
+            drawStatsPanel();
+            drawMountPanel();
+            drawStatusPanel();
+        }
+        drawHangar();      // over the canvas; everything else stays visible but locked
+        drawGlossaryRefit();
+        scanlines();
     }
 
-    void drawHeader(const sf::Vector2f& size) {
-        sf::Text title(*m_font, "REFIT BAY", 34);
-        title.setLetterSpacing(1.8f);
-        title.setFillColor(CYAN);
-        title.setPosition({ size.x * 0.015f, size.y * 0.028f });
-        m_window->draw(title);
+    void drawHeader() {
+        txt("REFIT BAY", 38.f, 22.f, 34, CYAN, 2.2f, false);
+        txt("HUNTER-NET TERMLINK  //  HANGAR DR-07", 40.f, 66.f, 12, TEXT_DIM, 1.8f);
 
-        // ---- Layer tabs ----
-        float tx = size.x * 0.015f + title.getGlobalBounds().size.x + 36.f;
-        const float ty = size.y * 0.030f, th = 34.f;
-        if (m_ui.button({ tx, ty, 120.f, th }, "HULL", m_mode == Mode::Hull, false, false, 16))
-            if (m_mode != Mode::Hull) setMode(Mode::Hull);
-        tx += 128.f;
-        if (m_ui.button({ tx, ty, 120.f, th }, "MODEL", m_mode == Mode::Model, false, false, 16))
-            if (m_mode != Mode::Model) setMode(Mode::Model);
-        tx += 128.f;
-        if (m_ui.button({ tx, ty, 120.f, th }, "PAINT", m_mode == Mode::Paint, false, false, 16))
-            if (m_mode != Mode::Paint) setMode(Mode::Paint);
-        tx += 150.f;
+        // Breadcrumb: the stage part retypes itself on every stage change, and
+        // the whole address deletes itself on the way out.
+        const std::string base = "TERMINAL://HANGAR/REFIT/";
+        const std::string tail = stageRow(stage()).label;
+        std::string shown;
+        if (m_closeT >= 0.f) {
+            const std::string full = base + tail;
+            const float n = std::max(0.f, static_cast<float>(full.size()) - m_closeT * 120.f);
+            shown = full.substr(0, static_cast<std::size_t>(n));
+        }
+        else {
+            const float nb = std::clamp(m_openTimer * 70.f, 0.f, static_cast<float>(base.size()));
+            shown = base.substr(0, static_cast<std::size_t>(nb));
+            if (nb >= static_cast<float>(base.size()))
+                shown += tail.substr(0, static_cast<std::size_t>(std::clamp(m_pathT * 50.f, 0.f, static_cast<float>(tail.size()))));
+        }
+        txt(">", 640.f, 32.f, 18, AMBER);
+        txt(shown, 662.f, 32.f, 18, TEXT);
+        if (std::fmod(m_time, 0.66f) < 0.33f) fillR({ 666.f + tw(shown, 18, 1.4f), 36.f, 11.f, 18.f }, CYAN);
 
-        std::string sub = std::string(m_design->spec().name) + " FRAME";
-        sf::Text cls(monoFont(), sub, 15);
-        cls.setLetterSpacing(1.8f);
-        cls.setFillColor(AMBER);
-        cls.setPosition({ tx, size.y * 0.042f });
-        m_window->draw(cls);
-
-        sf::Text mir(monoFont(), m_design->symmetric() ? "MIRROR ON" : "MIRROR OFF", 15);
-        mir.setLetterSpacing(1.8f);
-        mir.setFillColor(m_design->symmetric() ? CYAN : AMBER);
-        mir.setPosition({ tx + cls.getGlobalBounds().size.x + 30.f, size.y * 0.042f });
-        m_window->draw(mir);
-
-        // Which file this ship is, so SAVE / OVERWRITE in the hangar are not a guess.
-        sf::Text nm(monoFont(), m_shipName.empty() ? "UNSAVED" : m_shipName, 15);
-        nm.setLetterSpacing(1.8f);
-        nm.setFillColor(m_shipName.empty() ? TEXT_DEAD : TEXT_DIM);
-        nm.setPosition({ mir.getPosition().x + mir.getGlobalBounds().size.x + 30.f, size.y * 0.042f });
-        m_window->draw(nm);
-
+        // Right: airworthiness, then what the ship IS.
         const ship::ValidationResult v = m_design->validate();
-        sf::Text st(monoFont(), v.ok ? "HULL  AIRWORTHY" : "HULL  REJECTED", 16);
-        st.setLetterSpacing(1.6f);
-        st.setFillColor(v.ok ? GREEN : RED);
-        st.setPosition({ size.x - st.getGlobalBounds().size.x - size.x * 0.015f,
-                         size.y * 0.042f });
-        m_window->draw(st);
+        const float pulse = 0.55f + 0.45f * std::fabs(std::sin(m_time * 2.2f));
+        const std::string st = v.ok ? "HULL  AIRWORTHY" : "HULL  REJECTED";
+        const sf::Color sc = v.ok ? GREEN : RED;
+        txtR(st, DW - 38.f, 22.f, 16, sc, 1.8f);
+        fillR({ DW - 38.f - tw(st, 16, 1.8f) - 18.f, 28.f, 8.f, 8.f }, withA(sc, pulse));
+        const std::string sub = std::string(m_design->spec().name) + " FRAME   //   "
+            + (m_design->symmetric() ? "MIRROR ON" : "MIRROR OFF") + "   //   "
+            + (m_shipName.empty() ? std::string("UNSAVED") : m_shipName);
+        txtR(sub, DW - 38.f, 54.f, 12, TEXT_DIM, 1.6f);
 
-        hline(size.x * 0.012f, size.y * 0.092f, size.x * 0.976f, CYAN_LOW);
+        hline(38.f, 92.f, DW - 76.f, CYAN_LOW);
+        for (int i = 0; i <= 32; ++i) vline(38.f + i * (DW - 76.f) / 32.f, 92.f, i % 4 == 0 ? 6.f : 3.f, CYAN_LOW);
     }
+
+    /// Keycaps for the stage, like the terminal's footer: what the keys do HERE.
+    void drawFooter() {
+        hline(38.f, 990.f, DW - 76.f, CYAN_LOW);
+        float x = 38.f;
+        const float y = 1006.f;
+        switch (stage()) {
+        case 0:
+            x = keycap(x, y, "LMB", "DRAG POINT"); x = keycap(x, y, "RMB", "FIT / REMOVE"); x = keycap(x, y, "R", "RIFT");
+            x = keycap(x, y, "A", "AUTO-MOUNT"); x = keycap(x, y, "INS/DEL", "POINT"); x = keycap(x, y, "1-3", "FRAME");
+            break;
+        case 1:
+            x = keycap(x, y, "LMB", "DRAG POINT"); x = keycap(x, y, "RMB", "ADD / REMOVE"); x = keycap(x, y, "INS/DEL", "POINT");
+            x = keycap(x, y, "1-3", "FRAME");
+            break;
+        case 2:
+            x = keycap(x, y, "LMB", "PICK A TARGET, DRAG THE PICKER");
+            break;
+        default:
+            x = keycap(x, y, "W E R T", "MOVE TURN SIZE SHAPE"); x = keycap(x, y, "ARROWS", "NUDGE");
+            x = keycap(x, y, "CTRL+D", "COPY"); x = keycap(x, y, "DEL", "REMOVE");
+            break;
+        }
+        x = keycap(x, y, "M", "NEXT STAGE");
+        x = keycap(x, y, "CTRL+Z/Y", "UNDO / REDO");
+        x = keycap(x, y, "ESC", "BACK");
+        txtR("WHEEL ZOOM   MMB PAN   F FIT", DW - 96.f, 1010.f, 12, TEXT_DEAD);
+    }
+
+    float keycap(float x, float y, const std::string& k, const std::string& label) {
+        const float w = tw(k, 14, 1.4f) + 14.f;
+        const sf::Color c(CYAN_MID.r, CYAN_MID.g, CYAN_MID.b, 205);
+        hline(x, y, w, c); hline(x, y + 21.f, w, c); vline(x, y, 22.f, c); vline(x + w, y, 22.f, c);
+        fillR({ x + 1.f, y + 18.f, w - 1.f, 3.f }, withA(CYAN_LOW, 0.7f));
+        txt(k, x + 7.f, y + 2.f, 14, CYAN);
+        if (label.empty()) return x + w + 10.f;
+        txt(label, x + w + 10.f, y + 2.f, 14, TEXT_DIM);
+        return x + w + 10.f + tw(label, 14, 1.4f) + 26.f;
+    }
+
+    /// CRT scanlines over everything, as the terminal does.
+    void scanlines() {
+        sf::VertexArray va(sf::PrimitiveType::Lines);
+        const sf::Color c(0, 0, 0, 26);
+        for (float y = 0.f; y < DH; y += 3.f) { va.append({ { 0.f, y }, c }); va.append({ { DW, y }, c }); }
+        m_window->draw(va);
+    }
+
+    /// 0 = shut, 1 = open. The left column and the canvas open with the
+    /// screen; the right column (stagePanel) opens again on every stage
+    /// change. On the way out everything folds back, last-opened first.
+    float panelP(float delay, bool stagePanel) const {
+        if (m_closeT >= 0.f) {
+            const float t = m_closeT - (0.5f - delay) * 0.45f;
+            return 1.f - std::clamp(t / 0.26f, 0.f, 1.f);
+        }
+        const float t = (stagePanel ? m_stageT : m_openTimer) - delay;
+        return (t <= 0.f) ? 0.f : std::clamp(t / OPEN_DUR, 0.f, 1.f);
+    }
+
 
     bool panelChrome(const Rect& r, const std::string& label, float delay,
-        sf::Color accent, bool heavy) {
-        const float p = revealOf(delay);
+        sf::Color accent, bool heavy, bool stagePanel = false, const std::string& code = "") {
+        const float p = panelP(delay, stagePanel);
         if (p <= 0.f) return false;
 
         const float wf = std::clamp(p / 0.34f, 0.06f, 1.f);
@@ -2162,6 +2345,7 @@ private:
             const float a = std::clamp((1.f - p) * 2.2f, 0.f, 1.f);
             hline(d.x, d.cy(), d.w, sf::Color(accent.r, accent.g, accent.b,
                 static_cast<std::uint8_t>(235 * a)));
+            if (p < 0.08f) fillR({ d.cx() - 4.f, d.cy() - 2.f, 8.f, 4.f }, withA(TEXT, a));
         }
 
         const sf::Color c(accent.r, accent.g, accent.b, heavy ? 210 : 130);
@@ -2171,32 +2355,39 @@ private:
         }
         vline(d.x, d.y, d.h, c);
         vline(d.x + d.w, d.y, d.h, c);
+        if (!heavy) {
+            // Corner brackets, the terminal's hairline panels.
+            const float L = std::min(10.f, std::min(d.w, d.h) * 0.25f);
+            const sf::Color bc(accent.r, accent.g, accent.b, 220);
+            hline(d.x, d.y, L, bc); vline(d.x, d.y, L, bc);
+            hline(d.x + d.w - L, d.y, L, bc); vline(d.x + d.w - 1.f, d.y, L, bc);
+            hline(d.x, d.y + d.h - 1.f, L, bc); vline(d.x, d.y + d.h - L, L, bc);
+            hline(d.x + d.w - L, d.y + d.h - 1.f, L, bc); vline(d.x + d.w - 1.f, d.y + d.h - L, L, bc);
+        }
 
         if (p < 1.f) return false;
 
         if (!label.empty()) {
-            sf::Text t(monoFont(), label, 14);
-            t.setLetterSpacing(1.8f);
             if (heavy) {
-                const float tw = t.getGlobalBounds().size.x + 14.f;
-                sf::RectangleShape tab({ tw, 20.f });
-                tab.setPosition({ r.x + 8.f, r.y - 10.f });
-                tab.setFillColor(accent);
-                m_window->draw(tab);
-                t.setFillColor(sf::Color(4, 5, 8));
-                t.setPosition({ r.x + 15.f, r.y - 8.f });
+                const float w = tw(label, 14, 1.8f) + 14.f;
+                fillR({ r.x + 8.f, r.y - 10.f, w, 20.f }, accent);
+                txt(label, r.x + 15.f, r.y - 9.f, 14, sf::Color(4, 5, 8), 1.8f);
             }
             else {
-                const float tw = t.getGlobalBounds().size.x + 12.f;
-                sf::RectangleShape gap({ tw, 4.f });
-                gap.setPosition({ r.x + 10.f, r.y - 2.f });
-                gap.setFillColor(VOID_BG);
-                m_window->draw(gap);
-                t.setFillColor(accent);
-                t.setPosition({ r.x + 16.f, r.y - 9.f });
+                const float w = tw(label, 14, 1.8f) + 12.f;
+                fillR({ r.x + 10.f, r.y - 2.f, w, 4.f }, VOID_BG);
+                txt(label, r.x + 16.f, r.y - 10.f, 14, accent, 1.8f);
             }
-            m_window->draw(t);
         }
+        if (!code.empty()) {
+            const float w = tw(code, 12, 1.4f) + 12.f;
+            fillR({ r.x + r.w - 16.f - w, r.y - 2.f, w, 4.f }, VOID_BG);
+            txtR(code, r.x + r.w - 22.f, r.y - 8.f, 12, TEXT_DIM);
+        }
+
+        // A 60 ms repaint flicker as the content arrives: a terminal redraw.
+        const float age = (stagePanel ? m_stageT : m_openTimer) - delay - OPEN_DUR;
+        if (m_closeT < 0.f && age < 0.06f && static_cast<int>(age * 100.f) % 2 == 1) return false;
         return true;
     }
 
@@ -2205,7 +2396,9 @@ private:
         if (m_mode == Mode::Paint) { drawPaintCanvas(); return; }
         const Rect r = hullRect();
         const bool model = (m_mode == Mode::Model);
-        if (!panelChrome(r, model ? "MODEL" : "HULL GEOMETRY", 0.00f, model ? VIOLET : CYAN_MID, true)) return;
+        if (!panelChrome(canvasPanel(), model ? "MODEL // SILHOUETTE" : "HULL // GEOMETRY", 0.04f,
+            model ? VIOLET : CYAN_MID, true, false, model ? "WHAT THEY SHOOT AT" : "WHAT HITS AND GETS HIT")) return;
+        drawToolbar();
 
         const auto& pts = m_design->points();
         const auto& stats = m_design->stats();
@@ -2499,9 +2692,13 @@ private:
     // ---- PAINT canvas -----------------------------------------------------
     void drawPaintCanvas() {
         const Rect r = hullRect();
-        if (!panelChrome(r, isEffectTarget(m_paintTarget) ? "LIVE PREVIEW" : "PAINT",
-            0.00f, VIOLET, true) || !m_livery) return;
-        if (isEffectTarget(m_paintTarget)) { drawEffectShowcase(r); return; }
+        const bool colours = (m_paintPage == PaintPage::Colours);
+        const bool fx = colours && isEffectTarget(m_paintTarget);
+        if (!panelChrome(canvasPanel(), fx ? "COLOURS // LIVE PREVIEW" : (colours ? "COLOURS // SHIP" : "PARTS // SHIP"),
+            0.04f, colours ? CYAN_MID : VIOLET, true, false, fx ? targetPreviewName(m_paintTarget) : "")) return;
+        drawToolbar();
+        if (!m_livery) return;
+        if (fx) { drawEffectShowcase(r); return; }
 
         const auto& lv = *m_livery;
         const auto& outline = m_design->renderOutline();
@@ -2634,7 +2831,7 @@ private:
                     }
                     else if (m_tool == Tool::Shape) {
                         sf::Text t(monoFont(), m_selKind == SelKind::Decal
-                            ? "A FIGURE - USE  TO PLATE  IN DETAILS TO EDIT ITS SHAPE"
+                            ? "AN OLD FIGURE - IT HAS A FIXED SHAPE"
                             : "THE CANOPY HAS A FIXED SHAPE", 11);
                         t.setLetterSpacing(1.3f);
                         t.setFillColor(AMBER);
@@ -2680,8 +2877,8 @@ private:
                 m_window->draw(t);
             }
 
-            const char* hintText =
-                (lv.decals.empty() && lv.plates.empty()) ? "ADD A FIGURE OR A PLATE FROM DETAILS ON THE RIGHT"
+            const char* hintText = colours ? "COLOURS   PICK WHAT TO PAINT ON THE RIGHT   //   M NEXT: PARTS"
+                : (lv.decals.empty() && lv.plates.empty()) ? "ADD A PART FROM THE CATALOG ON THE RIGHT"
                 : m_tool == Tool::Move ? "MOVE   DRAG A PART   SHIFT ONE AXIS   ARROWS NUDGE   CTRL+D COPY   RMB / DEL REMOVE"
                 : m_tool == Tool::Turn ? "TURN   DRAG INSIDE THE RING   SHIFT 15 DEG   ARROWS 1 DEG"
                 : m_tool == Tool::Size ? "SIZE   HANDLES PIN THE OPPOSITE SIDE   DRAG INSIDE = EVEN   SHIFT RATIO   ALT FROM CENTRE"
@@ -2969,12 +3166,9 @@ private:
         endClip();
     }
 
-    // ---- PAINT-mode layout ---------------------------------------------------
-    // PAINT needs more room for DETAILS than the hull readout does, so the
-    // right column is re-split here instead of reusing the HULL/MODEL rects.
-    Rect paintListRect() const { return frac(0.632f, 0.112f, 0.353f, 0.330f); }
-    Rect detailRect()    const { return frac(0.632f, 0.470f, 0.353f, 0.312f); }
-    Rect fileRect()      const { return frac(0.632f, 0.810f, 0.353f, 0.070f); }
+    // ========================================================================
+    // COLOURS STAGE: what to paint, and the picker
+    // ========================================================================
 
     /// Targets whose alpha the game actually uses.
     bool alphaLive() const {
@@ -2985,84 +3179,120 @@ private:
 
     bool partSelected() { return selected() != nullptr || selectedPlate() != nullptr; }
 
-    // ---- PAINT panel: targets and a full colour picker --------------------
-    void drawPalettePanel() {
-        const Rect r = paintListRect();
-        if (!panelChrome(r, "PAINT", 0.10f, VIOLET, false) || !m_livery) return;
-
-        // Two columns: what the SHIP is painted, and what its EFFECTS look like.
-        struct Row { const char* label; PaintTarget t; };
-        static const Row shipRows[] = {
-            { "HULL", PaintTarget::Hull }, { "OUTLINE", PaintTarget::Outline },
-            { "CANOPY", PaintTarget::Cockpit }, { "PART", PaintTarget::Part } };
-        static const Row fxRows[] = {
-            { "PLASMA", PaintTarget::Plasma }, { "THRUST", PaintTarget::Thrust },
-            { "TURBO", PaintTarget::Turbo },   { "DODGE", PaintTarget::Dodge },
-            { "PARRY", PaintTarget::Parry },   { "HOMING", PaintTarget::Homing } };
-
-        const float pad = 12.f, colGap = 14.f;
-        const float colW = (r.w - pad * 2.f - colGap) * 0.5f;
-        const float colX[2] = { r.x + pad, r.x + pad + colW + colGap };
-        float y = r.y + 10.f;
-
-        const char* heads[2] = { "SHIP", "EFFECTS - LIVE PREVIEW" };
-        for (int c = 0; c < 2; ++c) {
-            sf::Text ht(monoFont(), heads[c], 10);
-            ht.setLetterSpacing(1.6f);
-            ht.setFillColor(sf::Color(130, 95, 190));
-            ht.setPosition({ colX[c] + 6.f, y + 2.f });
-            m_window->draw(ht);
-            hline(colX[c] + 12.f + ht.getGlobalBounds().size.x, y + 9.f,
-                colW - 18.f - ht.getGlobalBounds().size.x, sf::Color(60, 44, 90));
+    static const char* targetLabel(PaintTarget t) {
+        switch (t) {
+        case PaintTarget::Hull:    return "HULL";
+        case PaintTarget::Outline: return "OUTLINE";
+        case PaintTarget::Plasma:  return "PLASMA";
+        case PaintTarget::Thrust:  return "THRUST";
+        case PaintTarget::Turbo:   return "TURBO";
+        case PaintTarget::Dodge:   return "DODGE";
+        case PaintTarget::Parry:   return "PARRY";
+        case PaintTarget::Homing:  return "HOMING";
+        case PaintTarget::Cockpit: return "CANOPY";
+        default:                   return "PART";
         }
-        y += 17.f;
+    }
 
-        const auto drawRow = [&](const Row& row, float x, float ry) {
-            const Rect line{ x, ry, colW, 19.f };
-            const bool active = (m_paintTarget == row.t);
-            const bool usable = (row.t != PaintTarget::Part) || partSelected();
-            if (consumeClick(line) && usable) {
-                m_paintTarget = row.t;
-                syncPickerFrom(targetColor(row.t));   // the picker opens on the colour in use
-                if (row.t == PaintTarget::Cockpit && m_livery->cockpit.style != ship::CockpitStyle::None)
-                    select({ SelKind::Cockpit, -1, false });
-            }
-            if (active) {
-                sf::RectangleShape hl({ line.w, line.h });
-                hl.setPosition({ line.x, line.y });
-                hl.setFillColor(sf::Color(30, 40, 52));
-                m_window->draw(hl);
-            }
-            sf::Text t(monoFont(), row.label, 12);
-            t.setLetterSpacing(1.5f);
-            t.setFillColor(usable ? (active ? TEXT : TEXT_DIM) : TEXT_DEAD);
-            t.setPosition({ line.x + 6.f, line.y + 2.f });
-            m_window->draw(t);
+    /// A colour chip; see-through colours sit on a checker so the alpha reads.
+    void swatch(const Rect& r, sf::Color c, sf::Color frame) {
+        if (c.a < 250) {
+            const float s = 6.f;
+            for (float y = 0.f; y < r.h; y += s)
+                for (float x = 0.f; x < r.w; x += s) {
+                    const bool odd = (static_cast<int>(x / s) + static_cast<int>(y / s)) % 2 == 1;
+                    fillR({ r.x + x, r.y + y, std::min(s, r.w - x), std::min(s, r.h - y) },
+                        odd ? sf::Color(58, 64, 74) : sf::Color(26, 30, 38));
+                }
+        }
+        fillR(r, c);
+        hline(r.x, r.y, r.w, frame); hline(r.x, r.y + r.h, r.w, frame);
+        vline(r.x, r.y, r.h, frame); vline(r.x + r.w, r.y, r.h, frame);
+    }
 
-            if (row.t == PaintTarget::Part) {
-                // Say what PART is right now, so the row never looks broken.
-                const char* note = !usable ? "SELECT ONE"
-                    : (selected() ? (selected()->tonal ? "FIGURE  TONE" : "FIGURE")
-                        : (selectedPlate()->tonal ? "PLATE  TONE" : "PLATE"));
-                sf::Text e(monoFont(), note, 10);
-                e.setLetterSpacing(1.2f);
-                e.setFillColor(TEXT_DEAD);
-                e.setPosition({ line.x + 56.f, line.y + 4.f });
-                m_window->draw(e);
-            }
+    void drawTargetsPanel() {
+        const Rect r = targetsRect();
+        if (!panelChrome(r, "COLOURS // WHAT", 0.04f, CYAN, true, true, "PICK ONE, THEN THE PICKER")) return;
+        if (!m_livery) return;
 
-            sf::RectangleShape sw({ 34.f, 12.f });
-            sw.setPosition({ line.x + line.w - 40.f, line.y + 3.f });
-            sw.setFillColor(usable ? targetColor(row.t) : sf::Color(30, 34, 40));
-            sw.setOutlineThickness(1.f);
-            sw.setOutlineColor(active ? AMBER : sf::Color(60, 70, 84));
-            m_window->draw(sw);
+        struct Row { const char* label; const char* sub; PaintTarget t; };
+        static const Row shipRows[] = {
+            { "HULL",    "MAY GO SEE-THROUGH", PaintTarget::Hull },
+            { "OUTLINE", "ALWAYS SOLID",       PaintTarget::Outline } };
+        static const Row fxRows[] = {
+            { "PLASMA", "YOUR SHOTS",       PaintTarget::Plasma },
+            { "THRUST", "DRIVE FLAME",      PaintTarget::Thrust },
+            { "TURBO",  "BOOST BURN",       PaintTarget::Turbo },
+            { "DODGE",  "DASH AFTERIMAGE",  PaintTarget::Dodge },
+            { "PARRY",  "THE PARRY ARC",    PaintTarget::Parry },
+            { "HOMING", "HIJACKED ROCKS",   PaintTarget::Homing } };
+
+        const auto row = [&](const Row& rw, const Rect& line, bool tall) {
+            const bool on = (m_paintTarget == rw.t);
+            const bool hot = !m_hangarOpen && line.contains(m_mouse);
+            if (!m_hangarOpen && consumeClick(line) && !on) {
+                m_paintTarget = rw.t;
+                syncPickerFrom(targetColor(rw.t));   // the picker opens on the colour in use
+                m_stageT = std::max(m_stageT, 0.f);
+            }
+            listRow(line, on, hot);
+            const sf::Color c = targetColor(rw.t);
+            if (tall) {
+                txt(rw.label, line.x + 12.f, line.y + 7.f, 16, on ? INK : (hot ? CYAN : TEXT));
+                txt(rw.sub, line.x + 12.f, line.y + 31.f, 10, on ? withA(INK, 0.75f) : TEXT_DIM, 1.4f);
+                swatch({ line.x + line.w - 54.f, line.y + 10.f, 42.f, line.h - 20.f }, c, on ? INK : CYAN_LOW);
+            }
+            else {
+                txt(rw.label, line.x + 12.f, line.y + 4.f, 14, on ? INK : (hot ? CYAN : TEXT));
+                txt(rw.sub, line.x + 96.f, line.y + 7.f, 10, on ? withA(INK, 0.75f) : TEXT_DIM, 1.3f);
+                swatch({ line.x + line.w - 42.f, line.y + 7.f, 30.f, line.h - 14.f }, c, on ? INK : CYAN_LOW);
+            }
             };
-        for (int i = 0; i < 4; ++i) drawRow(shipRows[i], colX[0], y + static_cast<float>(i) * 21.f);
-        for (int i = 0; i < 6; ++i) drawRow(fxRows[i], colX[1], y + static_cast<float>(i) * 21.f);
-        y += 6.f * 21.f + 8.f;
 
-        // ================= COLOUR PICKER =================
+        const float x0 = r.x + 24.f, colW = 222.f;
+        const float x1 = x0 + colW + 34.f, colW1 = r.x + r.w - 20.f - x1;
+        float y = r.y + 22.f;
+        groupLabel("SHIP", x0, y, colW);
+        groupLabel("EFFECTS  //  RUN ON THE CANVAS", x1, y, colW1);
+        y += 24.f;
+        for (int i = 0; i < 2; ++i) row(shipRows[i], { x0, y + i * 64.f, colW, 56.f }, true);
+        for (int i = 0; i < 6; ++i) row(fxRows[i], { x1, y + i * 40.f, colW1, 34.f }, false);
+
+        // Under the ship rows: what the colour is, in numbers.
+        const sf::Color cur = targetColor(m_paintTarget);
+        txt(std::string("NOW  ") + targetLabel(m_paintTarget), x0, y + 140.f, 10, CYAN_MID, 2.f);
+        txt(ship::colorToHex(cur), x0, y + 158.f, 16, TEXT, 1.4f);
+        if (m_paintTarget == PaintTarget::Hull && cur.a < 255) txt("SEE-THROUGH", x0, y + 182.f, 10, AMBER, 1.6f);
+        txt("RIFT VIOLET IS NEVER PAINTABLE", x0, r.y + r.h - 28.f, 10, TEXT_DEAD, 1.4f);
+    }
+
+    void drawPickerPanel() {
+        const Rect r = pickerRect();
+        const sf::Color cur = targetColor(m_paintTarget);
+        if (!panelChrome(r, std::string("PICKER // ") + targetLabel(m_paintTarget), 0.12f, CYAN_MID, false, true,
+            ship::colorToHex(cur))) return;
+        if (!m_livery) return;
+        drawPicker({ r.x + 22.f, r.y + 26.f, r.w - 44.f, r.h - 46.f }, 8);
+    }
+
+    /**
+     * @brief The colour picker: SV square, hue, alpha (where the game uses
+     *        it), a readout and the palette. Fills `area` top to bottom; the
+     *        square takes whatever height the rest leaves.
+     *
+     * Publishes m_svRect / m_hueRect / m_alphaRect for the next frame's drags.
+     */
+    void drawPicker(const Rect& area, int palCols) {
+        const bool showAlpha = alphaLive();
+        int count = 0;
+        const sf::Color* pal = ship::liveryPalette(count);
+        const int palRows = (count + palCols - 1) / palCols;
+        const float cellH = 22.f;
+        const float below = 10.f + 18.f + (showAlpha ? 10.f + 14.f : 0.f) + 12.f + 24.f + 10.f
+            + static_cast<float>(palRows) * (cellH + 4.f);
+        const float svH = std::max(40.f, area.h - below);
+        float y = area.y;
+
         // Saturation across, value down, over the current hue.
         //
         // Two layers, each linear in ONE axis, so the triangle split cannot
@@ -3070,412 +3300,386 @@ private:
         // gives v * lerp(white, hue, s), which is exactly HSV. A single
         // 4-colour quad is NOT bilinear -- each triangle blends only its own
         // three corners, which is where the old grey diagonal smear came from.
-        //
-        // The square takes whatever height is left, so the panel fits small windows.
-        const bool showAlpha = alphaLive();
-        const float below = 8.f + 14.f + 8.f + (showAlpha ? 20.f : 0.f) + 18.f + 14.f + 10.f;
-        const float svH = std::clamp(r.y + r.h - y - below, 40.f, 110.f);
-        m_svRect = { r.x + pad, y, r.w - pad * 2.f, svH };
+        m_svRect = { area.x, y, area.w, svH };
         {
             const sf::Color pure = ship::fromHSV(m_pickH, 1.f, 1.f);
             const sf::Vector2f a{ m_svRect.x, m_svRect.y }, b{ m_svRect.x + m_svRect.w, m_svRect.y };
             const sf::Vector2f c{ m_svRect.x + m_svRect.w, m_svRect.y + m_svRect.h }, d{ m_svRect.x, m_svRect.y + m_svRect.h };
             const sf::Color white(255, 255, 255), clear(0, 0, 0, 0), black(0, 0, 0, 255);
-
             sf::VertexArray sat(sf::PrimitiveType::Triangles, 6);
             sat[0] = { a, white }; sat[1] = { b, pure }; sat[2] = { c, pure };
             sat[3] = { a, white }; sat[4] = { c, pure }; sat[5] = { d, white };
             m_window->draw(sat);
-
             sf::VertexArray val(sf::PrimitiveType::Triangles, 6);
             val[0] = { a, clear }; val[1] = { b, clear }; val[2] = { c, black };
             val[3] = { a, clear }; val[4] = { c, black }; val[5] = { d, black };
             m_window->draw(val);
         }
-
-        sf::CircleShape svKnob(5.f);
-        svKnob.setOrigin({ 5.f, 5.f });
-        svKnob.setPosition({ m_svRect.x + m_pickS * m_svRect.w, m_svRect.y + (1.f - m_pickV) * m_svRect.h });
-        svKnob.setFillColor(sf::Color::Transparent);
-        svKnob.setOutlineThickness(2.f);
-        svKnob.setOutlineColor(m_pickV > 0.55f ? sf::Color(10, 12, 16) : sf::Color::White);
-        m_window->draw(svKnob);
+        {
+            sf::CircleShape knob(6.f);
+            knob.setOrigin({ 6.f, 6.f });
+            knob.setPosition({ m_svRect.x + m_pickS * m_svRect.w, m_svRect.y + (1.f - m_pickV) * m_svRect.h });
+            knob.setFillColor(sf::Color::Transparent);
+            knob.setOutlineThickness(2.f);
+            knob.setOutlineColor(m_pickV > 0.55f ? sf::Color(10, 12, 16) : sf::Color::White);
+            m_window->draw(knob);
+        }
+        y += svH + 10.f;
 
         // Hue strip: six interpolated segments across the spectrum.
-        y += m_svRect.h + 8.f;
-        m_hueRect = { r.x + pad, y, r.w - pad * 2.f, 14.f };
-        sf::VertexArray hue(sf::PrimitiveType::Triangles, 6 * 6);
-        for (int i = 0; i < 6; ++i) {
-            const float x0 = m_hueRect.x + m_hueRect.w * (static_cast<float>(i) / 6.f);
-            const float x1 = m_hueRect.x + m_hueRect.w * (static_cast<float>(i + 1) / 6.f);
-            const sf::Color c0 = ship::fromHSV(static_cast<float>(i) * 60.f, 1.f, 1.f);
-            const sf::Color c1 = ship::fromHSV(static_cast<float>(i + 1) * 60.f, 1.f, 1.f);
-            const int o = i * 6;
-            hue[o + 0] = { { x0, m_hueRect.y }, c0 };
-            hue[o + 1] = { { x1, m_hueRect.y }, c1 };
-            hue[o + 2] = { { x1, m_hueRect.y + m_hueRect.h }, c1 };
-            hue[o + 3] = { { x0, m_hueRect.y }, c0 };
-            hue[o + 4] = { { x1, m_hueRect.y + m_hueRect.h }, c1 };
-            hue[o + 5] = { { x0, m_hueRect.y + m_hueRect.h }, c0 };
-        }
-        m_window->draw(hue);
-        vline(m_hueRect.x + m_hueRect.w * (m_pickH / 360.f), m_hueRect.y - 3.f, m_hueRect.h + 6.f, sf::Color::White);
-        y += m_hueRect.h + 8.f;
-
-        // Alpha: only where the game honours it. Thrust, turbo, dodge and the
-        // canopy pin their own alpha, and the outline stays solid so the
-        // silhouette always reads. The hull may go see-through, never below
-        // HULL_MIN_ALPHA. A hidden strip parks its rect off-screen.
-        if (showAlpha) {
-            m_alphaRect = { r.x + pad, y, r.w - pad * 2.f, 12.f };
-            const sf::Color solid = ship::fromHSV(m_pickH, m_pickS, m_pickV);
-            sf::VertexArray al(sf::PrimitiveType::Triangles, 6);
-            const sf::Color a0(solid.r, solid.g, solid.b, 0), a1(solid.r, solid.g, solid.b, 255);
-            const sf::Vector2f p0{ m_alphaRect.x, m_alphaRect.y }, p1{ m_alphaRect.x + m_alphaRect.w, m_alphaRect.y };
-            const sf::Vector2f p2{ m_alphaRect.x + m_alphaRect.w, m_alphaRect.y + m_alphaRect.h }, p3{ m_alphaRect.x, m_alphaRect.y + m_alphaRect.h };
-            al[0] = { p0, a0 }; al[1] = { p1, a1 }; al[2] = { p2, a1 };
-            al[3] = { p0, a0 }; al[4] = { p2, a1 }; al[5] = { p3, a0 };
-            m_window->draw(al);
-            if (m_paintTarget == PaintTarget::Hull) {
-                // Grey out the part of the strip the hull may not use.
-                const float fx = m_alphaRect.w * (static_cast<float>(ship::HULL_MIN_ALPHA) / 255.f);
-                sf::RectangleShape no({ fx, m_alphaRect.h });
-                no.setPosition({ m_alphaRect.x, m_alphaRect.y });
-                no.setFillColor(sf::Color(8, 10, 14, 200));
-                m_window->draw(no);
+        m_hueRect = { area.x, y, area.w, 18.f };
+        {
+            sf::VertexArray hue(sf::PrimitiveType::Triangles, 6 * 6);
+            for (int i = 0; i < 6; ++i) {
+                const float xa = m_hueRect.x + m_hueRect.w * (static_cast<float>(i) / 6.f);
+                const float xb = m_hueRect.x + m_hueRect.w * (static_cast<float>(i + 1) / 6.f);
+                const sf::Color c0 = ship::fromHSV(static_cast<float>(i) * 60.f, 1.f, 1.f);
+                const sf::Color c1 = ship::fromHSV(static_cast<float>(i + 1) * 60.f, 1.f, 1.f);
+                const int o = i * 6;
+                hue[o + 0] = { { xa, m_hueRect.y }, c0 };
+                hue[o + 1] = { { xb, m_hueRect.y }, c1 };
+                hue[o + 2] = { { xb, m_hueRect.y + m_hueRect.h }, c1 };
+                hue[o + 3] = { { xa, m_hueRect.y }, c0 };
+                hue[o + 4] = { { xb, m_hueRect.y + m_hueRect.h }, c1 };
+                hue[o + 5] = { { xa, m_hueRect.y + m_hueRect.h }, c0 };
             }
-            vline(m_alphaRect.x + m_alphaRect.w * m_pickA, m_alphaRect.y - 3.f, m_alphaRect.h + 6.f, sf::Color::White);
-            y += m_alphaRect.h + 8.f;
+            m_window->draw(hue);
+            const float hx = m_hueRect.x + m_hueRect.w * (m_pickH / 360.f);
+            fillR({ hx - 2.f, m_hueRect.y - 3.f, 4.f, m_hueRect.h + 6.f }, sf::Color::White);
         }
-        else {
-            m_alphaRect = { -1e6f, -1e6f, 0.f, 0.f };
-        }
+        y += m_hueRect.h;
 
-        // Readout + quick swatches.
+        // Alpha: only where the game honours it. Thrust, turbo and dodge pin
+        // their own alpha, and the outline stays solid so the silhouette
+        // always reads. The hull may go see-through, never below HULL_MIN_ALPHA.
+        if (showAlpha) {
+            y += 10.f;
+            alphaStrip({ area.x, y, area.w, 14.f }, ship::fromHSV(m_pickH, m_pickS, m_pickV));
+            y += 14.f;
+        }
+        else m_alphaRect = { -1e6f, -1e6f, 0.f, 0.f };
+        y += 12.f;
+
+        // Readout.
         const sf::Color cur = targetColor(m_paintTarget);
-        char hex[96];
-        std::snprintf(hex, sizeof(hex), "%s   R%3d G%3d B%3d A%3d%s",
-            ship::colorToHex(cur).c_str(), cur.r, cur.g, cur.b, cur.a,
-            (m_paintTarget == PaintTarget::Hull && cur.a < 255) ? "   SEE-THROUGH" : "");
-        sf::Text t(monoFont(), hex, 12);
-        t.setLetterSpacing(1.2f);
-        t.setFillColor(TEXT_DIM);
-        t.setPosition({ r.x + pad, y });
-        m_window->draw(t);
+        swatch({ area.x, y, 56.f, 24.f }, cur, CYAN_LOW);
+        char rgba[64];
+        std::snprintf(rgba, sizeof rgba, "R%3d  G%3d  B%3d  A%3d", cur.r, cur.g, cur.b, cur.a);
+        const std::string hx = ship::colorToHex(cur);
+        txt(hx, area.x + 68.f, y + 3.f, 14, TEXT);
+        if (68.f + tw(hx, 14) + 16.f + tw(rgba, 12, 1.3f) <= area.w)   // the compact picker drops it
+            txtR(rgba, area.x + area.w, y + 5.f, 12, TEXT_DIM, 1.3f);
+        y += 24.f + 10.f;
 
-        y += 18.f;
-        int count = 0;
-        const sf::Color* pal = ship::liveryPalette(count);
-        const float sw2 = (r.w - pad * 2.f) / static_cast<float>(count);
+        // Palette: a click picks a colour, never the opacity.
+        const float cw = (area.w - static_cast<float>(palCols - 1) * 4.f) / static_cast<float>(palCols);
         for (int i = 0; i < count; ++i) {
-            const Rect cell{ r.x + pad + static_cast<float>(i) * sw2, y, sw2 - 2.f, 14.f };
-            if (consumeClick(cell)) {
-                // Keep the current alpha: a swatch picks a colour, not opacity.
+            const int cx = i % palCols, cy = i / palCols;
+            const Rect cell{ area.x + static_cast<float>(cx) * (cw + 4.f), y + static_cast<float>(cy) * (cellH + 4.f), cw, cellH };
+            const bool hot = !m_hangarOpen && cell.contains(m_mouse);
+            if (!m_hangarOpen && consumeClick(cell)) {
                 sf::Color c = pal[i];
                 c.a = cur.a;
                 applyPaletteColor(c);
                 syncPickerFrom(targetColor(m_paintTarget));
             }
-            sf::RectangleShape q({ cell.w, cell.h });
-            q.setPosition({ cell.x, cell.y });
-            q.setFillColor(pal[i]);
-            m_window->draw(q);
+            fillR(cell, pal[i]);
+            if (hot) {
+                hline(cell.x - 2.f, cell.y - 2.f, cell.w + 4.f, CYAN); hline(cell.x - 2.f, cell.y + cell.h + 2.f, cell.w + 4.f, CYAN);
+                vline(cell.x - 2.f, cell.y - 2.f, cell.h + 4.f, CYAN); vline(cell.x + cell.w + 2.f, cell.y - 2.f, cell.h + 4.f, CYAN);
+            }
         }
     }
 
-    // ---- DETAILS panel: tools, parts, ink, canopy -------------------------
-    //
-    // Everything the canvas gizmo cannot do: which tool is active, which part
-    // to add, which side of the hull it sits on, its mirror, its ink (TONE or
-    // COLOUR) and tone, and the canopy style. Each control is a picture of
-    // what it makes or names its state plainly.
-    void drawDetailPanel() {
-        const Rect r = detailRect();
-        if (!panelChrome(r, "DETAILS", 0.18f, VIOLET, false) || !m_livery) return;
+    /// The alpha strip, over a checker; publishes m_alphaRect.
+    void alphaStrip(const Rect& r, sf::Color solid) {
+        m_alphaRect = r;
+        swatch(r, sf::Color(0, 0, 0, 0), CYAN_LOW);
+        sf::VertexArray al(sf::PrimitiveType::Triangles, 6);
+        const sf::Color a0(solid.r, solid.g, solid.b, 0), a1(solid.r, solid.g, solid.b, 255);
+        const sf::Vector2f p0{ r.x, r.y }, p1{ r.x + r.w, r.y }, p2{ r.x + r.w, r.y + r.h }, p3{ r.x, r.y + r.h };
+        al[0] = { p0, a0 }; al[1] = { p1, a1 }; al[2] = { p2, a1 };
+        al[3] = { p0, a0 }; al[4] = { p2, a1 }; al[5] = { p3, a0 };
+        m_window->draw(al);
+        if (m_paintTarget == PaintTarget::Hull) {
+            // Grey out the part of the strip the hull may not use.
+            const float fx = r.w * (static_cast<float>(ship::HULL_MIN_ALPHA) / 255.f);
+            fillR({ r.x, r.y, fx, r.h }, sf::Color(8, 10, 14, 210));
+        }
+        fillR({ r.x + r.w * m_pickA - 2.f, r.y - 3.f, 4.f, r.h + 6.f }, sf::Color::White);
+    }
 
-        const float x0 = r.x + 12.f, innerW = r.w - 24.f, gap = 6.f;
-        const auto drawTris = [&](const std::vector<sf::Vector2f>& t, sf::Vector2f c, float k, sf::Color col) {
-            sf::VertexArray va(sf::PrimitiveType::Triangles, t.size());
-            for (std::size_t i = 0; i < t.size(); ++i) va[i] = { { c.x + t[i].x * k, c.y + t[i].y * k }, col };
-            m_window->draw(va);
-            };
-        const auto tinyLabel = [&](const char* s, float cx, float y, sf::Color col) {
-            sf::Text t(monoFont(), s, 10);
-            t.setLetterSpacing(1.3f);
-            t.setFillColor(col);
-            t.setPosition({ cx - t.getGlobalBounds().size.x * 0.5f, y });
-            m_window->draw(t);
-            };
-        const auto rowRects = [&](int n, float y, float h, Rect* out) {
-            const float bw = (innerW - gap * static_cast<float>(n - 1)) / static_cast<float>(n);
-            for (int i = 0; i < n; ++i) out[i] = { x0 + static_cast<float>(i) * (bw + gap), y, bw, h };
-            };
-        std::string hoverInfo;   // what the button under the mouse would do
-        float y = r.y + 12.f;
+    // ========================================================================
+    // PARTS STAGE: catalog, the parts on the ship, the selected part
+    // ========================================================================
 
-        // ---- TOOLS ----
-        {
-            Rect b[4];
-            rowRects(4, y, 24.f, b);
-            static const char* names[4] = { "MOVE  W", "TURN  E", "SIZE  R", "SHAPE  T" };
-            static const char* info[4] = { "MOVE - DRAG A PART", "TURN - DRAG INSIDE THE RING",
-                "SIZE - HANDLES, OR DRAG INSIDE TO SCALE EVENLY", "SHAPE - EDIT A PLATE'S POINTS" };
-            for (int i = 0; i < 4; ++i) {
-                const Tool t = static_cast<Tool>(i);
-                if (consumeClick(b[i])) setTool(t);
-                drawMiniButton(b[i], names[i], m_tool == t);
-                if (b[i].contains(m_mouse)) hoverInfo = info[i];
+    /// A part drawn as an icon, centred on c, k px per ship unit.
+    void drawPlateIcon(const Plate& p, sf::Vector2f c, float k, sf::Color col) {
+        const std::vector<sf::Vector2f> poly = ship::plateWorld(p);
+        std::vector<sf::Vector2f> tris;
+        if (p.thickness > 0.f)
+            ship::detail::bandInside(poly, std::min(p.thickness, std::max(0.5f, 0.45f * std::min(p.w, p.h))), tris);
+        else tris = ship::detail::triangulate(poly);
+        sf::VertexArray va(sf::PrimitiveType::Triangles, tris.size());
+        for (std::size_t i = 0; i < tris.size(); ++i) va[i] = { { c.x + (tris[i].x - p.pos.x) * k, c.y + (tris[i].y - p.pos.y) * k }, col };
+        m_window->draw(va);
+    }
+
+    void drawCatalogPanel() {
+        const Rect r = catalogRect();
+        char code[32];
+        std::snprintf(code, sizeof code, "%d / %d PARTS", m_livery ? static_cast<int>(m_livery->plates.size()) : 0, ship::MAX_PLATES);
+        if (!panelChrome(r, "PARTS // CATALOG", 0.04f, CYAN, true, true, code)) return;
+        if (!m_livery) return;
+
+        const float x0 = r.x + 20.f, w = r.w - 40.f, gap = 8.f;
+        const float tw0 = (w - gap * 4.f) / 5.f, th = 62.f;
+        const bool full = static_cast<int>(m_livery->plates.size()) >= ship::MAX_PLATES;
+        std::string hoverInfo;
+        for (int i = 0; i < ship::PLATE_STAMP_COUNT; ++i) {
+            const ship::PlateStamp kind = ship::plateStampOrder(i);
+            const Rect t{ x0 + static_cast<float>(i % 5) * (tw0 + gap), r.y + 22.f + static_cast<float>(i / 5) * (th + gap), tw0, th };
+            const bool hot = !m_hangarOpen && t.contains(m_mouse);
+            if (!m_hangarOpen && consumeClick(t)) addPlate(kind);
+            fillR(t, hot ? withA(CYAN_LOW, 0.55f) : sf::Color(10, 14, 20));
+            const sf::Color fc = hot ? CYAN : withA(CYAN_LOW, 0.9f);
+            hline(t.x, t.y, t.w, fc); hline(t.x, t.y + t.h, t.w, fc); vline(t.x, t.y, t.h, fc); vline(t.x + t.w, t.y, t.h, fc);
+            if (hot) fillR({ t.x, t.y + t.h - 3.f, t.w, 3.f }, CYAN);
+
+            const Plate p = ship::plateStamp(kind, { 0.f, 0.f });
+            const float k = std::min((t.w - 26.f) / std::max(1.f, p.w), 26.f / std::max(1.f, p.h));
+            drawPlateIcon(p, { t.cx(), t.y + 22.f }, k, hot ? CYAN : (full ? TEXT_DEAD : ship::tone(m_livery->paint.hull, 1.3f, 255)));
+            const char* name = ship::plateStampName(kind);
+            txt(name, t.cx() - tw(name, 10, 1.6f) * 0.5f, t.y + t.h - 20.f, 10, hot ? CYAN : TEXT_DIM, 1.6f);
+            if (hot) hoverInfo = std::string("ADD ") + name + (p.thickness > 0.f ? "  -  AN OUTLINE PART" : "  -  A SOLID PART");
+        }
+        const float fy = r.y + r.h - 26.f;
+        if (full) txt("PART LIMIT REACHED - DELETE ONE TO ADD MORE", x0, fy, 10, AMBER, 1.5f);
+        else if (!hoverInfo.empty()) txt(hoverInfo, x0, fy, 10, CYAN, 1.5f);
+        else txt("EVERY PART MOVES, TURNS, SIZES AND RESHAPES THE SAME WAY", x0, fy, 10, TEXT_DEAD, 1.5f);
+    }
+
+    void drawLayersPanel() {
+        const Rect r = layersRect();
+        if (!m_livery) return;
+        const auto& pl = m_livery->plates;
+        const int n = static_cast<int>(pl.size());
+        int over = 0;
+        for (const auto& p : pl) over += p.over ? 1 : 0;
+        char code[40];
+        std::snprintf(code, sizeof code, "OVER %d  UNDER %d", over, n - over);
+        if (!panelChrome(r, "PARTS // ON THE SHIP", 0.12f, CYAN_MID, false, true, code)) return;
+
+        const float x0 = r.x + 20.f, w = r.w - 40.f, rowH = 28.f;
+        const float top = r.y + 20.f;
+        const int visible = static_cast<int>((r.h - 34.f) / rowH);
+        const int maxScroll = std::max(0, n - visible);
+
+        // The list is top-most first: row 0 is the part drawn last.
+        if (m_selPlate != m_layerSeen) {
+            m_layerSeen = m_selPlate;
+            if (m_selPlate >= 0 && m_selPlate < n) {
+                const int rowOf = n - 1 - m_selPlate;
+                if (rowOf < m_layerScroll) m_layerScroll = rowOf;
+                if (rowOf >= m_layerScroll + visible) m_layerScroll = rowOf - visible + 1;
             }
-            y += 24.f + 8.f;
+        }
+        m_layerScroll = std::clamp(m_layerScroll, 0, maxScroll);
+
+        if (n == 0) {
+            txt("NO PARTS YET", x0, top + 30.f, 16, TEXT_DIM, 1.8f);
+            txt("PICK ONE FROM THE CATALOG ABOVE, OR CLICK THE SHIP", x0, top + 58.f, 10, TEXT_DEAD, 1.5f);
+            txt("TO SELECT ONE THAT IS ALREADY THERE", x0, top + 74.f, 10, TEXT_DEAD, 1.5f);
+            return;
         }
 
-        // ---- FIGURES: one button per shape, drawn as that shape ----
-        {
-            static const ship::DecalKind kinds[ship::DECAL_KIND_COUNT] = {
-                ship::DecalKind::Line, ship::DecalKind::Bar, ship::DecalKind::Oval,
-                ship::DecalKind::Tri,  ship::DecalKind::Ring };
-            Rect b[ship::DECAL_KIND_COUNT];
-            rowRects(ship::DECAL_KIND_COUNT, y, 30.f, b);
-            for (int i = 0; i < ship::DECAL_KIND_COUNT; ++i) {
-                if (consumeClick(b[i])) addDecal(kinds[i]);
-                drawMiniButton(b[i], "", false);
-                ship::Decal icon;
-                icon.kind = kinds[i];
-                icon.pos = { 0.f, 0.f };
-                switch (kinds[i]) {
-                case ship::DecalKind::Line: icon.w = 18.f; icon.h = 3.f;  icon.thickness = 3.f; break;
-                case ship::DecalKind::Bar:  icon.w = 16.f; icon.h = 7.f;  break;
-                case ship::DecalKind::Oval: icon.w = 16.f; icon.h = 9.f;  break;
-                case ship::DecalKind::Tri:  icon.w = 11.f; icon.h = 11.f; break;
-                default:                    icon.w = 12.f; icon.h = 12.f; icon.thickness = 2.f; break;
-                }
-                std::vector<sf::Vector2f> t;
-                ship::decalGeometry(icon, t, false);
-                const bool hot = b[i].contains(m_mouse);
-                drawTris(t, { b[i].cx(), b[i].y + 11.f }, 1.f, hot ? CYAN : TEXT_DIM);
-                tinyLabel(ship::decalKindName(kinds[i]), b[i].cx(), b[i].y + b[i].h - 12.f, hot ? CYAN : TEXT_DEAD);
-                if (hot) hoverInfo = std::string("ADD FIGURE: ") + ship::decalKindName(kinds[i]);
-            }
-            y += 30.f + 6.f;
+        for (int k = 0; k < visible && k + m_layerScroll < n; ++k) {
+            const int row = k + m_layerScroll;
+            const int i = n - 1 - row;
+            const Plate& p = pl[i];
+            const Rect line{ x0, top + static_cast<float>(k) * rowH, w - (maxScroll > 0 ? 12.f : 0.f), rowH - 4.f };
+            const bool on = (m_selKind == SelKind::Plate && m_selPlate == i);
+            const bool hot = !m_hangarOpen && line.contains(m_mouse);
+            if (!m_hangarOpen && consumeClick(line) && !on) select({ SelKind::Plate, i, false });
+            listRow(line, on, hot);
+            char num[16]; std::snprintf(num, sizeof num, "%02d", i + 1);
+            txt(num, line.x + 10.f, line.y + 4.f, 12, on ? INK : TEXT_DIM);
+            txt(ship::plateLabel(p), line.x + 44.f, line.y + 3.f, 14, on ? INK : (hot ? CYAN : TEXT));
+            char meta[48];
+            std::snprintf(meta, sizeof meta, "%d PTS", static_cast<int>(p.shape.size()));
+            txt(meta, line.x + 160.f, line.y + 6.f, 10, on ? withA(INK, 0.75f) : TEXT_DIM, 1.3f);
+            std::string tags = p.over ? "OVER" : "UNDER";
+            if (p.mirrored) tags += "  MIR";
+            if (p.tonal) tags += "  TONE";
+            txtR(tags, line.x + line.w - 52.f, line.y + 6.f, 10, on ? INK : (p.over ? CYAN_MID : AMBER), 1.4f);
+            swatch({ line.x + line.w - 40.f, line.y + 5.f, 28.f, line.h - 10.f },
+                ship::inkOf(p, m_livery->paint.hull), on ? INK : CYAN_LOW);
         }
-
-        // ---- PLATES: stamps, drawn solid in the hull's tone ----
-        {
-            Rect b[ship::PLATE_STAMP_COUNT];
-            rowRects(ship::PLATE_STAMP_COUNT, y, 32.f, b);
-            for (int i = 0; i < ship::PLATE_STAMP_COUNT; ++i) {
-                const auto kind = static_cast<ship::PlateStamp>(i);
-                if (consumeClick(b[i])) addPlate(kind);
-                drawMiniButton(b[i], "", false);
-                const Plate p = ship::plateStamp(kind, { 0.f, 0.f });
-                const float k = std::min((b[i].w - 12.f) / p.w, 18.f / p.h);
-                const bool hot = b[i].contains(m_mouse);
-                const sf::Color fill = hot ? ship::tone(m_livery->paint.hull, 1.25f, 255)
-                    : ship::tone(m_livery->paint.hull, 0.8f, 255);
-                const std::vector<sf::Vector2f> poly = ship::plateWorld(p);
-                drawTris(ship::detail::triangulate(poly), { b[i].cx(), b[i].y + 12.f }, k, fill);
-                tinyLabel(ship::plateStampName(kind), b[i].cx(), b[i].y + b[i].h - 12.f, hot ? CYAN : TEXT_DEAD);
-                if (hot) hoverInfo = std::string("ADD PLATE: ") + ship::plateStampName(kind) + " - RESHAPE IT WITH T";
-            }
-            y += 32.f + 8.f;
+        if (maxScroll > 0) {
+            const float trackH = static_cast<float>(visible) * rowH - 4.f;
+            const float kh = std::max(18.f, trackH * static_cast<float>(visible) / static_cast<float>(n));
+            const float ky = top + (trackH - kh) * static_cast<float>(m_layerScroll) / static_cast<float>(maxScroll);
+            fillR({ x0 + w - 4.f, top, 2.f, trackH }, withA(CYAN_LOW, 0.8f));
+            fillR({ x0 + w - 6.f, ky, 6.f, kh }, CYAN_MID);
         }
+        txt("TOP OF THE LIST DRAWS LAST   //   WHEEL SCROLLS", x0, r.y + r.h - 20.f, 10, TEXT_DEAD, 1.4f);
+    }
 
-        // ---- INFO: what is selected, or what the hovered button does ----
-        ship::Decal* d = selected();
+    void drawInspectorPanel() {
+        const Rect r = inspectRect();
         Plate* pl = selectedPlate();
-        const bool canopySel = (m_selKind == SelKind::Cockpit)
-            && m_livery->cockpit.style != ship::CockpitStyle::None;
-        const float infoY = y;
-        y += 18.f;
+        if (!panelChrome(r, "PART // INSPECT", 0.20f, CYAN_MID, false, true, pl ? ship::plateLabel(*pl) : "")) return;
+        if (!m_livery) return;
+        const float x0 = r.x + 20.f;
 
-        Rect row1[4], row2[4];
-        rowRects(4, y, 22.f, row1);
-        rowRects(4, y + 28.f, 22.f, row2);
-
-        if (d || pl) {
-            bool& over = d ? d->over : pl->over;
-            bool& mir = d ? d->mirrored : pl->mirrored;
-            const bool tonal = d ? d->tonal : pl->tonal;
-
-            if (consumeClick(row1[0])) over = true;
-            if (consumeClick(row1[1])) over = false;
-            if (consumeClick(row1[2])) {
-                mir = !mir;
-                const bool fits = d ? ship::decalFits(*d, m_design->envelope()) : ship::plateFits(*pl, m_design->envelope());
-                if (mir && !fits) { mir = false; reject("NO ROOM FOR THE MIRROR COPY"); }
-            }
-            drawMiniButton(row1[0], "OVER HULL", over);
-            drawMiniButton(row1[1], "UNDER HULL", !over);
-            drawMiniButton(row1[2], "MIRROR", mir);
-            drawMiniButton(row1[3], "DELETE", false);
-            if (row1[1].contains(m_mouse)) hoverInfo = "UNDER HULL - SHOWS THROUGH A SEE-THROUGH HULL";
-
-            drawMiniButton(row2[0], "TONE", tonal);
-            drawMiniButton(row2[1], "COLOUR", !tonal);
-            if (row2[0].contains(m_mouse)) hoverInfo = "TONE - HULL COLOUR x SHADE: FLASHES AND HEATS WITH IT";
-            if (row2[1].contains(m_mouse)) hoverInfo = "COLOUR - A FIXED COLOUR FROM THE PICKER";
-            if (d) {
-                drawMiniButton(row2[2], "DUPLICATE", false);
-                drawMiniButton(row2[3], "TO PLATE", false);
-                if (row2[2].contains(m_mouse)) hoverInfo = "DUPLICATE - ALSO CTRL+D";
-                if (row2[3].contains(m_mouse)) hoverInfo = "TO PLATE - TURN THIS FIGURE INTO AN EDITABLE SHAPE";
-            }
-            else {
-                drawMiniButton(row2[2], "ACCENT", pl->accent);
-                drawMiniButton(row2[3], "DUPLICATE", false);
-                if (row2[2].contains(m_mouse)) hoverInfo = "ACCENT - A THIN EDGE IN THE OUTLINE COLOUR";
-                if (row2[3].contains(m_mouse)) hoverInfo = "DUPLICATE - ALSO CTRL+D";
-            }
-
-            // Clicks that change WHICH part is selected go last: they invalidate d / pl.
-            if (consumeClick(row2[0]) && !tonal) setInk(true);
-            else if (consumeClick(row2[1]) && tonal) setInk(false);
-            else if (pl && consumeClick(row2[2])) pl->accent = !pl->accent;
-            else if (consumeClick(d ? row2[2] : row2[3])) duplicateSelected();
-            else if (d && consumeClick(row2[3])) convertToPlate();
-            else if (consumeClick(row1[3])) deleteSelected();
+        if (!pl) {
+            txt("NO PART SELECTED", x0, r.y + 40.f, 16, TEXT_DIM, 1.8f);
+            txt("CLICK A PART ON THE SHIP OR IN THE LIST,", x0, r.y + 68.f, 10, TEXT_DEAD, 1.5f);
+            txt("OR ADD ONE FROM THE CATALOG.", x0, r.y + 84.f, 10, TEXT_DEAD, 1.5f);
+            txt("W MOVE   E TURN   R SIZE   T SHAPE", x0, r.y + 120.f, 12, CYAN_MID, 1.6f);
+            txt("THE SAME FOUR TOOLS WORK ON EVERY PART.", x0, r.y + 140.f, 10, TEXT_DEAD, 1.5f);
+            return;
         }
-        else if (canopySel) {
-            const Rect del{ row1[0].x, row1[0].y, row1[1].x + row1[1].w - row1[0].x, row1[0].h };
-            drawMiniButton(del, "REMOVE CANOPY", false);
-            if (consumeClick(del)) setCanopy(ship::CockpitStyle::None);
-        }
-        y += 28.f + 22.f + 8.f;
 
-        // ---- SHADE: the tone of the selected part ----
-        m_shadeRect = { -1e6f, -1e6f, 0.f, 0.f };
-        d = selected();
-        pl = selectedPlate();
-        if (d || pl) {
-            const bool tonal = d ? d->tonal : pl->tonal;
-            const float shade = d ? d->shade : pl->shade;
+        const bool lock = m_hangarOpen;
+        const auto T = [](const Rect& q) { return tui::Rect{ q.x, q.y, q.w, q.h }; };
+        std::string hoverInfo;
+        const auto hov = [&](const Rect& q, const char* s) { if (!lock && q.contains(m_mouse)) hoverInfo = s; };
+
+        // ---- Left: the readout, then the part's switches ----
+        {
+            const float a = std::fmod(std::fmod(pl->angle, 360.f) + 360.f, 360.f);
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "%.1f x %.1f   %.0f DEG   %d PTS", pl->w, pl->h, a, static_cast<int>(pl->shape.size()));
+            txt(buf, x0, r.y + 20.f, 12, TEXT, 1.3f);
+        }
+        const float bw = 121.f, bh = 28.f, gx = 8.f, step = 34.f;
+        const float by = r.y + 46.f;
+        const auto cell = [&](int col, int row) { return Rect{ x0 + static_cast<float>(col) * (bw + gx), by + static_cast<float>(row) * step, bw, bh }; };
+        const bool outline = pl->thickness > 0.f;
+
+        const Rect bFill = cell(0, 0), bOut = cell(1, 0);
+        if (m_ui.button(T(bFill), "FILL", !outline, lock, false, 12) && outline) {
+            m_lastThick = pl->thickness; pl->thickness = 0.f; toast("FILL - A SOLID PART");
+        }
+        if (m_ui.button(T(bOut), "OUTLINE", outline, lock, false, 12) && !outline) {
+            pl->thickness = std::clamp(m_lastThick, ship::PLATE_THICK_MIN, ship::PLATE_THICK_MAX);
+            toast("OUTLINE - A BAND INSIDE THE EDGE");
+        }
+        hov(bFill, "FILL - THE WHOLE SHAPE IS SOLID");
+        hov(bOut, "OUTLINE - ONLY A BAND JUST INSIDE THE EDGE");
+
+        {   // Width of the band: - value +
+            const Rect row = { x0, by + step, bw * 2.f + gx, bh };
+            const Rect minus{ row.x, row.y, 44.f, bh }, plus{ row.x + row.w - 44.f, row.y, 44.f, bh };
+            if (m_ui.button(T(minus), "-", false, lock || !outline || pl->thickness <= ship::PLATE_THICK_MIN, false, 14)) {
+                pl->thickness = std::max(ship::PLATE_THICK_MIN, pl->thickness - 0.5f); m_lastThick = pl->thickness;
+            }
+            if (m_ui.button(T(plus), "+", false, lock || !outline || pl->thickness >= ship::PLATE_THICK_MAX, false, 14)) {
+                pl->thickness = std::min(ship::PLATE_THICK_MAX, pl->thickness + 0.5f); m_lastThick = pl->thickness;
+            }
+            char tb[32];
+            if (outline) std::snprintf(tb, sizeof tb, "BAND  %.1f", pl->thickness);
+            else std::snprintf(tb, sizeof tb, "SOLID");
+            txt(tb, row.cx() - tw(tb, 12, 1.5f) * 0.5f, row.y + 6.f, 12, outline ? CYAN : TEXT_DEAD, 1.5f);
+            hov(row, "BAND WIDTH - 1 TO 8, IN HALF STEPS");
+        }
+
+        const Rect bOver = cell(0, 2), bUnder = cell(1, 2);
+        if (m_ui.button(T(bOver), "OVER HULL", pl->over, lock, false, 12)) pl->over = true;
+        if (m_ui.button(T(bUnder), "UNDER HULL", !pl->over, lock, false, 12)) pl->over = false;
+        hov(bOver, "OVER - DRAWN ON TOP OF THE HULL");
+        hov(bUnder, "UNDER - SHOWS THROUGH A SEE-THROUGH HULL");
+
+        const Rect bMir = cell(0, 3), bAcc = cell(1, 3);
+        if (m_ui.button(T(bMir), "MIRROR", pl->mirrored, lock, false, 12)) {
+            pl->mirrored = !pl->mirrored;
+            if (pl->mirrored && !ship::plateFits(*pl, m_design->envelope())) { pl->mirrored = false; reject("NO ROOM FOR THE MIRROR COPY"); }
+        }
+        if (m_ui.button(T(bAcc), "ACCENT", pl->accent, lock, false, 12)) pl->accent = !pl->accent;
+        hov(bMir, "MIRROR - A COPY ON THE OTHER SIDE, MOVES WITH IT");
+        hov(bAcc, "ACCENT - A THIN EDGE IN THE OUTLINE COLOUR");
+
+        const int n = static_cast<int>(m_livery->plates.size());
+        const Rect bUp = cell(0, 4), bDn = cell(1, 4);
+        const bool canUp = m_selPlate < n - 1, canDn = m_selPlate > 0;
+        const bool up = m_ui.button(T(bUp), "LAYER UP", false, lock || !canUp, false, 12);
+        const bool dn = m_ui.button(T(bDn), "LAYER DOWN", false, lock || !canDn, false, 12);
+        hov(bUp, "LAYER UP - DRAWN AFTER THE PART ABOVE IT");
+        hov(bDn, "LAYER DOWN - DRAWN BEFORE THE PART BELOW IT");
+
+        const Rect bDup = cell(0, 5), bDel = cell(1, 5);
+        const bool dup = m_ui.button(T(bDup), "DUPLICATE", false, lock, false, 12);
+        const bool del = m_ui.button(T(bDel), "DELETE", false, lock, false, 12);
+        hov(bDup, "DUPLICATE - ALSO CTRL+D");
+        hov(bDel, "DELETE - ALSO DEL OR RMB");
+
+        // ---- Right: the ink ----
+        const float rx = x0 + bw * 2.f + gx + 26.f, rw = r.x + r.w - 20.f - rx;
+        vline(rx - 13.f, r.y + 18.f, r.h - 54.f, withA(CYAN_LOW, 0.7f));
+        const Rect bTone{ rx, r.y + 16.f, (rw - gx) * 0.5f, bh }, bCol{ rx + (rw - gx) * 0.5f + gx, r.y + 16.f, (rw - gx) * 0.5f, bh };
+        const bool tonal = pl->tonal;
+        const bool toTone = m_ui.button(T(bTone), "TONE", tonal, lock, false, 12) && !tonal;
+        const bool toCol = m_ui.button(T(bCol), "COLOUR", !tonal, lock, false, 12) && tonal;
+        hov(bTone, "TONE - HULL COLOUR x SHADE: FLASHES AND HEATS WITH IT");
+        hov(bCol, "COLOUR - A FIXED COLOUR FROM THE PICKER");
+
+        const float iy = r.y + 16.f + bh + 14.f;
+        if (tonal) {
             char lab[32];
-            std::snprintf(lab, sizeof(lab), tonal ? "SHADE x%.2f" : "COLOUR INK", shade);
-            sf::Text t(monoFont(), lab, 11);
-            t.setLetterSpacing(1.3f);
-            t.setFillColor(tonal ? TEXT_DIM : TEXT_DEAD);
-            t.setPosition({ x0, y });
-            m_window->draw(t);
-            if (tonal) {
-                m_shadeRect = { x0 + 104.f, y + 1.f, innerW - 104.f, 12.f };
-                // The strip shows the actual tones on this hull, dark to bright.
-                const int seg = 12;
-                sf::VertexArray va(sf::PrimitiveType::Triangles, seg * 6);
-                for (int i = 0; i < seg; ++i) {
-                    const float t0 = static_cast<float>(i) / seg, t1 = static_cast<float>(i + 1) / seg;
-                    const auto col = [&](float tt) {
-                        return ship::tone(m_livery->paint.hull,
-                            ship::SHADE_MIN + (ship::SHADE_MAX - ship::SHADE_MIN) * tt, 255);
-                        };
-                    const float xa = m_shadeRect.x + m_shadeRect.w * t0, xb = m_shadeRect.x + m_shadeRect.w * t1;
-                    const float ya = m_shadeRect.y, yb = m_shadeRect.y + m_shadeRect.h;
-                    va[i * 6 + 0] = { { xa, ya }, col(t0) }; va[i * 6 + 1] = { { xb, ya }, col(t1) };
-                    va[i * 6 + 2] = { { xb, yb }, col(t1) }; va[i * 6 + 3] = { { xa, ya }, col(t0) };
-                    va[i * 6 + 4] = { { xb, yb }, col(t1) }; va[i * 6 + 5] = { { xa, yb }, col(t0) };
-                }
-                m_window->draw(va);
-                const float k = (shade - ship::SHADE_MIN) / (ship::SHADE_MAX - ship::SHADE_MIN);
-                vline(m_shadeRect.x + m_shadeRect.w * k, m_shadeRect.y - 3.f, m_shadeRect.h + 6.f, sf::Color::White);
-                if (m_shadeRect.contains(m_mouse)) hoverInfo = "SHADE - DARKER OR BRIGHTER THAN THE HULL";
+            std::snprintf(lab, sizeof lab, "SHADE  x%.2f", pl->shade);
+            txt(lab, rx, iy, 10, CYAN_MID, 1.8f);
+            m_shadeRect = { rx, iy + 18.f, rw, 20.f };
+            const int seg = 16;
+            sf::VertexArray va(sf::PrimitiveType::Triangles, seg * 6);
+            for (int i = 0; i < seg; ++i) {
+                const float t0 = static_cast<float>(i) / seg, t1 = static_cast<float>(i + 1) / seg;
+                const auto col = [&](float tt) {
+                    return ship::tone(m_livery->paint.hull, ship::SHADE_MIN + (ship::SHADE_MAX - ship::SHADE_MIN) * tt, 255);
+                    };
+                const float xa = m_shadeRect.x + m_shadeRect.w * t0, xb = m_shadeRect.x + m_shadeRect.w * t1;
+                const float ya = m_shadeRect.y, yb = m_shadeRect.y + m_shadeRect.h;
+                va[i * 6 + 0] = { { xa, ya }, col(t0) }; va[i * 6 + 1] = { { xb, ya }, col(t1) };
+                va[i * 6 + 2] = { { xb, yb }, col(t1) }; va[i * 6 + 3] = { { xa, ya }, col(t0) };
+                va[i * 6 + 4] = { { xb, yb }, col(t1) }; va[i * 6 + 5] = { { xa, yb }, col(t0) };
             }
-        }
-        y += 22.f;
+            m_window->draw(va);
+            const float k = (pl->shade - ship::SHADE_MIN) / (ship::SHADE_MAX - ship::SHADE_MIN);
+            fillR({ m_shadeRect.x + m_shadeRect.w * k - 2.f, m_shadeRect.y - 3.f, 4.f, m_shadeRect.h + 6.f }, sf::Color::White);
+            hov(m_shadeRect, "SHADE - DARKER OR BRIGHTER THAN THE HULL");
 
-        // ---- CANOPY: every style drawn, the fitted one lit ----
-        {
-            Rect b[ship::COCKPIT_STYLE_COUNT];
-            rowRects(ship::COCKPIT_STYLE_COUNT, y, 30.f, b);
-            for (int i = 0; i < ship::COCKPIT_STYLE_COUNT; ++i) {
-                const auto style = static_cast<ship::CockpitStyle>(i);
-                const bool active = (m_livery->cockpit.style == style);
-                if (consumeClick(b[i])) setCanopy(style);
-                drawMiniButton(b[i], "", active);
-                const bool hot = b[i].contains(m_mouse);
-                if (hot) hoverInfo = style == ship::CockpitStyle::None ? "NO CANOPY"
-                    : std::string("CANOPY: ") + ship::cockpitStyleName(style);
-                if (style == ship::CockpitStyle::None) {
-                    tinyLabel("NO CANOPY", b[i].cx(), b[i].cy() - 7.f, active ? CYAN : (hot ? TEXT : TEXT_DIM));
-                    continue;
-                }
-                ship::Cockpit cp;
-                cp.style = style;
-                cp.pos = { 0.f, 0.f };
-                cp.w = 13.f; cp.h = 17.f; cp.angle = 0.f;
-                std::vector<sf::Vector2f> glass, rim;
-                ship::cockpitGeometry(cp, glass, rim);
-                const sf::Vector2f c{ b[i].cx(), b[i].cy() };
-                drawTris(rim, c, 1.f, hot || active ? sf::Color(90, 104, 120) : sf::Color(60, 70, 84));
-                const sf::Color g = m_livery->paint.cockpit;
-                drawTris(glass, c, 1.f, active ? sf::Color(g.r, g.g, g.b) : sf::Color(g.r, g.g, g.b, hot ? 200 : 120));
-            }
+            txt("OPACITY", rx, iy + 54.f, 10, CYAN_MID, 1.8f);
+            alphaStrip({ rx, iy + 72.f, rw, 16.f }, ship::inkOf(*pl, m_livery->paint.hull));
+            hov(m_alphaRect, "OPACITY - SEE-THROUGH PARTS LET THE HULL SHOW");
+
+            swatch({ rx, iy + 108.f, 56.f, 30.f }, ship::inkOf(*pl, m_livery->paint.hull), CYAN_LOW);
+            txt("FOLLOWS THE HULL", rx + 68.f, iy + 110.f, 12, TEXT, 1.4f);
+            txt("FLASH, HEAT, STAGGER", rx + 68.f, iy + 128.f, 10, TEXT_DIM, 1.4f);
+            txt("PICK COLOUR FOR A FIXED ONE", rx, iy + 156.f, 10, TEXT_DEAD, 1.4f);
+        }
+        else {
+            drawPicker({ rx, iy, rw, r.y + r.h - 40.f - iy }, 8);
         }
 
-        // ---- INFO line, drawn last so every hover above could feed it ----
-        {
-            d = selected();
-            pl = selectedPlate();
-            char info[128];
-            sf::Color infoC = TEXT;
-            if (!hoverInfo.empty()) {
-                std::snprintf(info, sizeof(info), "%s", hoverInfo.c_str());
-                infoC = CYAN;
-            }
-            else if (d) {
-                const float a = std::fmod(std::fmod(d->angle, 360.f) + 360.f, 360.f);
-                std::snprintf(info, sizeof(info), "%s FIGURE   %.1f x %.1f   %.0f DEG",
-                    ship::decalKindName(d->kind), d->w, d->h, a);
-            }
-            else if (pl) {
-                const float a = std::fmod(std::fmod(pl->angle, 360.f) + 360.f, 360.f);
-                std::snprintf(info, sizeof(info), "PLATE   %d PTS   %.1f x %.1f   %.0f DEG",
-                    static_cast<int>(pl->shape.size()), pl->w, pl->h, a);
-            }
-            else if (canopySel) {
-                const auto& c = m_livery->cockpit;
-                std::snprintf(info, sizeof(info), "CANOPY %s   %.1f x %.1f", ship::cockpitStyleName(c.style), c.w, c.h);
-            }
-            else {
-                std::snprintf(info, sizeof(info), "CLICK A PART ON THE SHIP, OR ADD ONE ABOVE");
-                infoC = TEXT_DEAD;
-            }
-            sf::Text t(monoFont(), info, 12);
-            t.setLetterSpacing(1.3f);
-            t.setFillColor(infoC);
-            t.setPosition({ x0, infoY });
-            m_window->draw(t);
+        const float fy = r.y + r.h - 24.f;
+        if (!hoverInfo.empty()) txt(hoverInfo, x0, fy, 10, CYAN, 1.4f);
+        else txt("DRAG ON THE SHIP WITH  W MOVE  E TURN  R SIZE  T SHAPE", x0, fy, 10, TEXT_DEAD, 1.4f);
 
-            char count[48];
-            std::snprintf(count, sizeof(count), "FIG %d/%d  PLT %d/%d",
-                static_cast<int>(m_livery->decals.size()), ship::MAX_DECALS,
-                static_cast<int>(m_livery->plates.size()), ship::MAX_PLATES);
-            sf::Text ct(monoFont(), count, 10);
-            ct.setLetterSpacing(1.2f);
-            ct.setFillColor(TEXT_DEAD);
-            ct.setPosition({ x0 + innerW - ct.getGlobalBounds().size.x, infoY + 2.f });
-            if (hoverInfo.empty() || t.getGlobalBounds().size.x < innerW - ct.getGlobalBounds().size.x - 12.f)
-                m_window->draw(ct);
+        // Last: these change WHICH part is selected, or remove it.
+        if (toTone) setInk(true);
+        else if (toCol) setInk(false);
+        if (up && canUp) {
+            std::swap(m_livery->plates[m_selPlate], m_livery->plates[m_selPlate + 1]);
+            select({ SelKind::Plate, m_selPlate + 1, false });
+            toast("LAYER UP");
         }
-    }
-
-    // ---- SHIP FILE panel --------------------------------------------------
-    void drawFilePanel() {
-        const Rect r = fileRect();
-        if (!panelChrome(r, "SHIP FILE", 0.26f, CYAN_MID, false)) return;
-
-        const Rect ex{ r.x + 12.f, r.y + 10.f, (r.w - 34.f) * 0.5f, 26.f };
-        const Rect im{ ex.x + ex.w + 10.f, ex.y, ex.w, 26.f };
-        if (consumeClick(ex)) exportShip();
-        if (consumeClick(im)) openHangar();
-        drawMiniButton(ex, "QUICK EXPORT", false);
-        drawMiniButton(im, "HANGAR  H", false);
-
-        sf::Text t(monoFont(), m_fileMsg.empty()
-            ? "SHIPS LIVE IN ships/ - SHARE THE FILE, ANY COPY OF THE GAME CAN FLY IT" : m_fileMsg, 12);
-        t.setLetterSpacing(1.3f);
-        t.setFillColor(m_fileMsg.rfind("SAVED", 0) == 0 || m_fileMsg.rfind("LOADED", 0) == 0
-            ? GREEN : (m_fileMsg.empty() ? TEXT_DIM : AMBER));
-        t.setPosition({ r.x + 12.f, r.y + 44.f });
-        m_window->draw(t);
+        else if (dn && canDn) {
+            std::swap(m_livery->plates[m_selPlate], m_livery->plates[m_selPlate - 1]);
+            select({ SelKind::Plate, m_selPlate - 1, false });
+            toast("LAYER DOWN");
+        }
+        else if (dup) duplicateSelected();
+        else if (del) deleteSelected();
     }
 
     void drawMiniButton(const Rect& r, const std::string& label, bool active) {
@@ -3501,13 +3705,13 @@ private:
     // (bright green) or the loss (red) as a segment, and class-tier lines that
     // would change light up. Without one it is the plain readout it was.
     void drawStatsPanel() {
-        if (m_mode == Mode::Paint) { drawPalettePanel(); return; }
+        if (m_mode == Mode::Paint) return;
         const Rect r = statsRect();
 
         std::string title = "PERFORMANCE";
         if (m_pvActive) title += "  -  " + m_pvLabel;
         else if (!m_pvRefused.empty()) title += "  -  " + m_pvLabel + " REFUSED";
-        if (!panelChrome(r, title, 0.10f, m_pvActive ? CYAN : CYAN_MID, false)) return;
+        if (!panelChrome(r, title, 0.04f, m_pvActive ? CYAN : CYAN_MID, false, true)) return;
 
         const auto& ref = ship::ShipDesign::reference();
         const StatRow now = rowOf(*m_design);
@@ -3626,9 +3830,9 @@ private:
 
     // ---- LOADOUT panel ----------------------------------------------------
     void drawMountPanel() {
-        if (m_mode == Mode::Paint) { drawDetailPanel(); return; }
+        if (m_mode == Mode::Paint) return;
         const Rect r = mountRect();
-        if (!panelChrome(r, "LOADOUT", 0.18f, CYAN_MID, false)) return;
+        if (!panelChrome(r, "LOADOUT", 0.12f, CYAN_MID, false, true)) return;
 
         const auto& s = m_design->stats();
         const auto& spec = m_design->spec();
@@ -3727,10 +3931,10 @@ private:
 
     // ---- STATUS panel -----------------------------------------------------
     void drawStatusPanel() {
-        if (m_mode == Mode::Paint) { drawFilePanel(); return; }
+        if (m_mode == Mode::Paint) return;
         const Rect r = statusRect();
         const ship::ValidationResult v = m_design->validate();
-        if (!panelChrome(r, "", 0.26f, v.ok ? CYAN_MID : RED, false)) return;
+        if (!panelChrome(r, "", 0.20f, v.ok ? CYAN_MID : RED, false, true)) return;
 
         const auto& s = m_design->stats();
 
@@ -3993,68 +4197,197 @@ private:
         m_clickPending = false;   // nothing under the overlay may take a click
     }
 
-    /// On-screen buttons for every keyboard shortcut on this screen.
-    void drawControls(const sf::Vector2f& size) {
+    // ========================================================================
+    // LEFT COLUMN: STAGES, FRAME, SHIP FILE
+    // ========================================================================
+
+    struct StageRow { const char* group; const char* label; const char* sub; };
+    static const StageRow& stageRow(int i) {
+        static const StageRow k[4] = {
+            { "STRUCTURE", "HULL",    "HITBOX  //  GUNS  //  DRIVES" },
+            { "STRUCTURE", "MODEL",   "THE SILHOUETTE THEY SHOOT AT" },
+            { "PAINT",     "COLOURS", "HULL, OUTLINE AND EFFECTS" },
+            { "PAINT",     "PARTS",   "PLATES, STRIPES, RINGS" } };
+        return k[std::clamp(i, 0, 3)];
+    }
+
+    void groupLabel(const char* g, float x, float y, float w) {
+        txt(g, x, y + 2.f, 10, CYAN_MID, 2.2f);
+        const float gw = tw(g, 10, 2.2f) + 10.f;
+        hline(x + gw, y + 9.f, w - gw, withA(CYAN_LOW, 0.6f));
+    }
+
+    /// The terminal's one slanted element: the selection bar.
+    void skewBar(const Rect& r, sf::Color c) {
+        const float S = 14.f;
+        sf::ConvexShape bar(4);
+        bar.setPoint(0, { r.x + S, r.y }); bar.setPoint(1, { r.x + r.w + S, r.y });
+        bar.setPoint(2, { r.x + r.w, r.y + r.h }); bar.setPoint(3, { r.x, r.y + r.h });
+        bar.setFillColor(c);
+        m_window->draw(bar);
+    }
+
+    /// A selectable list row: skewed amber when on, a hairline otherwise, a
+    /// faint wash under the mouse. Returns the colour its text should use.
+    sf::Color listRow(const Rect& row, bool on, bool hot) {
+        if (on) {
+            skewBar(row, AMBER);
+            fillR({ row.x - 14.f, row.y + 8.f, 5.f, row.h - 16.f }, AMBER);
+            return INK;
+        }
+        if (hot) fillR(row, withA(CYAN_LOW, 0.35f));
+        hline(row.x, row.y + row.h, row.w, withA(CYAN_LOW, 0.7f));
+        return TEXT;
+    }
+
+    void drawStagesPanel() {
+        const Rect r = stagesRect();
+        if (!panelChrome(r, "REFIT // STAGES", 0.00f, CYAN, true)) return;
+        const float x = r.x + 26.f, w = r.w - 46.f;
+        float y = r.y + 20.f;
+        std::string grp;
+        for (int i = 0; i < 4; ++i) {
+            const StageRow& s = stageRow(i);
+            if (grp != s.group) { grp = s.group; groupLabel(s.group, x, y, w); y += 22.f; }
+            const Rect row{ x, y, w, 52.f };
+            const bool on = (stage() == i);
+            const bool hot = !m_hangarOpen && row.contains(m_mouse);
+            if (!m_hangarOpen && consumeClick(row) && !on) setStage(i);
+            const sf::Color fg = listRow(row, on, hot);
+            char num[16]; std::snprintf(num, sizeof num, "%02d", i + 1);
+            txt(num, row.x + 12.f, row.y + 9.f, 14, on ? INK : TEXT_DIM);
+            txt(s.label, row.x + 48.f, row.y + 6.f, 18, on ? INK : (hot ? CYAN : fg));
+            txt(s.sub, row.x + 49.f, row.y + 31.f, 10, on ? withA(INK, 0.75f) : TEXT_DIM, 1.5f);
+            y += 58.f;
+        }
+        txt("M / TAB  NEXT STAGE", x, r.y + r.h - 26.f, 10, TEXT_DEAD, 1.6f);
+    }
+
+    void drawFramePanel() {
+        const Rect r = frameRect();
+        if (!panelChrome(r, "FRAME CLASS", 0.08f, CYAN_MID, false)) return;
         const ControlRects cr = controlRects();
-        const bool model = (m_mode == Mode::Model);
-        const bool lock = m_hangarOpen;   // the hangar owns the screen while it is open
-        const auto R = [](const Rect& r) { return tui::Rect{ r.x, r.y, r.w, r.h }; };
+        for (int i = 0; i < ship::HULL_CLASS_COUNT; ++i) {
+            const auto cls = static_cast<ship::HullClass>(i);
+            const ship::HullClassSpec& spec = ship::classSpec(cls);
+            const Rect row = cr.cls[i];
+            const bool on = (m_design->hullClass() == cls);
+            const bool hot = !m_hangarOpen && row.contains(m_mouse);
+            if (!m_hangarOpen && consumeClick(row) && !on) loadClass(cls);
+            listRow(row, on, hot);
+            char key[16]; std::snprintf(key, sizeof key, "%d", i + 1);
+            txt(key, row.x + 12.f, row.y + 12.f, 14, on ? INK : TEXT_DIM);
+            txt(spec.name, row.x + 42.f, row.y + 10.f, 16, on ? INK : (hot ? CYAN : TEXT));
+            char meta[48]; std::snprintf(meta, sizeof meta, "%d GUNS  %d DRIVES", spec.maxGuns, spec.maxEngines);
+            txtR(meta, row.x + row.w - 12.f, row.y + 14.f, 10, on ? INK : CYAN_MID);
+        }
+    }
 
-        if (m_ui.button(R(cr.back), "BACK", false, lock, false, 18))
-            m_exit = true;
+    void drawShipPanel() {
+        const Rect r = shipRect();
+        if (!panelChrome(r, "SHIP FILE", 0.16f, CYAN_MID, false)) return;
+        const ControlRects cr = controlRects();
+        const bool lock = m_hangarOpen;
+        const auto T = [](const Rect& q) { return tui::Rect{ q.x, q.y, q.w, q.h }; };
 
-        if (m_ui.button(R(cr.mirror),
-            m_design->symmetric() ? "MIRROR ON" : "MIRROR OFF",
-            m_design->symmetric(), lock, false, 16))
+        txt(m_shipName.empty() ? "UNNAMED" : m_shipName, r.x + 20.f, r.y + 18.f, 20, m_shipName.empty() ? TEXT_DIM : CYAN, 1.6f);
+        txt(m_shipName.empty() ? "NOT IN THE HANGAR YET" : "IN THE HANGAR  //  SHIPS/", r.x + 20.f, r.y + 48.f, 10, TEXT_DEAD, 1.6f);
+        if (!m_fileMsg.empty()) {
+            std::string s = m_fileMsg;
+            while (s.size() > 3 && tw(s, 10, 1.3f) > r.w - 40.f) s.pop_back();
+            txt(s, r.x + 20.f, r.y + 66.f, 10, m_fileMsg.rfind("SAVED", 0) == 0 ? GREEN : AMBER, 1.3f);
+        }
+
+        if (m_ui.button(T(cr.hangar), m_hangarOpen ? "CLOSE  H" : "HANGAR  H", m_hangarOpen, false, false, 13))
+            m_hangarOpen ? closeHangar() : openHangar();
+        if (m_ui.button(T(cr.exportB), "EXPORT", false, lock, false, 13)) exportShip();
+        if (m_ui.button(T(cr.undo), "UNDO", false, lock || m_undo.empty(), false, 13)) undo();
+        if (m_ui.button(T(cr.redo), "REDO", false, lock || m_redo.empty(), false, 13)) redo();
+        if (m_ui.button(T(cr.back), "RETURN  //  ESC", false, lock, true, 14)) requestExit();
+    }
+
+    // ========================================================================
+    // CANVAS TOOL STRIP -- the stage's own tools, above the editor
+    // ========================================================================
+
+    void drawToolbar() {
+        const Rect cp = canvasPanel();
+        const ControlRects cr = controlRects();
+        const bool lock = m_hangarOpen;
+        const auto T = [](const Rect& q) { return tui::Rect{ q.x, q.y, q.w, q.h }; };
+        hline(cp.x + 1.f, cp.y + 56.f, cp.w - 2.f, withA(CYAN_LOW, 0.8f));
+
+        if (m_ui.button(T(cr.mirror), m_design->symmetric() ? "MIRROR ON  Y" : "MIRROR OFF  Y",
+            m_design->symmetric(), lock, false, 13))
             toggleMirror();
 
-        if (m_mode == Mode::Paint) {
-            if (m_ui.button(R(cr.third), "CLEAR PAINT", false, lock, false, 15) && m_livery) {
-                *m_livery = ship::Livery{};
-                deselect();
-                syncPickerFrom(targetColor(m_paintTarget));
-                toast("PAINT CLEARED - CTRL+Z BRINGS IT BACK");
-            }
-        }
-        else if (model) {
-            if (m_ui.button(R(cr.third), "RESET MODEL", false, lock || !m_design->decorAuthored(), false, 15)) {
+        switch (stage()) {
+        case 0:
+            if (m_ui.button(T(cr.third), "AUTO-MOUNT  A", false, lock, false, 13)) { m_design->autoMount(); toast("AUTO-MOUNTED"); }
+            break;
+        case 1:
+            if (m_ui.button(T(cr.third), "RESET MODEL", false, lock || !m_design->decorAuthored(), false, 13)) {
                 m_design->resetDecor();
                 toast("MODEL RESET TO HULL");
             }
+            break;
+        case 2:
+            if (m_ui.button(T(cr.third), "RESET COLOURS", false, lock || !m_livery, false, 13) && m_livery) {
+                m_livery->paint = ship::Paint{};
+                syncPickerFrom(targetColor(m_paintTarget));
+                toast("COLOURS RESET - CTRL+Z BRINGS THEM BACK");
+            }
+            break;
+        default:
+            if (m_ui.button(T(cr.third), "CLEAR PARTS", false,
+                lock || !m_livery || (m_livery->plates.empty() && m_livery->decals.empty()), false, 13) && m_livery) {
+                m_livery->plates.clear();
+                m_livery->decals.clear();
+                deselect();
+                toast("PARTS CLEARED - CTRL+Z BRINGS THEM BACK");
+            }
+            break;
         }
-        else if (m_ui.button(R(cr.third), "AUTO-MOUNT", false, lock, false, 16)) {
-            m_design->autoMount();
-            toast("AUTO-MOUNTED");
+
+        if (partsStage()) {
+            static const char* names[4] = { "MOVE  W", "TURN  E", "SIZE  R", "SHAPE  T" };
+            for (int i = 0; i < 4; ++i)
+                if (m_ui.button(T(cr.tool[i]), names[i], m_tool == static_cast<Tool>(i), lock, false, 12))
+                    setTool(static_cast<Tool>(i));
+        }
+        else {
+            // What the strip's middle says: the count that limits this stage.
+            char info[96];
+            if (stage() == 0)
+                std::snprintf(info, sizeof info, "HULL  %d / %d POINTS", m_design->pointCount(), ship::MAX_HULL_POINTS);
+            else if (stage() == 1)
+                std::snprintf(info, sizeof info, "MODEL  %d / %d POINTS", m_design->decorPointCount(), ship::MAX_DECOR_POINTS);
+            else
+                std::snprintf(info, sizeof info, "PAINTING  %s", targetLabel(m_paintTarget));
+            txt(info, cr.tool[0].x + 6.f, cr.tool[0].y + 8.f, 12, TEXT_DIM, 1.6f);
         }
 
-        for (int i = 0; i < ship::HULL_CLASS_COUNT; ++i) {
-            const auto c = static_cast<ship::HullClass>(i);
-            if (m_ui.button(R(cr.cls[i]), ship::classSpec(c).name,
-                m_design->hullClass() == c, lock, false, 15))
-                loadClass(c);
+        if (m_ui.button(T(cr.fit), "FIT  F", false, lock || !m_viewManual, false, 12)) {
+            m_viewManual = false;
+            toast("VIEW FIT");
         }
+    }
 
-        // Undo / redo, also on Ctrl+Z and Ctrl+Y (Ctrl+Shift+Z).
-        if (m_ui.button(R(cr.undo), "UNDO", false, lock || m_undo.empty(), false, 15)) undo();
-        if (m_ui.button(R(cr.redo), "REDO", false, lock || m_redo.empty(), false, 15)) redo();
-
-        if (m_ui.button(R(cr.hangar), m_hangarOpen ? "CLOSE  H" : "HANGAR  H", m_hangarOpen, false, false, 15))
-            m_hangarOpen ? closeHangar() : openHangar();
-
-        m_ui.glossaryTab({ size.x - 46.f, size.y * 0.100f, 32.f, 32.f });
+    void drawGlossaryRefit() {
+        m_ui.glossaryTab({ DW - 72.f, 1002.f, 34.f, 30.f });
         m_ui.drawGlossary("REFIT BAY",
-            "HULL is the hitbox: what hits and gets hit, where guns and drives go.\n"
-            "MODEL is what the ship looks like. It must cover the hull, stay inside\n"
-            "the violet limit and use at most 150% of the hull's area.",
-            { { "M / TAB",       "Switch HULL, MODEL and PAINT" },
-              { "PAINT",         "Parts, colours and the canopy. No hitbox change" },
-              { "W E R T",       "PAINT tools: MOVE, TURN, SIZE, SHAPE (plate points)" },
-              { "PLATE",         "An armour panel. Stamp one, reshape it with SHAPE" },
+            "Four stages, left column. HULL is the hitbox: what hits and gets hit,\n"
+            "where guns and drives go. MODEL is the silhouette: it must cover the\n"
+            "hull, stay inside the violet limit and use at most 150% of its area.",
+            { { "M / TAB",       "Next stage: HULL, MODEL, COLOURS, PARTS" },
+              { "COLOURS",       "Hull, outline and every effect. The canvas runs the effect" },
+              { "PARTS",         "Every part is a plate: move, turn, size, reshape, outline" },
+              { "W E R T",       "PARTS tools: MOVE, TURN, SIZE, SHAPE (drag its points)" },
+              { "FILL / OUTLINE","Any part solid, or a band of 1-8 px inside its edge" },
               { "TONE / COLOUR", "Follow the hull (flash, heat) or keep a fixed colour" },
+              { "LAYER UP/DOWN", "Draw order. OVER / UNDER puts it above or below the hull" },
               { "H  HANGAR",     "Every saved ship: load, save by name, overwrite, delete" },
-              { "QUICK EXPORT",  "PAINT: save as a new file in ships/ -- share it" },
-              { "HOVER",         "Fits, buttons, frames show the stat change before you click" },
-              { "SEE-THROUGH",   "Hull alpha in the picker; UNDER-HULL parts show through" },
+              { "EXPORT",        "Save as a new file in ships/ -- share it" },
               { "RIFT VIOLET",   "Never paintable: it reads as the heavy weapon" },
               { "LEFT DRAG",     "Move a point of the layer you are editing" },
               { "RIGHT CLICK",   "HULL: fit/remove weapon (point) or drive (edge)" },
@@ -4063,49 +4396,11 @@ private:
               { "INS = / DEL",   "Add a point at the cursor / remove the one under it" },
               { "Y",             "Mirror editing" },
               { "CTRL+Z / Y",    "Undo / redo -- every drag, click and key" },
-              { "WHEEL  MMB",    "Zoom at the cursor / pan the view" },
-              { "F",             "Fit the view to the ship again" },
-              { "SHIFT / ALT",   "PAINT: keep ratio, 15 deg, axis lock / from centre" },
-              { "ARROWS  CTRL+D","PAINT: nudge in the current tool / duplicate" },
+              { "WHEEL  MMB",    "Zoom at the cursor / pan the view   (F: fit again)" },
+              { "SHIFT / ALT",   "PARTS: keep ratio, 15 deg, axis lock / from centre" },
+              { "ARROWS  CTRL+D","PARTS: nudge in the current tool / duplicate" },
               { "1 / 2 / 3",     "LIGHT / MEDIUM / HEAVY frame" },
-              { "A",             "HULL: auto-mount a balanced loadout" },
-              { "SPIKE = MUZZLE","A model spike above a gun is where it fires from" },
-              { "CYAN / VIOLET", "Plasma gun / Rift mount" },
-              { "AMBER EDGE",    "Drive - pushes the ship away from that edge" },
-              { "RED LINE",      "Thrust off-centre - the nose will pull" } });
-    }
-
-    void drawHints(const sf::Vector2f& size) {
-        if (m_mode == Mode::Paint) {
-            sf::Text a(monoFont(),
-                "W MOVE   E TURN   R SIZE   T SHAPE     ARROWS NUDGE   CTRL+D COPY   RMB / DEL REMOVE     WHEEL ZOOM   MMB PAN   F FIT", 13);
-            a.setLetterSpacing(1.5f);
-            a.setFillColor(TEXT_DIM);
-            a.setPosition({ size.x * 0.015f, size.y - 46.f });
-            m_window->draw(a);
-            sf::Text b(monoFont(), "M HULL     Y MIRROR     1-3 FRAME     H HANGAR     CTRL+Z UNDO   CTRL+Y REDO     ESC BACK", 13);
-            b.setLetterSpacing(1.5f);
-            b.setFillColor(TEXT_DIM);
-            b.setPosition({ size.x * 0.015f, size.y - 28.f });
-            m_window->draw(b);
-            return;
-        }
-        const bool model = (m_mode == Mode::Model);
-        sf::Text a(monoFont(), model
-            ? "LMB DRAG POINT     RMB ADD / REMOVE POINT     INS ADD     DEL REMOVE     WHEEL ZOOM   MMB PAN   F FIT"
-            : "LMB DRAG POINT     RMB FIT/REMOVE     R RIFT MOUNT     INS ADD     DEL REMOVE     WHEEL ZOOM   MMB PAN   F FIT", 13);
-        a.setLetterSpacing(1.5f);
-        a.setFillColor(TEXT_DIM);
-        a.setPosition({ size.x * 0.015f, size.y - 46.f });
-        m_window->draw(a);
-
-        sf::Text b(monoFont(), model
-            ? "M PAINT     Y MIRROR     1-3 FRAME     H HANGAR     CTRL+Z UNDO   CTRL+Y REDO     ESC BACK"
-            : "M MODEL     Y MIRROR     1-3 FRAME     A AUTO-MOUNT     H HANGAR     CTRL+Z UNDO   CTRL+Y REDO     ESC BACK", 13);
-        b.setLetterSpacing(1.5f);
-        b.setFillColor(TEXT_DIM);
-        b.setPosition({ size.x * 0.015f, size.y - 28.f });
-        m_window->draw(b);
+              { "CYAN / VIOLET", "Plasma gun / Rift mount.   AMBER EDGE: a drive" } });
     }
 
     // ========================================================================
@@ -4113,6 +4408,42 @@ private:
     // ========================================================================
 
     const sf::Font& monoFont() const { return m_mono ? *m_mono : *m_font; }
+
+    // ---- Text and fills, design-canvas space ----------------------------------
+    // Every panel in 4.0 draws text the same way; one call, one look.
+
+    void txt(const std::string& s, float x, float y, unsigned size, sf::Color c,
+        float spacing = 1.4f, bool mono = true) const {
+        if (s.empty()) return;
+        sf::Text t(mono ? monoFont() : *m_font, s, size);
+        t.setLetterSpacing(spacing);
+        t.setFillColor(c);
+        t.setPosition({ std::round(x), std::round(y) });
+        m_window->draw(t);
+    }
+    /// Right-aligned at x.
+    void txtR(const std::string& s, float x, float y, unsigned size, sf::Color c, float spacing = 1.4f) const {
+        txt(s, x - tw(s, size, spacing), y, size, c, spacing);
+    }
+    float tw(const std::string& s, unsigned size, float spacing = 1.4f) const {
+        if (s.empty()) return 0.f;
+        sf::Text t(monoFont(), s, size);
+        t.setLetterSpacing(spacing);
+        const auto b = t.getLocalBounds();
+        return b.position.x + b.size.x;
+    }
+    void fillR(const Rect& r, sf::Color c) const {
+        if (r.w <= 0.f || r.h <= 0.f) return;
+        sf::RectangleShape q({ r.w, r.h });
+        q.setPosition({ r.x, r.y });
+        q.setFillColor(c);
+        m_window->draw(q);
+    }
+    static sf::Color withA(sf::Color c, float a) {
+        c.a = static_cast<std::uint8_t>(std::clamp(a, 0.f, 1.f) * c.a);
+        return c;
+    }
+
 
     // ---- Polygon drawing in panel space (L maps local -> panel) -------------
     // ConvexShape cannot draw a concave model, so everything polygonal on
@@ -4241,6 +4572,13 @@ private:
     bool m_lDown = false, m_rDown = false;
 
     Mode         m_mode = Mode::Hull;
+    PaintPage    m_paintPage = PaintPage::Colours;
+    float        m_stageT = 0.f;             ///< since the stage changed: the right column re-opens
+    float        m_pathT = 0.f;              ///< breadcrumb typing
+    float        m_closeT = -1.f;            ///< >= 0 while folding away on the way out
+    int          m_layerScroll = 0;          ///< the PARTS list
+    int          m_layerSeen = -1;           ///< selection the list last scrolled to
+    float        m_lastThick = 2.f;          ///< OUTLINE remembers its last width
     ship::Livery* m_livery = nullptr;
     PaintTarget  m_paintTarget = PaintTarget::Hull;
     SelKind      m_selKind = SelKind::None;

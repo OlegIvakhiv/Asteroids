@@ -22,7 +22,8 @@
  *                    ink="tone", shade=0.6 }, ... },          -- ink/shade: v1.2, optional
  *       plates = { { shape = { {-0.5,-0.5}, {0.5,-0.5}, ... },  -- normalised to the box
  *                    x=0, y=6, w=18, h=10, angle=0, ink="tone", shade=0.72,
- *                    color="#28F5FFFF", accent=false, over=true, mirror=false }, ... },
+ *                    color="#28F5FFFF", accent=false, over=true, mirror=false,
+ *                    thickness=0 }, ... },                  -- thickness: v1.3, 0 = filled
  *       cockpit = { style = "bubble", x = 0, y = -6, w = 13, h = 17 },
  *   }
  *
@@ -38,7 +39,8 @@
  * downloaded "ship" cannot do anything but describe a ship.
  *
  * @author Oleg Ivakhiv
- * @version 1.2 -- save(overwrite), pathFor(), guarded remove() for the hangar
+ * @version 1.3 -- plate `thickness` (outline plates); up to 32 plates
+ *          1.2 -- save(overwrite), pathFor(), guarded remove() for the hangar
  *          1.1 -- plates, TONE/COLOUR ink, see-through hull (alpha floored)
  */
 
@@ -179,7 +181,10 @@ namespace ship {
                     << "\", shade = " << pl.shade << ", color = \"" << colorToHex(pl.color)
                     << "\", accent = " << (pl.accent ? "true" : "false")
                     << ", over = " << (pl.over ? "true" : "false")
-                    << ", mirror = " << (pl.mirrored ? "true" : "false") << " },\n";
+                    << ", mirror = " << (pl.mirrored ? "true" : "false")
+                    << ", thickness = " << pl.thickness;
+                if (pl.stamp < PLATE_STAMP_COUNT) o << ", stamp = \"" << plateStampName(static_cast<PlateStamp>(pl.stamp)) << "\"";
+                o << " },\n";
             }
             o << "    },\n";
 
@@ -398,6 +403,12 @@ namespace ship {
                     pl.accent = (*e)["accent"].get_or(false);
                     pl.over = (*e)["over"].get_or(true);
                     pl.mirrored = (*e)["mirror"].get_or(false);
+                    pl.thickness = (*e)["thickness"].get_or(0.f);   // 1.3: outline plates; absent = filled
+                    {
+                        const std::string st = (*e)["stamp"].get_or(std::string());   // 1.3: the parts list's name
+                        for (int k = 0; k < PLATE_STAMP_COUNT; ++k)
+                            if (st == plateStampName(static_cast<PlateStamp>(k))) pl.stamp = static_cast<std::uint8_t>(k);
+                    }
                     clampPlate(pl);
                     if (plateValid(pl) && plateFits(pl, env)) lv.plates.push_back(pl);
                 }

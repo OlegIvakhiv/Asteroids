@@ -43,6 +43,13 @@
  * turns and sizes figures, plates and the canopy alike, and editing a point
  * only changes the shape.
  *
+ * 1.3: ONE KIND OF PART. The refit bay only makes plates now -- a line, a
+ * panel, an oval, a ring are all plates -- so every part moves, turns, sizes
+ * and reshapes the same way. A plate may be FILLED or an OUTLINE band of
+ * `thickness` px drawn inside its edge (a ring is an outlined oval). Old
+ * figures and the canopy still load and still draw; migrateLivery() turns
+ * them into plates when the refit bay opens the ship, so nothing is lost.
+ *
  * ============================================================================
  * INK: TONE OR COLOUR
  * ============================================================================
@@ -65,7 +72,8 @@
  * show something the fight will not.
  *
  * @author Oleg Ivakhiv
- * @version 1.2 -- plates, tonal ink, hull alpha, shared liveryPass()
+ * @version 1.3 -- every part a plate, outline plates, migrateLivery()
+ *          1.2 -- plates, tonal ink, hull alpha, shared liveryPass()
  */
 
 #pragma once
@@ -83,7 +91,7 @@
 namespace ship {
 
     inline constexpr int MAX_DECALS = 20;
-    inline constexpr int MAX_PLATES = 16;
+    inline constexpr int MAX_PLATES = 32;      ///< 1.3: one budget for every part (was 16 plates + 20 figures)
     inline constexpr int MAX_PLATE_POINTS = 16;
 
     /// A see-through hull is allowed; an invisible one is not. The outline
@@ -123,8 +131,10 @@ namespace ship {
     };
 
     /// Stamp shapes a new plate starts from. Every one is editable afterwards.
-    enum class PlateStamp : std::uint8_t { Rect = 0, Tri, Fin, Half, Chevron, Hex };
-    inline constexpr int PLATE_STAMP_COUNT = 6;
+    /// (Values are never saved -- a plate is stored by its points -- so the
+    /// order here is free; catalog order is plateStampOrder().)
+    enum class PlateStamp : std::uint8_t { Rect = 0, Tri, Fin, Half, Chevron, Hex, Line, Oval, Ring, Frame };
+    inline constexpr int PLATE_STAMP_COUNT = 10;
 
     inline const char* plateStampName(PlateStamp s) {
         switch (s) {
@@ -133,9 +143,25 @@ namespace ship {
         case PlateStamp::Fin:     return "FIN";
         case PlateStamp::Half:    return "HALF";
         case PlateStamp::Chevron: return "CHEVRON";
+        case PlateStamp::Line:    return "LINE";
+        case PlateStamp::Oval:    return "OVAL";
+        case PlateStamp::Ring:    return "RING";
+        case PlateStamp::Frame:   return "FRAME";
         default:                  return "HEX";
         }
     }
+
+    /// The refit bay's catalog, in reading order: thin to solid, then the cut shapes.
+    inline PlateStamp plateStampOrder(int i) {
+        static const PlateStamp k[PLATE_STAMP_COUNT] = { PlateStamp::Line, PlateStamp::Rect, PlateStamp::Frame,
+            PlateStamp::Oval, PlateStamp::Ring, PlateStamp::Tri, PlateStamp::Fin, PlateStamp::Half,
+            PlateStamp::Chevron, PlateStamp::Hex };
+        return k[(i % PLATE_STAMP_COUNT + PLATE_STAMP_COUNT) % PLATE_STAMP_COUNT];
+    }
+
+    /// Outline band width limits, local px. 0 = filled.
+    inline constexpr float PLATE_THICK_MIN = 1.f;
+    inline constexpr float PLATE_THICK_MAX = 8.f;
 
     struct Plate {
         /// Outline normalised to the plate's own box: every point in
@@ -151,7 +177,20 @@ namespace ship {
         bool         accent = false;            ///< Thin outline in the live outline colour
         bool         over = true;
         bool         mirrored = false;
+        float        thickness = 0.f;           ///< 0 = filled; else an OUTLINE band this wide, inside the edge
+        std::uint8_t stamp = 255;               ///< PlateStamp it was made from (a name for the parts list); 255 = unknown
     };
+
+    /// What the parts list calls a plate. Outline flips the solid name:
+    /// a PANEL with an outline is a FRAME, an OVAL a RING (and back).
+    inline const char* plateLabel(const Plate& p) {
+        if (p.stamp >= PLATE_STAMP_COUNT) return p.thickness > 0.f ? "OUTLINE" : "PLATE";
+        const auto s = static_cast<PlateStamp>(p.stamp);
+        const bool outline = p.thickness > 0.f;
+        if (s == PlateStamp::Rect || s == PlateStamp::Frame) return outline ? "FRAME" : "PANEL";
+        if (s == PlateStamp::Oval || s == PlateStamp::Ring) return outline ? "RING" : "OVAL";
+        return plateStampName(s);
+    }
 
     /// Canopies. Purely decorative -- they do not move a mount or a hitbox.
     enum class CockpitStyle : std::uint8_t { None = 0, Bubble, Visor, Twin, Slit, Dome };
@@ -469,6 +508,8 @@ namespace ship {
         p.w = std::clamp(p.w, 2.f, 140.f);
         p.h = std::clamp(p.h, 2.f, 140.f);
         p.shade = std::clamp(p.shade, SHADE_MIN, SHADE_MAX);
+        if (p.thickness > 0.f) p.thickness = std::clamp(p.thickness, PLATE_THICK_MIN, PLATE_THICK_MAX);
+        else p.thickness = 0.f;
         while (p.angle < 0.f)    p.angle += 360.f;
         while (p.angle >= 360.f) p.angle -= 360.f;
     }
@@ -526,6 +567,7 @@ namespace ship {
     inline Plate plateStamp(PlateStamp kind, sf::Vector2f pos) {
         Plate p;
         p.pos = pos;
+        p.stamp = static_cast<std::uint8_t>(kind);
         switch (kind) {
         case PlateStamp::Rect:
             p.shape = { { -0.5f, -0.5f }, { 0.5f, -0.5f }, { 0.5f, 0.5f }, { -0.5f, 0.5f } };
@@ -551,6 +593,24 @@ namespace ship {
             p.shape = { { 0.f, -0.5f }, { 0.5f, 0.1f }, { 0.5f, 0.5f }, { 0.f, -0.1f },
                         { -0.5f, 0.5f }, { -0.5f, 0.1f } };
             p.w = 16.f; p.h = 12.f;
+            break;
+        case PlateStamp::Line:         // a stripe: a very thin panel
+            p.shape = { { -0.5f, -0.5f }, { 0.5f, -0.5f }, { 0.5f, 0.5f }, { -0.5f, 0.5f } };
+            p.w = 22.f; p.h = 2.f;
+            break;
+        case PlateStamp::Frame:        // an outlined panel
+            p.shape = { { -0.5f, -0.5f }, { 0.5f, -0.5f }, { 0.5f, 0.5f }, { -0.5f, 0.5f } };
+            p.w = 18.f; p.h = 12.f; p.thickness = 2.f;
+            break;
+        case PlateStamp::Oval:
+        case PlateStamp::Ring:
+            for (int i = 0; i < MAX_PLATE_POINTS; ++i) {
+                const float t = 6.2831853f * static_cast<float>(i) / static_cast<float>(MAX_PLATE_POINTS);
+                p.shape.push_back({ 0.5f * std::cos(t), 0.5f * std::sin(t) });
+            }
+            p.w = 16.f;
+            p.h = (kind == PlateStamp::Ring) ? 16.f : 10.f;
+            if (kind == PlateStamp::Ring) p.thickness = 2.f;
             break;
         default:
             for (int i = 0; i < 6; ++i) {
@@ -596,21 +656,28 @@ namespace ship {
         case DecalKind::Line:
             p.h = std::max(1.f, d.thickness > 0.f ? d.thickness : d.h * 0.5f);
             p.shape = { { -0.5f, -0.5f }, { 0.5f, -0.5f }, { 0.5f, 0.5f }, { -0.5f, 0.5f } };
+            p.stamp = static_cast<std::uint8_t>(PlateStamp::Line);
             break;
         case DecalKind::Bar:
             p.shape = { { -0.5f, -0.5f }, { 0.5f, -0.5f }, { 0.5f, 0.5f }, { -0.5f, 0.5f } };
+            p.stamp = static_cast<std::uint8_t>(PlateStamp::Rect);
             break;
         case DecalKind::Tri:
             p.shape = { { 0.f, -0.5f }, { 0.5f, 0.5f }, { -0.5f, 0.5f } };
+            p.stamp = static_cast<std::uint8_t>(PlateStamp::Tri);
             break;
         default:   // Oval, Ring
+            p.stamp = static_cast<std::uint8_t>(PlateStamp::Oval);
             for (int i = 0; i < MAX_PLATE_POINTS; ++i) {
                 const float t = 6.2831853f * static_cast<float>(i) / static_cast<float>(MAX_PLATE_POINTS);
                 p.shape.push_back({ 0.5f * std::cos(t), 0.5f * std::sin(t) });
             }
             break;
         }
-        p.accent = (d.kind == DecalKind::Ring) || (d.kind != DecalKind::Line && d.thickness > 0.f);
+        // Outlined figures stay outlined (1.3): a ring is an outlined oval,
+        // an outlined bar a FRAME. A line is a thin filled panel.
+        if (d.kind == DecalKind::Ring) p.thickness = std::max(1.f, d.thickness > 0.f ? d.thickness : 2.f);
+        else if (d.kind != DecalKind::Line && d.thickness > 0.f) p.thickness = d.thickness;
         p.tonal = d.tonal;
         p.shade = d.shade;
         p.color = d.color;
@@ -618,6 +685,56 @@ namespace ship {
         p.mirrored = d.mirrored;
         clampPlate(p);
         return p;
+    }
+
+    /**
+     * @brief 1.3: old figures and the canopy become plates. Run by the refit
+     *        bay when it opens a ship (and on a hangar load).
+     *
+     * Draw order is kept: figures were drawn after plates in each pass, and
+     * they are appended after them. A part that no longer fits the envelope
+     * after the conversion (an oval's points sit a hair outside a decal's
+     * exact curve) is shrunk a few percent rather than dropped.
+     * @return how many parts were converted.
+     */
+    inline int migrateLivery(Livery& lv, const std::vector<sf::Vector2f>& envelope) {
+        int converted = 0;
+        const auto keep = [&](Plate p) {
+            if (static_cast<int>(lv.plates.size()) >= MAX_PLATES) return;
+            for (int i = 0; i < 6 && !plateFits(p, envelope); ++i) { p.w *= 0.95f; p.h *= 0.95f; }
+            if (plateValid(p) && plateFits(p, envelope)) { lv.plates.push_back(p); ++converted; }
+        };
+        for (const Decal& d : lv.decals) keep(plateFromDecal(d));
+        lv.decals.clear();
+
+        const Cockpit& c = lv.cockpit;
+        if (c.style != CockpitStyle::None) {
+            const auto glass = [&](PlateStamp s, sf::Vector2f off, float w, float h) {
+                Plate p = plateStamp(s, { 0.f, 0.f });
+                const float a = c.angle * 3.14159265f / 180.f;
+                p.pos = { c.pos.x + off.x * std::cos(a) - off.y * std::sin(a),
+                          c.pos.y + off.x * std::sin(a) + off.y * std::cos(a) };
+                p.w = std::max(2.f, w); p.h = std::max(2.f, h);
+                p.angle = c.angle;
+                p.tonal = false;
+                p.color = lv.paint.cockpit;
+                p.over = true;
+                p.thickness = 0.f;
+                clampPlate(p);
+                keep(p);
+            };
+            switch (c.style) {
+            case CockpitStyle::Visor: glass(PlateStamp::Half, { 0.f, 0.f }, c.w, c.h * 0.6f); break;
+            case CockpitStyle::Slit:  glass(PlateStamp::Line, { 0.f, 0.f }, c.w, std::max(2.f, c.h * 0.25f)); break;
+            case CockpitStyle::Twin:
+                glass(PlateStamp::Oval, { -c.w * 0.26f, 0.f }, c.w * 0.42f, c.h * 0.8f);
+                glass(PlateStamp::Oval, { c.w * 0.26f, 0.f }, c.w * 0.42f, c.h * 0.8f);
+                break;
+            default: glass(PlateStamp::Oval, { 0.f, 0.f }, c.w, c.h); break;   // bubble, dome
+            }
+            lv.cockpit.style = CockpitStyle::None;
+        }
+        return converted;
     }
 
     // ============================================================================
@@ -669,6 +786,42 @@ namespace ship {
             }
         }
 
+        /**
+         * @brief An OUTLINE plate: a band of width `t` just inside the polygon,
+         *        mitred at the corners. Inside, so an outlined plate never
+         *        reaches past where the filled one would -- the envelope test
+         *        stays the polygon's own.
+         */
+        inline void bandInside(const std::vector<sf::Vector2f>& P, float t, std::vector<sf::Vector2f>& out) {
+            const std::size_t n = P.size();
+            if (n < 3 || t <= 0.f) return;
+            float area = 0.f;
+            for (std::size_t i = 0; i < n; ++i) {
+                const sf::Vector2f a = P[i], b = P[(i + 1) % n];
+                area += a.x * b.y - b.x * a.y;
+            }
+            const float s = area >= 0.f ? 1.f : -1.f;   // (e.y, -e.x) points OUT for positive area
+            const auto outN = [&](std::size_t i) {
+                const sf::Vector2f e{ P[(i + 1) % n].x - P[i].x, P[(i + 1) % n].y - P[i].y };
+                const float l = std::max(0.0001f, std::sqrt(e.x * e.x + e.y * e.y));
+                return sf::Vector2f{ s * e.y / l, -s * e.x / l };
+            };
+            std::vector<sf::Vector2f> in(n);
+            for (std::size_t i = 0; i < n; ++i) {
+                const sf::Vector2f n1 = outN((i + n - 1) % n), n2 = outN(i);
+                const float d = std::max(1.f + n1.x * n2.x + n1.y * n2.y, 0.0001f);
+                sf::Vector2f m{ (n1.x + n2.x) / d, (n1.y + n2.y) / d };
+                const float ml = std::sqrt(m.x * m.x + m.y * m.y);
+                if (ml > 3.f) { m.x *= 3.f / ml; m.y *= 3.f / ml; }   // cap mitre spikes
+                in[i] = { P[i].x - m.x * t, P[i].y - m.y * t };
+            }
+            for (std::size_t i = 0; i < n; ++i) {
+                const std::size_t j = (i + 1) % n;
+                out.push_back(P[i]); out.push_back(P[j]); out.push_back(in[j]);
+                out.push_back(P[i]); out.push_back(in[j]); out.push_back(in[i]);
+            }
+        }
+
     } // namespace detail
 
     /// Width of a plate's accent outline, local pixels.
@@ -696,7 +849,15 @@ namespace ship {
                 static_cast<std::uint8_t>(std::min<int>(ink.outline.a, 220) * c.a / 255));
             for (int m = 0; m < (p.mirrored ? 2 : 1); ++m) {
                 const std::vector<sf::Vector2f> poly = plateWorld(p, m == 1);
-                for (const auto& v : ship::detail::triangulate(poly)) out.push_back({ v, c });
+                if (p.thickness > 0.f) {
+                    // Never thicker than ~45% of the plate's small side: the
+                    // band would cross itself and fill the middle.
+                    const float tmax = 0.45f * std::min(p.w, p.h);
+                    tris.clear();
+                    detail::bandInside(poly, std::min(p.thickness, std::max(0.5f, tmax)), tris);
+                    for (const auto& v : tris) out.push_back({ v, c });
+                }
+                else for (const auto& v : ship::detail::triangulate(poly)) out.push_back({ v, c });
                 if (p.accent) {
                     tris.clear();
                     detail::strokeClosed(poly, PLATE_ACCENT_PX, tris);

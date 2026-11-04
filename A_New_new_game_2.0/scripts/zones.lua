@@ -33,7 +33,11 @@
 -- under you on the next F5.
 -- ============================================================================
 
-zone_order  = { "CASUAL", "RAKSHARI" }
+zone_order  = { "CASUAL", "RAKSHARI",
+                -- Sub-zones (Nov 2026): the pieces a generated level is built
+                -- from (scripts/levels.lua). Appended, never inserted.
+                "OPEN_FIELD", "OPEN_EMPTY", "OPEN_COMET",
+                "YARD_SCRAP", "YARD_CEMETERY", "YARD_CITADEL" }
 default_zone = "CASUAL"
 
 
@@ -445,3 +449,133 @@ zones = {
         },
     },
 }
+
+
+-- ============================================================================
+-- SUB-ZONES -- what a generated level is made of (Nov 2026)
+-- ============================================================================
+-- A level (scripts/levels.lua) is a map of sub-zone cells walled by the Void.
+-- Each sub-zone is an ordinary zone: it EXTENDS its parent archetype --
+-- the same sky, dust and colours -- and overrides what lives in it.
+--
+--   sky_group   sub-zones that share one keep the starfield when the player
+--               crosses between them; a different group swaps the sky under a
+--               short fade (MIXED levels, open space -> scrapyard).
+--
+-- Stage 1 gives each sub-zone its own spawn mix and pressure. Their special
+-- behaviours -- static asteroid fields with tunnels, the one-way comet
+-- stream, sleeping wreck packs, citadel squadrons -- arrive in stage 2 as
+-- new keys here, read by the engine.
+-- ============================================================================
+
+local function copy(t)
+    if type(t) ~= "table" then return t end
+    local out = {}
+    for k, v in pairs(t) do out[k] = copy(v) end
+    return out
+end
+
+--- A deep copy of `base` with `over` laid on top. A table in `over`
+--- REPLACES the base table outright (a sub-zone's rock list is its own,
+--- not a merge with the parent's).
+local function extend(base, over)
+    local z = copy(base)
+    for k, v in pairs(over) do z[k] = copy(v) end
+    return z
+end
+
+local OPEN = zones.CASUAL
+local YARD = zones.RAKSHARI
+
+-- ---- Open space ----------------------------------------------------------
+
+zones.OPEN_FIELD = extend(OPEN, {
+    display   = "Asteroid Field",
+    sky_group = "OPEN",
+    -- Big rocks, magma in among them. (Stage 2: placed and still, with
+    -- tunnels through; the drifting stream is switched off here.)
+    rock_interval     = 0.30,
+    rock_max_count    = 90,
+    rock_spawn_radius = 2300,
+    rocks = { SMALL = 8, MEDIUM = 36, LARGE = 42, MAGMATIC = 14 },
+    factions = {
+        RAKSHARI = { interval_scale = 1.1, threat_scale = 0.9, active_scale = 0.9 },
+    },
+})
+
+zones.OPEN_EMPTY = extend(OPEN, {
+    display   = "Empty Space",
+    sky_group = "OPEN",
+    -- Literally nothing: a few rocks, a thin director.
+    rock_interval     = 1.6,
+    rock_max_count    = 14,
+    rocks = { SMALL = 30, MEDIUM = 40, LARGE = 22, MAGMATIC = 8 },
+    factions = {
+        RAKSHARI = { interval_scale = 1.7, threat_scale = 0.6, active_scale = 0.6 },
+    },
+})
+
+zones.OPEN_COMET = extend(OPEN, {
+    display   = "Comet Stream",
+    sky_group = "OPEN",
+    -- The normal drifting field, busier. (Stage 2: every rock streams one
+    -- way, the direction rolled per sub-zone.)
+    rock_interval     = 0.28,
+    rock_max_count    = 80,
+    rocks = { SMALL = 30, MEDIUM = 34, LARGE = 22, MAGMATIC = 14 },
+    factions = {
+        RAKSHARI = { interval_scale = 1.2, threat_scale = 0.85, active_scale = 0.85 },
+    },
+})
+
+-- ---- Rakshari scrapyard -------------------------------------------------
+
+zones.YARD_SCRAP = extend(YARD, {
+    display   = "Scrapyard",
+    sky_group = "YARD",
+    -- The most junk, in play and behind it.
+    rock_interval     = 0.30,
+    rock_max_count    = 88,
+    rocks = {
+        SCRAP_CHUNK = 50, SCRAP = 64, SCRAP_LARGE = 62,
+        WRECK_RAIDER = 6, WRECK_LIGHT = 4, WRECK_MANIAC = 3, WRECK_BERSERKER = 3,
+        UNSTABLE_CORE = 30,
+    },
+    landmarks = { count = 0 },   -- the Citadel belongs to its own sub-zone
+})
+zones.YARD_SCRAP.props.count = 30
+
+zones.YARD_CEMETERY = extend(YARD, {
+    display   = "Wreck Cemetery",
+    sky_group = "YARD",
+    -- Mostly dead ships. (Stage 2: still or slowly drifting, with sleeping
+    -- packs hidden among them.)
+    rock_interval     = 0.40,
+    rock_max_count    = 70,
+    rocks = {
+        SCRAP_CHUNK = 18, SCRAP = 22, SCRAP_LARGE = 20,
+        WRECK_RAIDER = 30, WRECK_LIGHT = 22, WRECK_MANIAC = 18, WRECK_BERSERKER = 18,
+        WRECK_MEDIUM = 14, WRECK_HEAVY = 7, WRECK_BARGE = 3,
+        UNSTABLE_CORE = 16,
+    },
+    landmarks = { count = 0 },
+})
+
+zones.YARD_CITADEL = extend(YARD, {
+    display   = "Citadel Exterior",
+    sky_group = "YARD",
+    -- Little debris, the heaviest director in the game. (Stage 2: squadrons;
+    -- stage 3: dense POIs.)
+    rock_interval     = 1.10,
+    rock_max_count    = 30,
+    rocks = {
+        SCRAP_CHUNK = 30, SCRAP = 30, SCRAP_LARGE = 20,
+        WRECK_RAIDER = 6, WRECK_BERSERKER = 4, UNSTABLE_CORE = 10,
+    },
+    factions = {
+        RAKSHARI = { interval_scale = 0.6, threat_scale = 1.5, active_scale = 1.4 },
+    },
+})
+-- One Citadel, not a pool of three.
+zones.YARD_CITADEL.landmarks.count = 1
+

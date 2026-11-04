@@ -63,11 +63,17 @@
  *   - Greys are DARK and accents are BRIGHT. Dark future, not hologram.
  *   - The void corruption caution is the ONLY element allowed to shout.
  *
+ * 4.2: MACHINE RITES -- the settings page. Opened from the main terminal or
+ *   the pause screen. For now: the sound mixer (master + four channels, see
+ *   AudioSystem's channels), with a live monitor, a sample on every change,
+ *   and saves/settings.txt (utils/Settings) written when the page closes.
+ *   DISPLAY and CONTROLS are listed, sealed.
+ *
  * Pause and game over keep a single centred command panel for now -- they get
  * their own pass with the HUD.
  *
  * @author Oleg Ivakhiv
- * @version 4.1 (live feed + live doctrine)
+ * @version 4.2 (machine rites)
  */
 
 #pragma once
@@ -80,6 +86,7 @@
 #include "utils/LiveFeed.hpp"
 #include "utils/DoctrineStage.hpp"
 #include "utils/HunterRecord.hpp"
+#include "utils/Settings.hpp"
 #include "utils/ShipDesign.hpp"
 #include "utils/ShipLivery.hpp"
 #include "core/EnemyArchetypes.hpp"
@@ -96,6 +103,7 @@
 #include <ctime>
 #include <cctype>
 #include <type_traits>
+#include <array>
 
 class MenuSystem : public ISystem {
 public:
@@ -190,6 +198,7 @@ public:
         if (busy() || dir == 0) return;
         if (m_page == Page::Codex) { stepCodex(dir); return; }
         if (m_page == Page::Doctrine) { stepReel(dir); return; }
+        if (m_page == Page::Rites) { stepRites(dir); return; }
         auto& rows = currentRows();
         if (rows.empty()) return;
         const int n = static_cast<int>(rows.size());
@@ -202,6 +211,7 @@ public:
     MenuAction confirmSelection() {
         if (busy()) return MenuAction::None;
         if (m_page == Page::Codex || m_page == Page::Doctrine) return MenuAction::None;
+        if (m_page == Page::Rites) { confirmRites(); return MenuAction::None; }
         auto& rows = currentRows();
         if (rows.empty()) return MenuAction::None;
         activate(rows[currentSel()]);
@@ -235,6 +245,22 @@ public:
     // ========================================================================
 
     void setHunterLosses(int losses) { m_hunterLosses = std::max(0, losses); }
+    /// MACHINE RITES edits these in place; SystemManager hands them to the
+    /// AudioSystem every frame and owns the file.
+    void setSettings(settings::Settings* s) { m_settings = s; }
+
+    /**
+     * @brief ESC while paused: close a page opened FROM the pause screen.
+     *
+     * game.cpp sends ESC to SystemManager::togglePause(), which asks here
+     * first. True = handled (MACHINE RITES is folding back to HOLD), so the
+     * run must NOT resume on the same key.
+     */
+    bool backOut() {
+        if (m_page != Page::Rites) return false;
+        if (!busy()) closeRites();
+        return true;
+    }
     void setFeedContacts(int) {}
     void setRecord(const record::HunterRecord* r) { m_record = r; }
     void setRunSeconds(float s) { m_runSeconds = s; }
@@ -277,7 +303,7 @@ private:
     // TYPES
     // ========================================================================
 
-    enum class Page { None, Boot, Main, Codex, Doctrine, Pause, GameOver };
+    enum class Page { None, Boot, Main, Codex, Doctrine, Pause, GameOver, Rites };
     using Rect = tui::Rect;
     using Chrome = tui::Chrome;
 
@@ -342,6 +368,8 @@ private:
     bool busy() const { return m_closing || m_page == Page::Boot || m_page == Page::None || m_ui.glossaryOpen(); }
 
     void openPage(Page p) {
+        if (p == Page::Rites && m_page != Page::Rites)
+            m_ritesFrom = (m_lastState == GameState::Paused) ? Page::Pause : Page::Main;
         m_page = p;
         m_openT = 0.f;
         m_closing = false;
@@ -351,6 +379,7 @@ private:
         if (p == Page::Doctrine) m_stage.play(m_reel);
         m_mouseArm = true;
         if (p == Page::Codex) buildCodexList();
+        if (p == Page::Rites) { m_ritesHold = 0.f; m_ritesDrag = -1; }
         m_ui.primeInput();
     }
 
@@ -390,6 +419,7 @@ private:
 
     void finishClose() {
         const Next n = m_next;
+        if (m_page == Page::Rites && m_settings) m_settings->saveIfDirty();
         m_closing = false;
         m_next = Next{};
         if (n.kind == Next::Page) { openPage(n.page); return; }
@@ -451,6 +481,11 @@ private:
             if (m_page == Page::Codex && m_ui.keyEdge(sf::Keyboard::Key::Escape)) {
                 Next n; n.kind = Next::Page; n.page = Page::Main; startClose(n);
             }
+            else if (m_page == Page::Rites) {
+                // Paused: ESC belongs to SystemManager::togglePause -> backOut().
+                if (m_lastState != GameState::Paused && m_ui.keyEdge(sf::Keyboard::Key::Escape)) closeRites();
+                else tickRites(dt);
+            }
             else if (m_page == Page::Doctrine) {
                 if (m_ui.keyEdge(sf::Keyboard::Key::Escape)) {
                     Next n; n.kind = Next::Action; n.action = MenuAction::BackToMenu; startClose(n);
@@ -503,6 +538,7 @@ private:
         // ---- The cursor moving (keys or mouse) ----
         else if (m_page == m_sndPage && (m_page == Page::Main || m_page == Page::Pause || m_page == Page::GameOver)
             && currentSel() != m_sndSel) ui("term.hover");
+        else if (m_page == m_sndPage && m_page == Page::Rites && m_ritesSel != m_sndSel) ui("term.hover");
 
         // ---- Confirm: a clack, then the fold once the blink is done ----
         if (m_closing && !m_sndClosing) ui("term.select");
@@ -523,7 +559,11 @@ private:
         m_sndFeedLost = m_feed.lost();
 
         m_sndPage = m_page;
-        m_sndSel = (m_page == Page::Main || m_page == Page::Pause || m_page == Page::GameOver) ? currentSel() : -1;
+        m_sndSel = (m_page == Page::Main || m_page == Page::Pause || m_page == Page::GameOver) ? currentSel()
+            : (m_page == Page::Rites ? m_ritesSel : -1);
+        // The AMBIENCE channel is a bed, not a click: it sounds while it is the
+        // one being set, so you hear the level you are choosing.
+        if (m_page == Page::Rites && !m_closing && m_ritesSel == settings::AMBIENCE) uiHold("amb.open_space", 3);
         m_sndClosing = m_closing;
         m_sndCloseT = m_closeT;
         m_sndDenyT = m_denyT;
@@ -552,12 +592,13 @@ private:
         { "codx",  "ARCHIVES",  "CODEX",            MenuAction::None,         false, false, Page::Codex },
         { "doct",  "ARCHIVES",  "FIELD DOCTRINE",   MenuAction::ShowTutorial, false },
         { "refit", "HANGAR",    "REFIT BAY",        MenuAction::ShowRefit,    false },
-        { "rites", "SYSTEM",    "MACHINE RITES",    MenuAction::None,         true },
+        { "rites", "SYSTEM",    "MACHINE RITES",    MenuAction::None,         false, false, Page::Rites },
         { "leave", "SYSTEM",    "LEAVE THE SYSTEM", MenuAction::QuitGame,     false, true },
     };
     std::vector<Row> m_pauseRows = {
         { "resume",  "", "RESUME CONTRACT",     MenuAction::ResumeGame },
         { "doct",    "", "FIELD DOCTRINE",      MenuAction::ShowTutorial },
+        { "rites",   "", "MACHINE RITES",       MenuAction::None, false, false, Page::Rites },
         { "restart", "", "PURGE AND RESTART",   MenuAction::RestartGame },
         { "abandon", "", "ABANDON TO TERMINAL", MenuAction::BackToMenu },
         { "leave",   "", "LEAVE THE SYSTEM",    MenuAction::QuitGame, false, true },
@@ -593,7 +634,13 @@ private:
             { { 496.f, 116.f, 1386.f, 844.f },"LESSON",            "LIVE",    Chrome::Brackets, ui::CYAN, 0.10f, &MenuSystem::drawReel },
         };
         case Page::Pause: return {
-            { { 660.f, 290.f, 600.f, 440.f }, "HOLD", "RUN SUSPENDED", Chrome::Heavy, ui::AMBER, 0.00f, &MenuSystem::drawPause },
+            { { 660.f, 270.f, 600.f, 490.f }, "HOLD", "RUN SUSPENDED", Chrome::Heavy, ui::AMBER, 0.00f, &MenuSystem::drawPause },
+        };
+        case Page::Rites: return {
+            { { 38.f, 116.f, 900.f, 556.f },  "MACHINE RITES // AUDIO", "5 CHANNELS", Chrome::Heavy,    ui::CYAN, 0.00f, &MenuSystem::drawRitesMixer },
+            { { 976.f, 116.f, 906.f, 556.f }, "SIGNAL // MONITOR",      "LIVE",       Chrome::Brackets, ui::CYAN, 0.10f, &MenuSystem::drawRitesMonitor },
+            { { 38.f, 708.f, 900.f, 252.f },  "SUBSYSTEMS",             "",           Chrome::Hairline, ui::CYAN, 0.22f, &MenuSystem::drawRitesSystems },
+            { { 976.f, 708.f, 906.f, 252.f }, "BRIEF",                  "",           Chrome::Hairline, ui::CYAN, 0.30f, &MenuSystem::drawRitesBrief },
         };
         case Page::GameOver: return {
             { { 640.f, 250.f, 640.f, 520.f }, "HUNTER LOST", "BEACON SILENT", Chrome::Heavy, ui::RED, 0.00f, &MenuSystem::drawGameOver },
@@ -609,6 +656,7 @@ private:
         case Page::Doctrine: return "TERMINAL://ARCHIVE/DOCTRINE";
         case Page::Pause:    return "FIELD://CONTRACT/HOLD";
         case Page::GameOver: return "FIELD://CONTRACT/HUNTER_LOST";
+        case Page::Rites:    return "TERMINAL://SYSTEM/RITES";
         default:             return "";
         }
     }
@@ -789,6 +837,9 @@ private:
             x = keycap(x, 1006.f, "W/S", "REEL"); x = keycap(x, 1006.f, "A/D", "BASIC / ADVANCED"); x = keycap(x, 1006.f, "ESC", "BACK"); break;
         case Page::Pause:
             x = keycap(x, 1006.f, "W/S", "SELECT"); x = keycap(x, 1006.f, "ENTER", "CONFIRM"); x = keycap(x, 1006.f, "ESC", "RESUME"); x = keycap(x, 1006.f, "T", "DOCTRINE"); break;
+        case Page::Rites:
+            x = keycap(x, 1006.f, "W/S", "CHANNEL"); x = keycap(x, 1006.f, "A/D", "LEVEL");
+            x = keycap(x, 1006.f, "SHIFT", "FINE"); x = keycap(x, 1006.f, "ENTER", "CONFIRM"); x = keycap(x, 1006.f, "ESC", "BACK"); break;
         default:
             x = keycap(x, 1006.f, "W/S", "SELECT"); x = keycap(x, 1006.f, "ENTER", "CONFIRM"); break;
         }
@@ -831,6 +882,17 @@ private:
                   { "T",                "Jump straight to Field Doctrine" },
                   { "PURGE AND RESTART","New sector. This run is abandoned" },
                   { "ABANDON",          "Leave the run, back to the terminal" } });
+            break;
+        case Page::Rites:
+            m_ui.drawGlossary("MACHINE RITES",
+                "The machine's own settings. For now: how loud it is.\nSaved to saves/settings.txt when you leave the page.",
+                { { "W / S",      "Pick a channel" },
+                  { "A / D",      "Level down / up in 5% steps (hold to sweep)" },
+                  { "SHIFT",      "Hold for 1% steps" },
+                  { "MOUSE",      "Click or drag along a bar" },
+                  { "SAMPLE",     "Every change plays a sound from that channel" },
+                  { "TELLS",      "Enemy wind-ups: keep them loud enough to hear" },
+                  { "ESC",        "Back -- levels are kept" } });
             break;
         case Page::GameOver:
             m_ui.drawGlossary("HUNTER LOST",
@@ -1055,7 +1117,10 @@ private:
             }
         }
         else if (row.id == "rites") {
-            body = { "CONFIGURATION SUBSYSTEM. SEALED BY THE COMBINE." };
+            body = { "THE MACHINE'S OWN SETTINGS. FOR NOW, THE MIXER:", "MASTER, EFFECTS, TELLS, AMBIENCE, INTERFACE." };
+            if (m_settings)
+                bars = { { "MASTER", m_settings->get(settings::MASTER), ui::CYAN, pct(m_settings->get(settings::MASTER)) },
+                         { "TELLS", m_settings->get(settings::TELLS), ui::AMBER_HOT, pct(m_settings->get(settings::TELLS)) } };
         }
         else if (row.id == "leave") {
             body = { "POWER DOWN THE TERMLINK AND EXIT.", "YOUR RECORD IS ALREADY SEALED." };
@@ -1573,6 +1638,349 @@ private:
     }
 
     // ========================================================================
+    // MACHINE RITES (settings). Five channel rows, then RESTORE and RETURN.
+    // The page edits m_settings in place; SystemManager feeds the levels to
+    // the AudioSystem every frame, so a change is heard on the next sound.
+    // ========================================================================
+
+    static constexpr int RITES_ROWS = settings::CHANNEL_COUNT + 2;
+    static constexpr int RITES_RESTORE = settings::CHANNEL_COUNT, RITES_RETURN = settings::CHANNEL_COUNT + 1;
+
+    static const char* ritesLabel(int i) {
+        static const char* l[RITES_ROWS] = { "MASTER", "EFFECTS", "TELLS", "AMBIENCE", "INTERFACE",
+            "RESTORE DEFAULTS", "RETURN" };
+        return (i >= 0 && i < RITES_ROWS) ? l[i] : "";
+    }
+    static const char* ritesSub(int i) {
+        static const char* s[settings::CHANNEL_COUNT] = { "EVERY SOUND", "WEAPONS / IMPACTS / FIELD",
+            "ENEMY WIND-UPS", "THE SECTOR", "TERMINAL / HUD" };
+        return (i >= 0 && i < settings::CHANNEL_COUNT) ? s[i] : "";
+    }
+
+    static std::string pct(float v) { return std::to_string(static_cast<int>(std::lround(v * 100.f))) + "%"; }
+    static std::string dbOf(float v) {
+        if (v <= 0.001f) return "-INF DB";
+        char b[24]; std::snprintf(b, sizeof b, "%+.1f DB", 20.f * std::log10(v));
+        return b;
+    }
+    /// What the player actually hears on a channel: master x channel.
+    float ritesLevel(int ch) const {
+        if (!m_settings) return 1.f;
+        return ch == settings::MASTER ? m_settings->get(settings::MASTER)
+            : m_settings->get(settings::MASTER) * m_settings->get(ch);
+    }
+
+    void stepRites(int dir) {
+        m_ritesSel = ((m_ritesSel + dir) % RITES_ROWS + RITES_ROWS) % RITES_ROWS;
+        m_selT = m_time;
+    }
+
+    void confirmRites() {
+        if (m_ritesSel == RITES_RESTORE) {
+            if (m_settings) m_settings->restoreDefaults();
+            m_ritesRestoreT = m_time;
+            ui("term.select");
+            for (int c = 0; c < settings::CHANNEL_COUNT; ++c) m_ritesPulse[c] = m_time;
+        }
+        else if (m_ritesSel == RITES_RETURN) closeRites();
+    }
+
+    void closeRites() {
+        if (m_closing) return;
+        Next n; n.kind = Next::Page; n.page = m_ritesFrom;
+        startClose(n);
+    }
+
+    /// One change of one channel; plays that channel's sample (rate-limited,
+    /// so a sweep is a run of ticks, not a wall of noise).
+    void setRites(int ch, float v) {
+        if (!m_settings || ch < 0 || ch >= settings::CHANNEL_COUNT) return;
+        v = std::round(std::clamp(v, 0.f, 1.f) * 100.f) / 100.f;
+        if (std::fabs(v - m_settings->get(ch)) < 0.0005f) return;
+        m_settings->set(ch, v);
+        m_ritesPulse[ch] = m_time;
+        if (m_time - m_ritesSampleT < 0.11f) return;
+        m_ritesSampleT = m_time;
+        switch (ch) {
+        case settings::MASTER:    ui("player.plasma.fire"); break;
+        case settings::EFFECTS:   ui("rock.break.medium"); break;
+        case settings::TELLS:     ui("tell.bash"); break;
+        case settings::INTERFACE: ui("term.hover"); break;
+        default: break;          // AMBIENCE: its bed is already playing (soundEdges)
+        }
+    }
+
+    /// A / D with a held-key sweep. Called from tick() while the page is open.
+    void tickRites(float dt) {
+        using K = sf::Keyboard::Key;
+        // Every edge is read every frame, so a key pressed on another row
+        // never arrives here as a stale edge.
+        const bool eA = m_ui.keyEdge(K::A), eL = m_ui.keyEdge(K::Left);
+        const bool eD = m_ui.keyEdge(K::D), eR = m_ui.keyEdge(K::Right);
+        const bool le = eA || eL, re = eD || eR;
+        if (!m_settings || m_ritesSel >= settings::CHANNEL_COUNT) { m_ritesHold = 0.f; return; }
+        const bool l = tui::UI::keyDown(K::A) || tui::UI::keyDown(K::Left);
+        const bool r = tui::UI::keyDown(K::D) || tui::UI::keyDown(K::Right);
+        const bool fine = tui::UI::keyDown(K::LShift) || tui::UI::keyDown(K::RShift);
+        const float step = fine ? 0.01f : 0.05f;
+        int dir = 0;
+        if (le && !re) { dir = -1; m_ritesHold = 0.f; m_ritesRep = 0.f; }
+        else if (re && !le) { dir = 1; m_ritesHold = 0.f; m_ritesRep = 0.f; }
+        else if (l != r) {
+            m_ritesHold += dt;
+            if (m_ritesHold > 0.32f) {
+                m_ritesRep += dt;
+                if (m_ritesRep >= (fine ? 0.03f : 0.06f)) { m_ritesRep = 0.f; dir = l ? -1 : 1; }
+            }
+        }
+        else m_ritesHold = 0.f;
+        if (dir == 0) return;
+        const float cur = m_settings->get(m_ritesSel);
+        // Snap to the step grid first, so 83% + 5% lands on 85%, not 88%.
+        const float snapped = dir > 0 ? std::floor(cur / step + 0.001f) * step : std::ceil(cur / step - 0.001f) * step;
+        setRites(m_ritesSel, snapped + dir * step);
+    }
+
+    // ---- panels ---------------------------------------------------------------
+
+    void drawRitesMixer(const Rect& r) {
+        const float x = 26.f, w = r.w - 52.f;
+        auto group = [&](const char* g, float y) {
+            txt(g, x, y + 2.f, 10, ui::CYAN_MID, 2.2f);
+            const float gw = tw(g, 10, 2.2f) + 10.f;
+            fill({ x + gw, y + 9.f, w - gw, 1.f }, tdraw::alpha(ui::CYAN_LOW, 0.6f));
+        };
+        if (!m_ui.leftDown()) m_ritesDrag = -1;
+
+        group("MIXER", 22.f);
+        float y = 48.f;
+        for (int i = 0; i < settings::CHANNEL_COUNT; ++i) {
+            const float h = 50.f;
+            const Rect row{ x, y, w, h };
+            const Rect bar{ x + 330.f, y + 16.f, w - 330.f - 118.f, 18.f };
+            const Rect hitBar{ bar.x - 8.f, y, bar.w + 16.f, h };
+            if (!busy()) {
+                if (m_ui.hovering(row) && m_mouseLive && m_ritesSel != i && m_ritesDrag < 0) { m_ritesSel = i; m_selT = m_time; }
+                if (m_ui.hovering(hitBar) && m_ui.leftEdge()) {
+                    m_ui.consumeClick(); m_mouseLive = true; m_ritesDrag = i;
+                    if (m_ritesSel != i) { m_ritesSel = i; m_selT = m_time; }
+                }
+                if (m_ritesDrag == i && m_ui.leftDown())
+                    setRites(i, (m_ui.localMouse().x - bar.x) / std::max(1.f, bar.w));
+            }
+            const float v = m_settings ? m_settings->get(i) : 1.f;
+            const bool on = (i == m_ritesSel);
+            if (on) {
+                skewBar(x, y, w, h, ui::AMBER);
+                const float k = std::clamp((m_time - m_selT) / 0.12f, 0.f, 1.f);
+                fill({ x - 18.f - (1.f - k) * 10.f, y + 8.f, 6.f, h - 16.f }, tdraw::alpha(ui::AMBER, k));
+            }
+            else fill({ x, y + h, w, 1.f }, tdraw::alpha(ui::CYAN_LOW, 0.7f));
+            char num[8]; std::snprintf(num, sizeof num, "%02d", i + 1);
+            txt(num, x + 16.f, y + 16.f, 14, on ? ui::INK : ui::TEXT_DIM);
+            txt(ritesLabel(i), x + 58.f, y + 7.f, 20, on ? ui::INK : (i == settings::MASTER ? ui::AMBER : ui::TEXT));
+            txt(ritesSub(i), x + 60.f, y + 32.f, 10, on ? tdraw::alpha(ui::INK, 0.75f) : ui::TEXT_DIM, 1.6f);
+
+            // The level: 25 cells, with a bright head cell where it ends --
+            // the eye reads the edge, not the count.
+            const sf::Color onC = on ? ui::INK : (i == settings::MASTER ? ui::AMBER : (i == settings::TELLS ? ui::AMBER_HOT : ui::CYAN));
+            const sf::Color offC = on ? tdraw::alpha(ui::INK, 0.35f) : ui::CYAN_LOW;
+            segBar(bar.x, bar.y, bar.w, bar.h, v, 25, onC, offC);
+            const float flash = std::clamp(1.f - (m_time - m_ritesPulse[i]) / 0.25f, 0.f, 1.f);
+            if (flash > 0.f) {
+                const float hx = bar.x + bar.w * v;
+                fill({ hx - 2.f, bar.y - 5.f, 3.f, bar.h + 10.f }, tdraw::alpha(on ? ui::INK : ui::TEXT, flash));
+            }
+            const bool mute = v <= 0.001f;
+            txtR(mute ? "MUTE" : pct(v), x + w - 16.f, y + 12.f, 20, on ? ui::INK : (mute ? ui::RED : ui::CYAN));
+            y += h + 12.f;
+        }
+
+        group("RITES", y + 6.f);
+        y += 32.f;
+        for (int i = RITES_RESTORE; i <= RITES_RETURN; ++i) {
+            const float h = 40.f;
+            const Rect row{ x, y, w, h };
+            if (!busy() && m_ui.hovering(row)) {
+                if (m_ui.leftEdge()) { m_ui.consumeClick(); m_mouseLive = true; m_ritesSel = i; m_selT = m_time; confirmRites(); }
+                else if (m_mouseLive && m_ritesSel != i) { m_ritesSel = i; m_selT = m_time; }
+            }
+            const bool on = (i == m_ritesSel);
+            const bool blink = m_closing && on && m_closeT < 0.f && static_cast<int>((m_closeT + CONFIRM_BLINK) * 22.f) % 2 == 1;
+            const bool restored = (i == RITES_RESTORE) && m_time - m_ritesRestoreT < 0.6f;
+            if (on && !blink) skewBar(x, y, w, h, restored && std::fmod(m_time, 0.12f) < 0.06f ? ui::TEXT : ui::AMBER);
+            else if (!on) fill({ x, y + h, w, 1.f }, tdraw::alpha(ui::CYAN_LOW, 0.7f));
+            const bool lit = on && !blink;
+            char num[8]; std::snprintf(num, sizeof num, "%02d", i + 1);
+            txt(num, x + 16.f, y + 11.f, 14, lit ? ui::INK : ui::TEXT_DIM);
+            txt(ritesLabel(i), x + 58.f, y + 8.f, 18, lit ? ui::INK : ui::TEXT);
+            std::string meta;
+            if (i == RITES_RESTORE) meta = restored ? "RESTORED" : (m_settings && m_settings->isDefault() ? "FACTORY RITE" : "FACTORY RITE  //  ENTER");
+            else meta = m_ritesFrom == Page::Pause ? "BACK TO HOLD" : "BACK TO COMMAND";
+            txtR(meta, x + w - 16.f, y + 12.f, 12, lit ? ui::INK : ui::CYAN_MID);
+            y += h + 6.f;
+        }
+    }
+
+    /// One flat skewed bar: the menu's single slanted element.
+    void skewBar(float x, float y, float w, float h, sf::Color c) {
+        sf::ConvexShape bar(4);
+        bar.setPoint(0, { x + SKEW, y }); bar.setPoint(1, { x + w + SKEW, y });
+        bar.setPoint(2, { x + w, y + h }); bar.setPoint(3, { x, y + h });
+        bar.setFillColor(c);
+        m_window->draw(bar);
+    }
+
+    /// Four live traces, one per channel, drawn at the level you will hear:
+    /// master x channel. A change kicks its trace. Synthetic -- this is a
+    /// picture of the mix, not an analyser on the real output.
+    void drawRitesMonitor(const Rect& r) {
+        const float x = 22.f, w = r.w - 44.f;
+        const float master = m_settings ? m_settings->get(settings::MASTER) : 1.f;
+        txt("OUTPUT BUS  //  4 CHANNELS UNDER MASTER", x, 16.f, 10, ui::TEXT_DIM, 1.8f);
+        txtR("MASTER " + pct(master) + "   " + dbOf(master), x + w, 16.f, 10,
+            m_ritesSel == settings::MASTER ? ui::AMBER : ui::CYAN_MID, 1.8f);
+
+        const float top = 44.f, laneH = (r.h - top - 18.f) / 4.f;
+        const float wx = x + 150.f, ww = w - 150.f - 64.f;
+        auto noise = [](float n) { const float s = std::sin(n * 12.9898f) * 43758.5453f; return s - std::floor(s); };
+        tdraw::Batch grid;
+        for (int lane = 0; lane < 4; ++lane) {
+            const int ch = lane + 1;
+            const float ly = top + lane * laneH, mid = ly + laneH * 0.5f;
+            const bool on = (m_ritesSel == ch) || (m_ritesSel == settings::MASTER);
+            const sf::Color c = (m_ritesSel == ch) ? ui::AMBER : (on ? ui::CYAN : tdraw::alpha(ui::CYAN, 0.55f));
+            grid.rect(wx, mid, ww, 1.f, tdraw::alpha(ui::CYAN_LOW, 0.55f));
+            for (int k = 0; k <= 8; ++k) grid.rect(wx + ww * k / 8.f, ly + 8.f, 1.f, laneH - 16.f, tdraw::alpha(ui::CYAN_LOW, 0.22f));
+            if (lane > 0) grid.rect(x, ly, w, 1.f, tdraw::alpha(ui::CYAN_LOW, 0.4f));
+
+            const float lvl = ritesLevel(ch);
+            const float kick = std::exp(-std::max(0.f, m_time - std::max(m_ritesPulse[ch], m_ritesPulse[settings::MASTER])) * 5.f);
+            const float amp = (laneH * 0.40f) * lvl * (0.55f + 0.45f * kick);
+            sf::VertexArray va(sf::PrimitiveType::LineStrip);
+            const int N = 220;
+            for (int i = 0; i <= N; ++i) {
+                const float u = static_cast<float>(i) / N;
+                const float t = m_time * 2.2f - u * 3.f;
+                float s = 0.f;
+                switch (ch) {
+                case settings::EFFECTS:      // shots and impacts: bursts over a rumble
+                    s = 0.35f * std::sin(t * 9.f) + 0.65f * (noise(std::floor(t * 40.f)) * 2.f - 1.f) * std::max(0.f, std::sin(t * 1.7f));
+                    break;
+                case settings::TELLS: {      // a rising whine, a gap, again
+                    const float ph = std::fmod(t * 0.9f, 1.f);
+                    s = ph < 0.6f ? std::sin(t * (20.f + 60.f * ph)) * (ph / 0.6f) : 0.f;
+                    break;
+                }
+                case settings::AMBIENCE:     // the void: slow, low, never still
+                    s = 0.7f * std::sin(t * 1.3f) * std::sin(t * 0.37f + 1.f) + 0.25f * (noise(std::floor(t * 9.f)) - 0.5f);
+                    break;
+                default:                     // the terminal: sparse clicks
+                    s = (noise(std::floor(t * 6.f)) > 0.82f && std::fmod(t * 6.f, 1.f) < 0.18f) ? (std::fmod(t * 60.f, 2.f) < 1.f ? 1.f : -1.f) : 0.f;
+                    break;
+                }
+                va.append(sf::Vertex{ { wx + u * ww, mid - s * amp }, c });
+            }
+            m_window->draw(va);
+            for (std::size_t i = 0; i < va.getVertexCount(); ++i) va[i].position.y += 1.f;   // 2 px stroke
+            m_window->draw(va);
+
+            txt(ritesLabel(ch), x, mid - 18.f, 14, (m_ritesSel == ch) ? ui::AMBER : ui::TEXT);
+            const bool mute = lvl <= 0.001f;
+            txt(mute ? "MUTED" : dbOf(lvl), x, mid + 4.f, 10, mute ? ui::RED : ui::TEXT_DIM, 1.6f);
+
+            // VU: the level as a column, with the kick riding on top.
+            const float vx = x + w - 40.f, vh = laneH - 22.f, vy = ly + 11.f;
+            const float vu = std::clamp(lvl * (0.7f + 0.3f * kick + 0.08f * std::sin(m_time * 11.f + lane)), 0.f, 1.f);
+            const int cells = 10;
+            for (int k = 0; k < cells; ++k) {
+                const bool lit = (k + 0.5f) / cells <= vu;
+                const sf::Color cc = k >= 8 ? ui::RED : (k >= 6 ? ui::AMBER : ui::CYAN);
+                grid.rect(vx, vy + vh - (k + 1) * vh / cells + 1.f, 26.f, vh / cells - 2.f, lit ? cc : tdraw::alpha(ui::CYAN_LOW, 0.4f));
+            }
+        }
+        grid.draw(*m_window);
+        scan(0.f, 0.f, r.w, r.h, 30);
+    }
+
+    void drawRitesSystems(const Rect& r) {
+        const float x = 26.f, w = r.w - 52.f;
+        struct Sys { const char* name; const char* state; bool live; };
+        const Sys sys[3] = { { "AUDIO", "ONLINE  //  5 CHANNELS", true },
+                             { "DISPLAY", "SEALED  //  LATER BUILD", false },
+                             { "CONTROLS", "SEALED  //  LATER BUILD", false } };
+        float y = 22.f;
+        for (const Sys& s : sys) {
+            txt(s.name, x, y, 16, s.live ? ui::TEXT : ui::TEXT_DEAD);
+            if (s.live) {
+                const float pulse = 0.55f + 0.45f * std::fabs(std::sin(m_time * 2.2f));
+                fill({ x + w - tw(s.state, 12, 1.4f) - 18.f, y + 6.f, 8.f, 8.f }, tdraw::alpha(ui::GREEN, pulse));
+            }
+            else {
+                const float lx = x + w - tw(s.state, 12, 1.4f) - 26.f, ly = y + 6.f;
+                fill({ lx, ly, 12.f, 10.f }, ui::TEXT_DEAD);
+                fill({ lx + 2.f, ly - 6.f, 2.f, 6.f }, ui::TEXT_DEAD);
+                fill({ lx + 8.f, ly - 6.f, 2.f, 6.f }, ui::TEXT_DEAD);
+                fill({ lx + 2.f, ly - 7.f, 8.f, 2.f }, ui::TEXT_DEAD);
+            }
+            txtR(s.state, x + w, y + 2.f, 12, s.live ? ui::GREEN : ui::TEXT_DEAD);
+            fill({ x, y + 30.f, w, 1.f }, tdraw::alpha(ui::CYAN_LOW, 0.6f));
+            y += 44.f;
+        }
+        const bool dirty = m_settings && m_settings->dirty();
+        txt("CONFIG", x, r.h - 44.f, 12, ui::TEXT_DIM, 1.8f);
+        txt(settings::Settings::path().generic_string(), x + 100.f, r.h - 44.f, 12, ui::TEXT);
+        txtR(dirty ? "CHANGED  //  WRITTEN ON EXIT" : "SAVED", x + w, r.h - 44.f, 12, dirty ? ui::AMBER : ui::GREEN);
+    }
+
+    void drawRitesBrief(const Rect& r) {
+        const float x = 26.f, w = r.w - 52.f;
+        std::vector<std::string> body;
+        std::string sample;
+        switch (m_ritesSel) {
+        case settings::MASTER:
+            body = { "EVERY SOUND THE MACHINE MAKES. THE FOUR CHANNELS", "BELOW SIT UNDER IT: MASTER 50% HALVES THEM ALL." };
+            sample = "A PLASMA SHOT"; break;
+        case settings::EFFECTS:
+            body = { "YOUR GUNS, DRIVES AND HITS; ROCKS, WRECKS AND SCRAP;", "EVERY ENEMY WEAPON AND EVERY DEATH." };
+            sample = "A ROCK BREAKING"; break;
+        case settings::TELLS:
+            body = { "THE ENEMY'S WARNINGS: BASH WIND-UP, RAM LOCK, LANCE", "CHARGE. KEEP IT LOUD -- IT IS WHEN TO DODGE OR PARRY." };
+            sample = "A BASH TELL"; break;
+        case settings::AMBIENCE:
+            body = { "THE SECTOR ITSELF: OPEN SPACE, THE SCRAPYARD,", "THE CITADEL. IT PLAYS WHILE THIS ROW IS SELECTED." };
+            sample = "OPEN SPACE, LOOPING"; break;
+        case settings::INTERFACE:
+            body = { "THIS TERMINAL AND THE FLIGHT HUD: THE BOOT, PAGES,", "CLICKS, THE CODEX AND THE CAUTION BEDS." };
+            sample = "A TERMINAL CLICK"; break;
+        case RITES_RESTORE:
+            body = { "PUT EVERY LEVEL BACK TO THE FACTORY RITE:", "MASTER 80, EFFECTS 100, TELLS 100, AMBIENCE 80, INTERFACE 80." };
+            break;
+        default:
+            body = { "CLOSE THE RITES. EVERY LEVEL IS KEPT AND WRITTEN", "TO SAVES/SETTINGS.TXT ON THE WAY OUT." };
+            break;
+        }
+        txt(ritesLabel(m_ritesSel), x, 20.f, 20, ui::AMBER, 2.f);
+        if (m_ritesSel < settings::CHANNEL_COUNT) txtR(pct(m_settings ? m_settings->get(m_ritesSel) : 1.f), x + w, 22.f, 16, ui::CYAN);
+        fill({ x, 52.f, w, 1.f }, ui::CYAN_LOW);
+        float k = (m_time - m_selT) * 140.f;
+        for (std::size_t i = 0; i < body.size(); ++i) {
+            const float n = std::clamp(k, 0.f, static_cast<float>(body[i].size()));
+            k -= static_cast<float>(body[i].size());
+            const std::string s = body[i].substr(0, static_cast<std::size_t>(n));
+            const float ly = 64.f + static_cast<float>(i) * 24.f;
+            txt(s, x, ly, 14, ui::TEXT);
+            if (n > 0.f && n < body[i].size() && std::fmod(m_time, 0.25f) < 0.125f)
+                fill({ x + tw(s, 14, 1.4f) + 4.f, ly + 2.f, 8.f, 14.f }, ui::CYAN);
+        }
+        if (!sample.empty() && m_time - m_selT > 0.5f) {
+            txt("SAMPLE", x, r.h - 44.f, 12, ui::TEXT_DIM, 1.8f);
+            txt(sample, x + 100.f, r.h - 44.f, 12, ui::CYAN_MID);
+            txtR(m_ritesSel == settings::AMBIENCE ? "LIVE" : "ON EVERY CHANGE", x + w, r.h - 44.f, 12, ui::TEXT_DIM);
+        }
+    }
+
+    // ========================================================================
     // PAUSE / GAME OVER (centred command panel; their own pass comes later)
     // ========================================================================
 
@@ -2056,6 +2464,15 @@ private:
 
     // selection
     int m_mainSel = 0, m_pauseSel = 0, m_overSel = 0, m_codexSel = 0, m_reel = 0;
+
+    // MACHINE RITES
+    settings::Settings* m_settings = nullptr;
+    Page  m_ritesFrom = Page::Main;            ///< where RETURN / ESC goes back to
+    int   m_ritesSel = 0;
+    int   m_ritesDrag = -1;                    ///< channel being dragged with the mouse
+    float m_ritesHold = 0.f, m_ritesRep = 0.f; ///< held A / D sweep
+    float m_ritesSampleT = -10.f, m_ritesRestoreT = -10.f;
+    std::array<float, settings::CHANNEL_COUNT> m_ritesPulse{ -10.f, -10.f, -10.f, -10.f, -10.f };
     float m_selT = 0.f, m_denyT = -10.f;
     sf::Vector2f m_mouseAnchor;
     bool m_mouseArm = true, m_mouseLive = false;

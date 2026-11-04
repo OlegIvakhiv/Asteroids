@@ -32,6 +32,8 @@
   * @note All pointers are guaranteed to be valid during the lifetime
   *       of the game (they are owned by SystemManager).
   */
+namespace levelgen { struct LevelState; }
+
 struct SystemContext {
     EntityManager* em = nullptr;          ///< Entity manager (component storage)
     EntityFactory* ef = nullptr;          ///< Entity factory (creation)
@@ -54,6 +56,9 @@ struct SystemContext {
     /// def() returning nullptr is the supported "no zones.lua" path -- every
     /// consumer falls back to its pre-zone behaviour rather than failing.
     zonearch::ZoneState* zone = nullptr;
+    /// The generated level in play (utils/LevelGen). Null, or inactive, means
+    /// the old unbounded space -- the terminal's hidden worlds never set it.
+    levelgen::LevelState* level = nullptr;
     /// Where world-drawing systems draw. Null = the window. A hidden world
     /// (utils/ShadowWorld: the terminal's live feed and doctrine scenes) sets
     /// its own sf::RenderTexture here; `window` stays the real window, which

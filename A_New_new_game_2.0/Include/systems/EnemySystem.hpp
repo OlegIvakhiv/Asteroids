@@ -34,6 +34,7 @@
 #include "core/EntityManager.hpp"
 #include "core/EntityFactory.hpp"
 #include "core/EnemyArchetypes.hpp"
+#include "utils/LevelGen.hpp"
 #include <SFML/System/Clock.hpp>
 #include <cmath>
 #include <cstdlib>
@@ -53,6 +54,7 @@ public:
         m_registry = ctx.enemyRegistry;
         m_dev = ctx.dev;
         m_zone = ctx.zone;
+        m_level = ctx.level;
 
         m_asteroidSpawnClock.restart();
         m_factionClocks.clear();
@@ -199,9 +201,17 @@ private:
         }
         sol::table config = *cfgOpt;
 
-        const float angle = (rand() % 360) * 3.14159f / 180.f;
-        const sf::Vector2f spawnPos = playerPos +
-            sf::Vector2f(std::cos(angle) * spawnRadius, std::sin(angle) * spawnRadius);
+        // In a level, nothing is born in the Void: try a few bearings for one
+        // that lands inside the edge, and skip the tick if none does.
+        float angle = 0.f;
+        sf::Vector2f spawnPos;
+        bool placed = false;
+        for (int tries = 0; tries < 6 && !placed; ++tries) {
+            angle = (rand() % 360) * 3.14159f / 180.f;
+            spawnPos = playerPos + sf::Vector2f(std::cos(angle) * spawnRadius, std::sin(angle) * spawnRadius);
+            placed = !m_level || m_level->spawnable(spawnPos, 300.f);
+        }
+        if (!placed) { m_asteroidSpawnClock.restart(); return; }
 
         const sf::Vector2f offset((rand() % 400) - 200.f, (rand() % 400) - 200.f);
         const sf::Vector2f dir = (playerPos + offset) - spawnPos;
@@ -352,8 +362,15 @@ private:
                     angle = std::atan2(v.y, v.x) + ((rand() % 1000) / 1000.f - 0.5f) * 1.2f;   // +-34 deg
             }
         }
-        const sf::Vector2f spawnPos = playerPos +
+        sf::Vector2f spawnPos = playerPos +
             sf::Vector2f(std::cos(angle) * dist, std::sin(angle) * dist);
+        // Never in the Void. A blocked bearing tries others; if the whole
+        // ring is Void (flying out past the edge), nobody comes.
+        for (int tries = 0; tries < 8 && m_level && !m_level->spawnable(spawnPos, 600.f); ++tries) {
+            angle = (rand() % 360) * 3.14159f / 180.f;
+            spawnPos = playerPos + sf::Vector2f(std::cos(angle) * dist, std::sin(angle) * dist);
+        }
+        if (m_level && !m_level->spawnable(spawnPos, 600.f)) return;
 
         m_ef->createEnemy(*m_em, spawnPos, *m_lua, m_worldId, *m_registry, chosen, dormant);
 
@@ -393,6 +410,7 @@ private:
     const enemyarch::EnemyRegistry* m_registry = nullptr;
     DevState* m_dev = nullptr;
     zonearch::ZoneState* m_zone = nullptr;
+    levelgen::LevelState* m_level = nullptr;
 
     // ---- Timers ----
     sf::Clock          m_asteroidSpawnClock;

@@ -119,6 +119,21 @@ Two jobs at two points of the frame:
   it. Props are NOT entities — no body, no components — so they never touch
   the entity reserve.
 
+Crossing between two sub-zones with the same `sky_group` keeps the sky and
+any prop layer that did not change, so cell borders do not pop.
+
+### `LevelSystem.hpp`
+The generated level in play. `update(dt)` (logic pass): which sub-zone the
+ship is in (sets the zone), how deep in the Void it is (warnings, the
+placeholder damage — `levels.lua → border.damage_enabled`), the rift's pull
+and the jump. `drawWorld()`: the Void over the edge of the world, the
+border seam, the rift. `drawHud()`: the AUSPEX minimap, the full map (M),
+fog of war, Void warnings, sector banners, the jump fade.
+
+It never creates entities. The jump raises `LevelState::wantNextLevel` and
+SystemManager::nextLevel() rebuilds the world between frames, carrying hull,
+energy, heat and scrap.
+
 ================================================================================
 RENDER — reads the world, draws it
 ================================================================================
@@ -207,7 +222,8 @@ and menu are supposed to speak the same language.
 
 ### `MenuSystem.hpp`
 The terminal front end. Boot, main menu, CODEX, field doctrine (live
-reels), pause, game over. Boot sequence on cold start only — coming back
+reels), MACHINE RITES (settings: the audio mixer, saved to
+saves/settings.txt by utils/Settings.hpp), pause, game over. Boot sequence on cold start only — coming back
 from a dead run snaps in, because the machine is already awake.
 
 Purely screen-space, on a 1920x1080 design canvas. Owns its own pages,
@@ -219,8 +235,12 @@ arrives through `takeClickAction()`, which SystemManager polls in every
 menu state (game over included).
 
 ### `RefitSystem.hpp`
-The refit bay. Hull editor (hitbox), model editor (silhouette), paint
-editor (colours, decals, cockpit). Three modes, M / Tab to cycle.
+The refit bay, on the terminal's 1920x1080 design canvas. Four stages in
+the left column, M / Tab to step: HULL (hitbox, guns, drives), MODEL
+(silhouette), COLOURS (hull, outline, effects with a live preview) and
+PARTS (catalog, the parts on the ship, an inspector). Every part is a
+plate -- one gizmo, FILL or OUTLINE; old figures and the canopy are
+converted to plates when a ship opens (ship::migrateLivery).
 
 Edits a `ship::ShipDesign` that lives on SystemManager and persists
 between runs. Read `core/README.md` and `data/README.md` for the

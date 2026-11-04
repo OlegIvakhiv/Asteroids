@@ -13,6 +13,7 @@
 #include "utils/InputRegistry.hpp"
 #include "utils/GameState.hpp"
 #include "utils/ShipDesign.hpp"
+#include "utils/ShipFile.hpp"
 #include "utils/DevState.hpp"
 #include "utils/ZoneArchetypes.hpp"
 #include "utils/LuaConfig.hpp"
@@ -43,6 +44,9 @@
 #include "systems/VentQTESystem.hpp"        // vent QTE and overdrive
 #include "systems/DevSystem.hpp"            // tilde dev menu
 #include "systems/ZoneSystem.hpp"           // zone visuals + background props
+#include "systems/LevelSystem.hpp"          // generated levels: Void border, rift, map
+#include "utils/LevelGen.hpp"
+#include <random>
 #include "systems/AudioSystem.hpp"          // sound: sounds.lua, voices, watchers
 #include <iostream>
 #include <cmath>
@@ -58,6 +62,8 @@ public:
         // Window closed mid-run: it still counts as a contract, abandoned.
         endRun(false);
         m_record.saveIfDirty();
+        m_settings.saveIfDirty();          // closed with MACHINE RITES still open
+        saveCurrentShip();                 // closed with the refit bay open
         if (b2World_IsValid(m_worldId)) {
             b2DestroyWorld(m_worldId);
         }
@@ -68,6 +74,7 @@ public:
         //    missing record is a first launch, a missing codex.lua is a codex
         //    with names and no field notes.
         m_record.load();
+        m_settings.load();                 // saves/settings.txt (MACHINE RITES); missing = defaults
         loadCodexScript();
 
         // 1. Box2D World
@@ -81,6 +88,7 @@ public:
         // ZoneState::def() null and every consumer falls back to its pre-zone
         // behaviour, so an install without scripts/zones.lua still runs.
         reloadZones();
+        loadLevels();                      // scripts/levels.lua; missing = unbounded space
 
         // 2. Create Player
         m_playerEntityId = m_entityFactory.createPlayer(
@@ -130,15 +138,19 @@ public:
         m_zoneSystem.init(ctx);
         m_devSystem.init(ctx);
         m_audioSystem.init(ctx);            // loads scripts/sounds.lua on the first call
+        m_levelSystem.init(ctx);
         m_devSystem.setSystems(&m_enemySystem, &m_aiSystem, &m_debugSystem, &m_zoneSystem);
+        loadCurrentShip();                 // the ship flown last time, model and paint included
         if (m_shipDesign.mountedGuns().empty() && m_shipDesign.mountedEngines().empty())
             m_shipDesign.autoMount();
 
         m_refitSystem.init(ctx);
         m_refitSystem.setDesign(&m_shipDesign);
         m_refitSystem.setLivery(&m_livery);
+        m_refitSystem.setShipName(m_currentShipName);
 
         m_menuSystem.setRecord(&m_record);
+        m_menuSystem.setSettings(&m_settings);
         m_hunterLosses = m_record.lost();
         m_menuSystem.setHunterLosses(m_hunterLosses);
 
@@ -172,6 +184,7 @@ public:
             m_refitSystem.update(realDt);
             if (m_refitSystem.wantsExit()) {
                 m_refitSystem.clearExit();
+                saveCurrentShip();          // what leaves the bay is what launches next time
                 m_state = GameState::MainMenu;
                 m_menuSystem.setState(m_state);   // this now calls primeInput()
             }
@@ -184,6 +197,7 @@ public:
         if (m_state == GameState::Paused) {
             m_window.setView(m_cameraSystem.getWorldView());
             m_zoneSystem.update(0.f);
+            m_levelSystem.drawWorld();      // the Void and the rift stay on a held frame
             m_debrisSystem.update(0.f);     // wreckage stays on screen, frozen
             m_scrapSystem.draw();
             m_particleSystem.update(0.f);
@@ -233,6 +247,13 @@ public:
             for (int k = 0; k < passes; ++k) dt += runLogicPass(passDt);
         }
 
+        // ----- 3a2. THE RIFT: the jump finished -- build the next level. Here,
+        //      between the logic and the drawing, nothing is mid-iteration.
+        if (m_levelState.wantNextLevel) {
+            m_levelState.wantNextLevel = false;
+            nextLevel();
+        }
+
         // ----- 3b. CAMERA + SCREEN FX (real time) -----
         m_cameraSystem.update(realDt);
         m_entityManager.updateFx(realDt);
@@ -245,6 +266,7 @@ public:
         m_window.setView(m_cameraSystem.getWorldView());
         m_zoneSystem.update(dt);      // backdrop: behind dust, debris and ships
         m_spaceDustSystem.update(dt);
+        m_levelSystem.drawWorld();    // the Void and the rift: under everything that fights
         m_debrisSystem.update(dt);
         m_scrapSystem.draw();
         m_particleSystem.update(dt);
@@ -261,6 +283,8 @@ public:
 
         // ----- 3f. HUD -----
         m_hudSystem.update(realDt);
+        m_levelSystem.setFont(m_hudSystem.font());
+        m_levelSystem.drawHud(realDt);      // minimap, full map (M), Void warnings, banners
 
         // ----- 3f2. TUBE ON: the terminal switched the screen off on the way
         //      out; flight switches it back on. No-op once it has finished.
@@ -308,6 +332,7 @@ public:
             // Lua tables and re-running the script replaces those. Same
             // stale-handle trap the enemy registry has.
             reloadZones();
+            loadLevels();                   // tuning only: the level in play keeps its shape
             m_audioSystem.reload();         // sounds.lua: gains, caps, new files
             std::cout << "Scripts reloaded!" << std::endl;
             return true;
@@ -322,7 +347,12 @@ public:
      * @brief Sound, once per frame, in every state. Called by game.cpp after
      *        update(): by then every system has raised this frame's sounds.
      */
-    void updateAudio(float realDt) { m_audioSystem.frame(realDt, m_state); }
+    void updateAudio(float realDt) {
+        using namespace settings;
+        m_audioSystem.setUserVolumes(m_settings.get(MASTER), m_settings.get(EFFECTS), m_settings.get(TELLS),
+            m_settings.get(AMBIENCE), m_settings.get(INTERFACE));
+        m_audioSystem.frame(realDt, m_state);
+    }
 
     // Accessors for main.cpp (if needed)
     EntityManager& getEntityManager() { return m_entityManager; }
@@ -334,6 +364,7 @@ public:
     RefitSystem& getRefitSystem() { return m_refitSystem; }
     DevSystem& getDevSystem() { return m_devSystem; }
     ZoneSystem& getZoneSystem() { return m_zoneSystem; }
+    const levelgen::LevelState& getLevelState() const { return m_levelState; }
     zonearch::ZoneState& getZoneState() { return m_zoneState; }
     const zonearch::ZoneRegistry& getZoneRegistry() const { return m_zoneRegistry; }
 
@@ -397,9 +428,20 @@ public:
         worldDef.gravity = { 0.0f, 0.0f };
         m_worldId = b2CreateWorld(&worldDef);
 
+        // 2.5 The level: generated before the player, who spawns at its start.
+        sf::Vector2f spawn{ 640.f, 360.f };
+        if (m_levelCfg.loaded) {
+            m_levelState.begin(m_levelCfg, levelgen::generate(m_levelCfg, m_levelIndex, m_runSeed));
+            if (m_levelState.active) {
+                spawn = m_levelState.level.start;
+                m_zoneState.setByKey(m_levelState.level.cellZone[static_cast<size_t>(m_levelState.level.startCell)]);
+            }
+        }
+        else m_levelState.end();
+
         // 3. Re-create the player
         m_playerEntityId = m_entityFactory.createPlayerFromDesign(
-            m_entityManager, { 640.f, 360.f }, m_lua, m_worldId, m_shipDesign, m_livery);
+            m_entityManager, spawn, m_lua, m_worldId, m_shipDesign, m_livery);
 
         m_gameView.setCenter(m_entityManager.transforms[
             m_entityManager.getEntityIndex(m_playerEntityId)].position);
@@ -434,6 +476,7 @@ public:
         m_zoneSystem.init(ctx);
         m_devSystem.init(ctx);
         m_audioSystem.init(ctx);            // new ids: forget every per-entity sound
+        m_levelSystem.init(ctx);
         if (m_shipDesign.mountedGuns().empty() && m_shipDesign.mountedEngines().empty())
             m_shipDesign.autoMount();
 
@@ -450,6 +493,9 @@ public:
         case MenuAction::StartGame:
         case MenuAction::RestartGame:
             endRun(false);              // PURGE AND RESTART abandons the live run
+            // A new run: SECTOR 01 of a fresh seed.
+            m_levelIndex = 0;
+            m_runSeed = std::random_device{}();
             restart();
             m_record.beginRun();
             m_runActive = true;
@@ -496,6 +542,9 @@ public:
     }
 
     void togglePause() {
+        // A page opened from the pause screen (MACHINE RITES) takes ESC back
+        // to HOLD first; only ESC on HOLD itself resumes the run.
+        if (m_state == GameState::Paused && m_menuSystem.backOut()) return;
         if (m_state == GameState::Playing) m_state = GameState::Paused;
         else if (m_state == GameState::Paused) m_state = GameState::Playing;
     }
@@ -517,6 +566,7 @@ private:
         ctx.enemyRegistry = &m_enemyRegistry;
         ctx.dev = &m_dev;
         ctx.zone = &m_zoneState;
+        ctx.level = &m_levelState;
         return ctx;
     }
 
@@ -543,6 +593,7 @@ private:
         m_aiSystem.update(dt);
         m_turretSystem.update(dt);
         m_scrapSystem.update(dt);           // after DamageSystem: this frame's drops exist
+        m_levelSystem.update(dt);           // sub-zone, the Void's edge, the rift
 
         m_devSystem.endPass();
 
@@ -556,6 +607,15 @@ private:
         if (m_seenScan <= 0.f) { m_seenScan = 0.25f; scanSightings(); }
 
         size_t playerIdx = m_entityManager.getEntityIndex(m_playerEntityId);
+        // A hull at zero dies. Nothing used to do this: DamageSystem's death
+        // pass skips the player on purpose (its loop frees enemies and rocks),
+        // so a ship could sit at negative HP forever. Every damage source --
+        // shots, rams, blasts, the Void -- ends up here.
+        if (playerIdx != (size_t)-1 && !m_entityManager.godMode
+            && m_entityManager.healths[playerIdx].currentHp <= 0.f) {
+            killPlayer(playerIdx);
+            playerIdx = (size_t)-1;
+        }
         if (playerIdx == (size_t)-1 && m_state != GameState::GameOver) {
             // Edge-triggered: this block re-runs every pass while dead,
             // so anything stateful in here MUST check the transition.
@@ -565,6 +625,51 @@ private:
             m_menuSystem.setHunterLosses(m_hunterLosses);
         }
         return dt;
+    }
+
+    /// The hunter's ship comes apart: wreckage of its own hull, a blast, then
+    /// the entity goes (which is what tips the run into GameOver, and what
+    /// AudioSystem hears as the death).
+    void killPlayer(size_t pi) {
+        EntityManager& em = m_entityManager;
+        const auto& tf = em.transforms[pi];
+        const sf::Vector2f pos = tf.position;
+        sf::Vector2f vel{ 0.f, 0.f };
+        if (b2Body_IsValid(em.physics[pi].bodyId)) {
+            const b2Vec2 v = b2Body_GetLinearVelocity(em.physics[pi].bodyId);
+            vel = { v.x * SCALE, v.y * SCALE };
+        }
+        const auto rnd = [] { return static_cast<float>(rand()) / static_cast<float>(RAND_MAX); };
+        const float rr = tf.rotation * 3.14159265f / 180.f, cs = std::cos(rr), sn = std::sin(rr);
+        const sf::Color hull = m_livery.paint.hull;
+        const sf::Color fill(static_cast<uint8_t>(hull.r * 0.45f), static_cast<uint8_t>(hull.g * 0.45f),
+            static_cast<uint8_t>(hull.b * 0.45f), 235);
+        for (const auto& pc : shatter::slice(m_shipDesign.renderOutline(), m_shipDesign.renderTriangles(), 3)) {
+            const sf::Vector2f wc(pc.centre.x * cs - pc.centre.y * sn, pc.centre.x * sn + pc.centre.y * cs);
+            const float L = std::max(0.5f, std::sqrt(wc.x * wc.x + wc.y * wc.y));
+            WreckShard s;
+            s.position = pos + wc;
+            s.velocity = wc / L * (80.f + rnd() * 140.f) + vel * 0.6f;
+            s.rotation = tf.rotation;
+            s.angularVelocity = (rnd() < 0.5f ? -1.f : 1.f) * (90.f + rnd() * 200.f);
+            s.lifetime = 2.6f + rnd() * 0.8f;
+            s.fadeTime = 0.8f;
+            s.drag = 0.45f;
+            s.heat = 1.f;
+            s.coolRate = 0.9f;
+            s.radius = pc.radius;
+            s.lineWidth = 1.6f;
+            s.fill = fill;
+            s.skinColor = m_livery.paint.outline;
+            s.tris = pc.tris;
+            s.skin = pc.skin;
+            s.scar = pc.scar;
+            em.wreckShards.push_back(std::move(s));
+        }
+        em.spawnExplosion(pos, sf::Color(255, 170, 70), 34, 2.4f);
+        em.spawnShockRing(pos, 12.f, 230.f, 0.55f, m_livery.paint.plasma, 4.f, 320.f);
+        em.addTrauma(0.9f);
+        em.destroyEntity(pi);
     }
 
     /// Close the live run into the record, once. Death passes lost = true.
@@ -677,11 +782,90 @@ private:
     ScrapSystem  m_scrapSystem;
     MenuSystem m_menuSystem;
     AudioSystem m_audioSystem;
+    settings::Settings m_settings;    ///< MACHINE RITES: saves/settings.txt
+    std::string m_currentShipName;    ///< Hangar name of the ship restored at launch ("" = never named)
 
+    // ---- The active ship, across launches ----
+    // The design lives on this class and used to start as ShipDesign::stock()
+    // every launch: the medium preset, no model, default paint -- whatever was
+    // built in the refit bay last session was gone. Now the ship that leaves
+    // the bay is written to saves/current_ship.lua (same format as ships/,
+    // so the same validating loader reads it) and comes back at launch.
+    static std::filesystem::path currentShipPath() { return std::filesystem::path("saves") / "current_ship.lua"; }
+
+    void loadCurrentShip() {
+        std::error_code ec;
+        if (!std::filesystem::exists(currentShipPath(), ec)) return;   // first launch: stock ship
+        ship::ShipDesign d;
+        ship::Livery lv;
+        std::string name, err;
+        if (!ship::shipfile::load(currentShipPath().string(), d, lv, name, err)) return;   // bad file: stock ship
+        m_shipDesign = d;
+        m_livery = lv;
+        ship::migrateLivery(m_livery, m_shipDesign.envelope());
+        m_currentShipName = (name == "UNNAMED") ? std::string() : name;
+    }
+
+    void saveCurrentShip() {
+        std::error_code ec;
+        std::filesystem::create_directories(currentShipPath().parent_path(), ec);
+        const std::string& n = m_refitSystem.shipName();
+        std::string err;
+        ship::shipfile::writeFile(currentShipPath(), m_shipDesign, m_livery, n.empty() ? "UNNAMED" : n, err);
+    }
     // ---- Zones ----
     zonearch::ZoneRegistry m_zoneRegistry;
     zonearch::ZoneState    m_zoneState;   ///< Survives restarts, like DevState
     ZoneSystem             m_zoneSystem;
+    LevelSystem            m_levelSystem;
+
+    // ---- Generated levels (scripts/levels.lua) ----
+    // The first piece of run state: which sector of the run this is, and the
+    // run's seed. The rift moves to the next index; a new run resets both.
+    levelgen::Config     m_levelCfg;
+    levelgen::LevelState m_levelState;
+    int      m_levelIndex = 0;
+    uint32_t m_runSeed = 0;
+
+    void loadLevels() {
+        try { m_lua.script_file("scripts/levels.lua"); }
+        catch (const std::exception& e) {
+            std::cerr << "[SystemManager] scripts/levels.lua not loaded: " << e.what()
+                << "\n  Running in unbounded space.\n";
+            m_levelCfg.loaded = false;
+            return;
+        }
+        m_levelCfg.load(m_lua);
+    }
+
+    /**
+     * @brief Through the rift: the next sector, same run, same ship.
+     *
+     * Rebuilds the world exactly as a restart does -- a clean Box2D world and
+     * fresh systems -- but carries what is ABOARD: hull, energy, heat and the
+     * scrap this run has collected. The run stays open in the Hunter Record.
+     */
+    void nextLevel() {
+        struct Carry { bool ok = false; float hp = 0, maxHp = 0, energy = 0, heat = 0; int scrap = 0; } c;
+        const size_t pi = m_entityManager.getEntityIndex(m_playerEntityId);
+        if (pi != (size_t)-1) {
+            c.ok = true;
+            c.hp = m_entityManager.healths[pi].currentHp;
+            c.maxHp = m_entityManager.healths[pi].maxHp;
+            c.energy = m_entityManager.players[pi].energyDrive;
+            c.heat = m_entityManager.players[pi].weaponHeat;
+        }
+        c.scrap = m_entityManager.scrap;
+        ++m_levelIndex;
+        restart();
+        m_entityManager.scrap = c.scrap;
+        const size_t ni = m_entityManager.getEntityIndex(m_playerEntityId);
+        if (c.ok && ni != (size_t)-1) {
+            m_entityManager.healths[ni].currentHp = std::min(c.hp, m_entityManager.healths[ni].maxHp);
+            m_entityManager.players[ni].energyDrive = c.energy;
+            m_entityManager.players[ni].weaponHeat = c.heat;
+        }
+    }
 
     // ---- Dev ----
     DevState  m_dev;         ///< Declared before DevSystem only for readability; no ctor dependency.

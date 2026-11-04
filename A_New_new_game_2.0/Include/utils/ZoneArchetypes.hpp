@@ -272,6 +272,7 @@ namespace zonearch {
     public:
         bool load(sol::state& lua) {
             const std::vector<std::string> previousOrder = orderSnapshot();
+            ++m_generation;   // every pointer into the old tables is now stale
 
             m_zones.clear();
             m_props.clear();
@@ -336,6 +337,9 @@ namespace zonearch {
         // ---- Lookup ----
 
         const std::vector<ZoneDef>& all() const { return m_zones; }
+        /// Bumped by every load(): anything caching ZoneDef / PropDef pointers
+        /// compares this and starts over when it changes.
+        uint32_t generation() const { return m_generation; }
         const std::vector<PropDef>& props() const { return m_props; }
         bool empty() const { return m_zones.empty(); }
 
@@ -560,6 +564,7 @@ namespace zonearch {
 
         std::vector<ZoneDef> m_zones;
         std::vector<PropDef> m_props;
+        uint32_t m_generation = 0;
         std::unordered_map<std::string, uint8_t> m_byKey;
         std::unordered_map<std::string, uint8_t> m_propByKey;
         std::string m_defaultKey;
@@ -586,6 +591,10 @@ namespace zonearch {
         const ZoneRegistry* registry = nullptr;
         uint8_t current = INVALID_ZONE;
         bool    dirty = true;
+        /// How close the player is to the Void's edge, 0 (deep inside) .. 1
+        /// (at or past it). Written by LevelSystem; the starfield thins and
+        /// the dust fades with it. Always 0 without a level.
+        float   voidFade = 0.f;
 
         /// The live zone, or nullptr when zones.lua failed to load. EVERY
         /// consumer must handle nullptr: that is the "engine behaves exactly

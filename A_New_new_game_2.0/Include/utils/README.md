@@ -218,12 +218,27 @@ record per line, written at the end of a run and on quit.
 ### `ZoneArchetypes.hpp`
 Zone definitions loaded from `zones.lua` — the "tileset" layer. A zone
 says what a stretch of space LOOKS like (sky, stars, dust, rocks) and
-what lives in it (faction slots). Not yet where it ends.
+what lives in it (faction slots). Where a zone ends is LevelGen's job: a
+level is a map of sub-zones (zones that extend an archetype and share its
+`sky_group`).
 
 Also `ZoneState` — the runtime "which zone is live right now" holder.
 Lives as a pointer in `SystemContext` (like `DevState`) because systems
 cache the context by value and a value would freeze at whatever zone was
 active when the game started.
+
+### `LevelGen.hpp`
+Generated levels, from `scripts/levels.lua`. `generate()` grows 8-12 cells
+from the start, picks a sub-zone per cell from the level kind's pools by
+walking distance, puts the rift in the deepest cell, and bakes a signed
+distance field (+px inside, -px in the Void, with noise so the edge is a
+coastline). `edgeDist()` answers every border question; `outline` is its
+zero contour for the map.
+
+`LevelState` (SystemManager owns it, `SystemContext::level` points at it)
+also holds the fog of war and the map's last-seen marks. Inactive = no
+levels.lua = the old unbounded space; the terminal's hidden worlds never
+set it.
 
 ### `EnemyArchetypes.hpp`
 Enemy unit archetypes and faction spawn tables, loaded from `enemy.lua`.

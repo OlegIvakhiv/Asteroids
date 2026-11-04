@@ -162,6 +162,8 @@ private:
                 tint = z->dustColor;
                 baseAlpha = z->dustAlpha;
             }
+            // Near the Void the dust stops: there is nothing out there to drift.
+            baseAlpha *= 1.f - std::clamp(m_zone->voidFade, 0.f, 1.f);
         }
 
         sf::VertexArray& va = m_verts;
