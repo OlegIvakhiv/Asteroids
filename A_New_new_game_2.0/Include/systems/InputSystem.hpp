@@ -64,6 +64,7 @@
 #include "utils/InputRegistry.hpp"
 #include "utils/GameConfig.hpp"
 #include "utils/ClassTuning.hpp"
+#include "systems/CruiseSystem.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -223,11 +224,12 @@ public:
         const bool recovering = (playerStats.staggerRecoverTimer > 0.f);
 
         std::string sprintKey = binds["sprint"].get<std::string>();
-        bool wantSprint = InputRegistry::isPressed(sprintKey) && !recovering;
+        bool wantSprint = InputRegistry::isPressed(sprintKey) && !recovering && !playerStats.repairing;
 
         if (wantSprint && playerStats.energyDrive > 0 && playerStats.overheatTimer <= 0) {
             playerStats.isTurbo = true;
-            playerStats.energyDrive -= drainRate * dt;
+            // CRUISE: turbo is nearly free while nothing is engaged.
+            playerStats.energyDrive -= drainRate * CruiseSystem::turboDrain(*m_lua, playerStats.cruise) * dt;
             if (playerStats.energyDrive <= 0) {
                 playerStats.energyDrive = 0;
                 playerStats.overheatTimer = penaltyTime;
@@ -329,7 +331,8 @@ public:
             float noseRad = (tf.rotation - 90.f) * 3.14159f / 180.f;
             // Turbo is the drives at full burn -- RCS does not contribute, so a
             // flat wide stern out-sprints a ship of angled quarter nozzles.
-            float finalPower = (refit ? kit.forwardForceN : enginePower) * multiplier;
+            float finalPower = (refit ? kit.forwardForceN : enginePower) * multiplier
+                * CruiseSystem::turboForce(*m_lua, playerStats.cruise);   // CRUISE: faster turbo
             b2Body_ApplyForceToCenter(phys.bodyId,
                 { std::cos(noseRad) * finalPower, std::sin(noseRad) * finalPower },
                 true);
@@ -344,7 +347,10 @@ public:
                 float length = std::sqrt(dx * dx + dy * dy);
                 const float ux = dx / length, uy = dy / length;
 
-                float force = enginePower;
+                // A repair kit running: the ship crawls (RepairSystem).
+                const float repairK = playerStats.repairing
+                    ? (*m_lua)["repair"]["move_scale"].get_or(0.35f) : 1.f;
+                float force = enginePower * repairK;
                 if (refit) {
                     // World input -> ship-local. Local forward is (0,-1).
                     const float r = tf.rotation * 3.14159f / 180.f;
@@ -360,7 +366,7 @@ public:
                     }
                     // rcs_scale is THE knob for how much facing matters:
                     // 1 = class default, 2 = medium reverses at full power.
-                    force = std::max(authority, kit.rcsForceN * rcfg("rcs_scale", 1.0f));
+                    force = std::max(authority, kit.rcsForceN * rcfg("rcs_scale", 1.0f)) * repairK;
                     m_fwdThrottle = std::max(0.f, -ly);
                 }
 
@@ -522,6 +528,7 @@ public:
         std::string parryKey = binds["parry"].get<std::string>();
 
         if (InputRegistry::isPressed(parryKey) &&
+            !playerStats.repairing &&
             playerStats.parryCooldown <= 0 &&
             playerStats.parryTimer <= 0) {
             playerStats.isParrying = true;

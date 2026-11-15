@@ -45,7 +45,13 @@
 #include "systems/DevSystem.hpp"            // tilde dev menu
 #include "systems/ZoneSystem.hpp"           // zone visuals + background props
 #include "systems/LevelSystem.hpp"          // generated levels: Void border, rift, map
+#include "systems/CruiseSystem.hpp"         // exploration: CRUISE vs HUNT
+#include "systems/RepairSystem.hpp"         // repair kits (Q)
+#include "systems/PoiSystem.hpp"            // points of interest: guards, shields, beacons, charting
+#include "systems/BountySystem.hpp"         // hunters sent after a killing spree
+#include "systems/BossSystem.hpp"           // the Dreadnought: arena, attacks, death
 #include "utils/LevelGen.hpp"
+#include "utils/FieldGen.hpp"
 #include <random>
 #include "systems/AudioSystem.hpp"          // sound: sounds.lua, voices, watchers
 #include <iostream>
@@ -139,6 +145,14 @@ public:
         m_devSystem.init(ctx);
         m_audioSystem.init(ctx);            // loads scripts/sounds.lua on the first call
         m_levelSystem.init(ctx);
+        m_cruiseSystem.init(ctx);
+        m_repairSystem.init(ctx);
+        m_poiSystem.init(ctx);
+        m_poiSystem.setEnemySystem(&m_enemySystem);
+        m_bountySystem.init(ctx);
+        m_bountySystem.setEnemySystem(&m_enemySystem);
+        m_bossSystem.init(ctx);
+        m_bossSystem.setEnemySystem(&m_enemySystem);
         m_devSystem.setSystems(&m_enemySystem, &m_aiSystem, &m_debugSystem, &m_zoneSystem);
         loadCurrentShip();                 // the ship flown last time, model and paint included
         if (m_shipDesign.mountedGuns().empty() && m_shipDesign.mountedEngines().empty())
@@ -267,10 +281,13 @@ public:
         m_zoneSystem.update(dt);      // backdrop: behind dust, debris and ships
         m_spaceDustSystem.update(dt);
         m_levelSystem.drawWorld();    // the Void and the rift: under everything that fights
+        m_poiSystem.drawWorld();      // POI force shields
+        m_bossSystem.drawUnder();     // bombardment markers, shotgun sectors, the pulse
         m_debrisSystem.update(dt);
         m_scrapSystem.draw();
         m_particleSystem.update(dt);
         m_renderSystem.update(dt);
+        m_bossSystem.drawOver();      // reactor core, charge orbs, sight lines, death cracks
         m_debugSystem.update(dt);
         m_devSystem.drawWorld();
 
@@ -284,6 +301,12 @@ public:
         // ----- 3f. HUD -----
         m_hudSystem.update(realDt);
         m_levelSystem.setFont(m_hudSystem.font());
+        m_poiSystem.setFont(m_hudSystem.font());
+        m_bountySystem.setFont(m_hudSystem.font());
+        m_bossSystem.setFont(m_hudSystem.font());
+        m_bossSystem.drawHud({ static_cast<float>(m_window.getSize().x), static_cast<float>(m_window.getSize().y) });
+        m_bountySystem.drawHud({ static_cast<float>(m_window.getSize().x), static_cast<float>(m_window.getSize().y) });
+        m_poiSystem.drawHud({ static_cast<float>(m_window.getSize().x), static_cast<float>(m_window.getSize().y) });
         m_levelSystem.drawHud(realDt);      // minimap, full map (M), Void warnings, banners
 
         // ----- 3f2. TUBE ON: the terminal switched the screen off on the way
@@ -365,12 +388,20 @@ public:
     DevSystem& getDevSystem() { return m_devSystem; }
     ZoneSystem& getZoneSystem() { return m_zoneSystem; }
     const levelgen::LevelState& getLevelState() const { return m_levelState; }
+    /// Dev/testing: rebuild the current run as sector `index` of `seed`.
+    void devSetSector(uint32_t seed, int index) { m_runSeed = seed; m_levelIndex = std::max(0, index); restart(); }
+    /// Dev/testing: the Lua state (tuning overrides from a test script).
+    sol::state& devLua() { return m_lua; }
+    /// Dev/testing: one unit of `key` at `pos`, awake, on its own.
+    uint32_t devSummon(const std::string& key, sf::Vector2f pos) { return m_enemySystem.summon(key, pos, false); }
+    BossSystem& getBossSystem() { return m_bossSystem; }
     zonearch::ZoneState& getZoneState() { return m_zoneState; }
     const zonearch::ZoneRegistry& getZoneRegistry() const { return m_zoneRegistry; }
 
     /// What game.cpp clears the window to. Falls back to the original
     /// near-black when no zone is loaded.
     sf::Color voidColor() const {
+        if (m_zoneState.blend.active) return m_zoneState.blend.voidColor;
         const zonearch::ZoneDef* z = m_zoneState.def();
         return z ? z->voidColor : sf::Color(2, 3, 5);
     }
@@ -431,7 +462,9 @@ public:
         // 2.5 The level: generated before the player, who spawns at its start.
         sf::Vector2f spawn{ 640.f, 360.f };
         if (m_levelCfg.loaded) {
-            m_levelState.begin(m_levelCfg, levelgen::generate(m_levelCfg, m_levelIndex, m_runSeed));
+            levelgen::Level lv = levelgen::generate(m_levelCfg, m_levelIndex, m_runSeed);
+            fieldgen::populate(lv, m_zoneRegistry, m_lua);   // fields, packs, streams, nav
+            m_levelState.begin(m_levelCfg, std::move(lv));
             if (m_levelState.active) {
                 spawn = m_levelState.level.start;
                 m_zoneState.setByKey(m_levelState.level.cellZone[static_cast<size_t>(m_levelState.level.startCell)]);
@@ -442,6 +475,8 @@ public:
         // 3. Re-create the player
         m_playerEntityId = m_entityFactory.createPlayerFromDesign(
             m_entityManager, spawn, m_lua, m_worldId, m_shipDesign, m_livery);
+        if (const size_t np = m_entityManager.getEntityIndex(m_playerEntityId); np != (size_t)-1)
+            m_entityManager.players[np].repairKits = m_lua["repair"]["start_kits"].get_or(2);
 
         m_gameView.setCenter(m_entityManager.transforms[
             m_entityManager.getEntityIndex(m_playerEntityId)].position);
@@ -477,6 +512,14 @@ public:
         m_devSystem.init(ctx);
         m_audioSystem.init(ctx);            // new ids: forget every per-entity sound
         m_levelSystem.init(ctx);
+        m_cruiseSystem.init(ctx);
+        m_repairSystem.init(ctx);
+        m_poiSystem.init(ctx);
+        m_poiSystem.setEnemySystem(&m_enemySystem);
+        m_bountySystem.init(ctx);
+        m_bountySystem.setEnemySystem(&m_enemySystem);
+        m_bossSystem.init(ctx);
+        m_bossSystem.setEnemySystem(&m_enemySystem);
         if (m_shipDesign.mountedGuns().empty() && m_shipDesign.mountedEngines().empty())
             m_shipDesign.autoMount();
 
@@ -581,6 +624,8 @@ private:
 
         m_devSystem.beginPass();
 
+        m_cruiseSystem.update(dt);          // CRUISE/HUNT before turbo and weapons read it
+        m_repairSystem.update(dt);          // repair kit: before InputSystem reads `repairing`
         m_inputSystem.update(dt);
         m_physicsSystem.update(dt);
         m_shipAnimSystem.update(dt);
@@ -592,8 +637,11 @@ private:
         m_weaponSystem.update(dt);
         m_aiSystem.update(dt);
         m_turretSystem.update(dt);
+        m_bossSystem.update(dt);            // the Dreadnought (AISystem and TurretSystem skip it)
         m_scrapSystem.update(dt);           // after DamageSystem: this frame's drops exist
         m_levelSystem.update(dt);           // sub-zone, the Void's edge, the rift
+        m_poiSystem.update(dt);             // POIs: guards, shields, beacons, the 50% rule
+        m_bountySystem.update(dt);          // a price on your head
 
         m_devSystem.endPass();
 
@@ -818,6 +866,11 @@ private:
     zonearch::ZoneState    m_zoneState;   ///< Survives restarts, like DevState
     ZoneSystem             m_zoneSystem;
     LevelSystem            m_levelSystem;
+    CruiseSystem           m_cruiseSystem;
+    RepairSystem           m_repairSystem;
+    PoiSystem              m_poiSystem;
+    BountySystem           m_bountySystem;
+    BossSystem             m_bossSystem;
 
     // ---- Generated levels (scripts/levels.lua) ----
     // The first piece of run state: which sector of the run this is, and the
@@ -828,6 +881,11 @@ private:
     uint32_t m_runSeed = 0;
 
     void loadLevels() {
+        // Points of interest: optional. Without it, levels have no POIs.
+        try { m_lua.script_file("scripts/pois.lua"); }
+        catch (const std::exception& e) {
+            std::cerr << "[SystemManager] scripts/pois.lua not loaded: " << e.what() << "\n  Levels will have no POIs.\n";
+        }
         try { m_lua.script_file("scripts/levels.lua"); }
         catch (const std::exception& e) {
             std::cerr << "[SystemManager] scripts/levels.lua not loaded: " << e.what()
@@ -846,7 +904,7 @@ private:
      * scrap this run has collected. The run stays open in the Hunter Record.
      */
     void nextLevel() {
-        struct Carry { bool ok = false; float hp = 0, maxHp = 0, energy = 0, heat = 0; int scrap = 0; } c;
+        struct Carry { bool ok = false; float hp = 0, maxHp = 0, energy = 0, heat = 0, bounty = 0; int scrap = 0, kits = 0, kills = 0, picked = 0; } c;
         const size_t pi = m_entityManager.getEntityIndex(m_playerEntityId);
         if (pi != (size_t)-1) {
             c.ok = true;
@@ -854,6 +912,8 @@ private:
             c.maxHp = m_entityManager.healths[pi].maxHp;
             c.energy = m_entityManager.players[pi].energyDrive;
             c.heat = m_entityManager.players[pi].weaponHeat;
+            c.kits = m_entityManager.players[pi].repairKits;
+            c.kills = m_entityManager.runKills; c.picked = m_entityManager.runScrap; c.bounty = m_entityManager.bountyHeat;
         }
         c.scrap = m_entityManager.scrap;
         ++m_levelIndex;
@@ -864,6 +924,8 @@ private:
             m_entityManager.healths[ni].currentHp = std::min(c.hp, m_entityManager.healths[ni].maxHp);
             m_entityManager.players[ni].energyDrive = c.energy;
             m_entityManager.players[ni].weaponHeat = c.heat;
+            m_entityManager.players[ni].repairKits = c.kits;
+            m_entityManager.runKills = c.kills; m_entityManager.runScrap = c.picked; m_entityManager.bountyHeat = c.bounty;
         }
     }
 

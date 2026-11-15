@@ -542,3 +542,74 @@ spawn_settings = {
     -- ===== SPAWN PROBABILITIES (0.0 to 1.0) =====
     magmatic_chance = 0.15   -- 15% chance to spawn as magmatic instead of normal
 }
+
+-- ============================================================================
+-- POINT-OF-INTEREST OBJECTS (scripts/pois.lua places them)
+-- ============================================================================
+-- Built by utils/PoiModels.hpp (`detail = "poi"`, `poi_model`). Structures are
+-- anchored (`static_body`) and never break (`indestructible`): shots flash on
+-- them and stop, so they are cover. Caches and ore are the loot -- break them.
+-- `kit_chance` / `beacon_chance`: odds of a repair kit / beacon map pickup.
+local function poi(model, size, palette, extra)
+    local t = {
+        color = { r = 80, g = 60, b = 48 },
+        detail = "poi", poi_model = model, poi_palette = palette or "rust",
+        base_size = size, density = 6.0, hp = 1000000, score_reward = 0,
+        speed_range = { 0, 0 },
+        size_variance_min = 0.95, size_variance_max = 1.05, hp_follows_size = 0,
+        metallic = true, static_body = true, indestructible = true,
+        tier = 0, explosive = false,
+    }
+    for k, v in pairs(extra or {}) do t[k] = v end
+    return t
+end
+
+-- Structures
+asteroid_types.POI_MODULE        = poi("module",  2.8, "steel")
+asteroid_types.POI_MODULE_RUST   = poi("module",  2.8, "rust")
+asteroid_types.POI_ANTENNA       = poi("antenna", 1.6, "steel")
+asteroid_types.POI_ANTENNA_RUST  = poi("antenna", 1.6, "rust")
+asteroid_types.POI_CRANE         = poi("crane",   3.4, "rust")
+asteroid_types.POI_RIG           = poi("rig",     3.0, "steel")
+asteroid_types.POI_RIG_RUST      = poi("rig",     3.0, "rust")
+asteroid_types.POI_BEACON        = poi("beacon",  1.2, "steel")
+asteroid_types.POI_DOCK          = poi("dock",    5.5, "rust")
+asteroid_types.POI_LAIR          = poi("lair",    4.0, "rust")
+asteroid_types.POI_TENT          = poi("tent",    2.2, "rust")
+-- The derelict: a dead capital ship. It CAN be broken -- it is worth a lot.
+asteroid_types.POI_HULK          = poi("hulk",    8.0, "steel", {
+    static_body = false, indestructible = false, hp = 2400, density = 40,
+    scrap_drop = { 40, 60 }, kit_chance = 1.0, beacon_chance = 0.5 })
+
+-- ============================================================================
+-- THE DREADNOUGHT'S REMAINS (BossSystem spawns them, never the spawner)
+-- ============================================================================
+-- What the Dreadnought bursts into. BossSystem cuts HIS hull into pieces
+-- and dresses each of these in one (plates and all), so the look below is
+-- only the fallback; the size range lets the collider match a piece.
+-- `chunk_damping` in the boss table keeps them near where he died.
+asteroid_types.DREAD_CHUNK = {
+    codex = "SALVAGE",
+    color = { r = 92, g = 44, b = 36 },
+    base_size = 2.4, density = 9.0, hp = 220, score_reward = 0,
+    speed_range = { 0, 0 },
+    size_variance_min = 0.5, size_variance_max = 1.4, hp_follows_size = 0.6,
+    detail = "cluster", scrap_template = "junk_l",
+    metallic = true, child_inherit_color = true,
+    scrap_drop = { 12, 16 },
+    tier = 2, child_type = "SCRAP", explosive = false,
+}
+
+-- Loot
+-- Scavenger cache: the camps' and outposts' strongbox. New model, rich drop.
+asteroid_types.SCRAP_CACHE = poi("cache", 1.1, "rust", {
+    static_body = false, indestructible = false, hp = 90, density = 8,
+    scrap_drop = { 14, 22 }, kit_chance = 0.35, beacon_chance = 0.15 })
+asteroid_types.SCRAP_CACHE_STEEL = poi("cache", 1.1, "steel", {
+    static_body = false, indestructible = false, hp = 90, density = 8,
+    scrap_drop = { 14, 22 }, kit_chance = 0.35, beacon_chance = 0.15 })
+-- Scrap-rich ore: the mines' rocks. Amber veins, a fat drop, no split.
+asteroid_types.ORE_RICH = poi("ore_rich", 1.5, "rust", {
+    static_body = false, indestructible = false, metallic = false,
+    hp = 160, density = 5, size_variance_min = 0.8, size_variance_max = 1.25, hp_follows_size = 1.0,
+    scrap_drop = { 6, 10 }, kit_chance = 0.04 })

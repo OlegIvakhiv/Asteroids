@@ -32,6 +32,28 @@ sprint_drain_speed = 40.0        -- Energy drain rate (units per second)
 sprint_regen_speed = 20.0        -- Energy regen rate when not sprinting
 penalty_energy = 3.0             -- Overheat penalty duration (seconds when energy hits 0)
 
+-- Exploration: CRUISE while nothing hostile is engaged, HUNT once it is
+-- (CruiseSystem.hpp). Sub-zones with `cruise = false` in zones.lua never cruise.
+cruise = {
+    turbo_speed   = 1.5,     -- x turbo force (and so top speed) in CRUISE
+    turbo_drain   = 0.2,     -- x turbo energy drain  (-80%)
+    shot_cost     = 0.5,     -- x heat AND energy per shot, plasma and rift (-50%)
+    flee_distance = 4000,    -- px: an enemy past this no longer holds you in HUNT...
+    flee_time     = 5.0,     -- ...once all of them have been past it this long
+    fade_in       = 1.0,     -- s for CRUISE to come back (no flicking it on mid-fight)
+}
+
+-- Repair kits (RepairSystem.hpp): Q mends the hull, slowly. While it runs the
+-- ship crawls and cannot shoot or parry (the dodge still works); a hit stops
+-- it and the rest of that kit is lost.
+repair = {
+    start_kits  = 2,      -- a new run starts with this many
+    amount      = 0.5,    -- share of max HP one kit gives
+    time_hunt   = 10.0,   -- s to give it all in a fight
+    time_cruise = 5.0,    -- s in CRUISE
+    move_scale  = 0.35,   -- x thrust while repairing (no turbo)
+}
+
 -- Dash mechanic (instant velocity burst)
 dash_velocity = 40.0         -- Instant velocity boost (pixels/sec)
 dash_energy_cost = 30.0      -- Energy consumed per dash
@@ -418,6 +440,7 @@ key_bindings = {
     rift_detonate_key   = "MouseRight",
     map    = "M",           -- Full sector map (AUSPEX)
     vent   = "E",           -- Overheat vent QTE
+    repair = "Q",           -- Use a repair kit
 
     -- NOT the fire button, deliberately. Players mash fire the instant they
     -- overheat -- that is the reflex the lockout creates -- so binding the QTE

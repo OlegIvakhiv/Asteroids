@@ -37,7 +37,8 @@
 #include "ISystem.hpp"
 #include "utils/LuaConfig.hpp"
 #include "core/EntityManager.hpp"
-#include "utils/UiPalette.hpp"       
+#include "utils/UiPalette.hpp"
+#include "utils/LevelGen.hpp"
 #include <SFML/Graphics.hpp>
 #include <cmath>
 #include <algorithm>
@@ -50,6 +51,7 @@ public:
         m_window = ctx.drawTarget();
         m_lua = ctx.lua;
         m_playerEntityId = ctx.playerEntityId;
+        m_level = ctx.level;
         m_time = 0.f;
         m_ghostHp = -1.f;
         m_displayScrap = 0.f;
@@ -197,21 +199,38 @@ public:
         // ================================================================
         // WEAPON HEAT / VENT QTE � unified widget
         // ================================================================
+        // The gauge stays in the corner at its normal size. The vent QTE
+        // itself pops out in the MIDDLE of the screen, under the ship, where
+        // the eyes already are mid-fight -- no glance away to the corner.
         const float qteT = ps.qteActive ? 1.f : 0.f;
         m_qteOpen += (qteT - m_qteOpen) * (1.f - std::exp(-11.f * dt));
 
-        const float bw = 260.f + 80.f * m_qteOpen;   // 260 -> 340
-        const float bh = 13.f + 15.f * m_qteOpen;    // 13  -> 28
-
+        const float bw = 260.f, bh = 13.f;
         m_layout.heat = { { x - 3.f, y - 3.f }, { bw + 6.f, bh + 6.f } };
-        drawHeatWidget(x, y, bw, bh, ps);
-        y += bh + 13.f + 18.f * m_qteOpen;
+        drawHeatWidget(x, y, bw, bh, ps, false);
+        y += bh + 13.f;
+
+        {
+            const sf::Vector2f vs = m_window->getView().getSize();
+            const float qw = 300.f + 40.f * m_qteOpen, qh = 16.f + 12.f * m_qteOpen;
+            const float qx = vs.x * 0.5f - qw * 0.5f, qy = vs.y * 0.5f + 110.f;
+            if (m_qteOpen > 0.03f && ps.qteActive) drawHeatWidget(qx, qy, qw, qh, ps, true);
+            else if (ps.qteResultFlash > 0.f && m_font) drawVentVerdict(vs.x * 0.5f, qy, ps);
+        }
 
         // ================================================================
         // SCRAP
         // ================================================================
         m_layout.scrap = { { x, y }, { 140.f, 34.f } };
         drawScrap(x, y);
+        if (m_level && m_level->active) drawKits(x + 150.f, y, ps);
+        y += 42.f;
+
+        // ================================================================
+        // MODE: CRUISE / HUNT
+        // ================================================================
+        // Only in a run: the Doctrine's shadow worlds have no CruiseSystem.
+        if (m_level && m_level->active) drawMode(x, y, ps);
     }
 
 private:
@@ -276,8 +295,23 @@ private:
     // ========================================================================
     // HEAT GAUGE / VENT QTE (unified)
     // ========================================================================
+    /// "PERFECT VENT" / "VENT OK" / "VENT MISSED", centred where the QTE was.
+    void drawVentVerdict(float cx, float y, const PlayerComponent& ps) {
+        const float a = clamp01(ps.qteResultFlash / 0.55f);
+        const char* txt = (ps.qteResult == 1) ? "PERFECT VENT"
+            : (ps.qteResult == 2) ? "VENT OK"
+            : "VENT MISSED";
+        const sf::Color col = (ps.qteResult == 1) ? ui::AMBER_HOT
+            : (ps.qteResult == 2) ? ui::BLUE_COOL
+            : ui::TEXT_DIM;
+        ui::label(*m_window, m_font, cx - ui::labelWidth(m_font, txt, 16) * 0.5f, y, txt, 16,
+            ui::alpha(col, a * 255.f));
+    }
+
+    /// `popout` = the centre-screen QTE; false = the corner gauge, which
+    /// stays a plain (frozen) heat bar while the QTE runs.
     void drawHeatWidget(float x, float y, float w, float h,
-        const PlayerComponent& ps) {
+        const PlayerComponent& ps, bool popout) {
         const float heatRatio = clamp01(ps.weaponHeat /
             std::max(1.f, ps.maxWeaponHeat));
 
@@ -286,7 +320,7 @@ private:
         ui::brackets(*m_window, x - 3.f, y - 3.f, w + 6.f, h + 6.f,
             ps.qteActive ? ui::CYAN_MID : ui::CYAN_LOW);
 
-        if (!ps.qteActive) {
+        if (!ps.qteActive || !popout) {
             // ---- Normal gauge ----
             const sf::Color hot = ps.weaponOverheated
                 ? pulse(ui::HAZARD, sf::Color(255, 200, 170), 16.f)
@@ -312,18 +346,10 @@ private:
                     "COOLANT LOCK", 12, ui::alpha(ui::AMBER_HOT, 0.92f));
             }
 
-            // ---- Verdict display (right after QTE ends) ----
-            if (ps.qteResultFlash > 0.f && m_font) {
-                const float a = clamp01(ps.qteResultFlash / 0.55f);
-                const char* txt = (ps.qteResult == 1) ? "PERFECT VENT"
-                    : (ps.qteResult == 2) ? "VENT OK"
-                    : "VENT MISSED";
-                const sf::Color col = (ps.qteResult == 1) ? ui::AMBER_HOT
-                    : (ps.qteResult == 2) ? ui::BLUE_COOL
-                    : ui::TEXT_DIM;
-                ui::label(*m_window, m_font, x, y - 19.f, txt, 16,
-                    ui::alpha(col, a * 255.f));
-            }
+            // While the QTE runs mid-screen, the corner gauge says so.
+            if (ps.qteActive && m_font)
+                ui::label(*m_window, m_font, x + w + 12.f, y - 2.f, "VENTING", 12,
+                    pulse(ui::CYAN, ui::CYAN_MID, 7.f));
             return;
         }
 
@@ -491,4 +517,65 @@ private:
         }
     }
     float m_qteOpen = 0.f;          // 0..1 smooth expansion of QTE widget
+    levelgen::LevelState* m_level = nullptr;
+
+    /// Repair kits beside the scrap: a yellow cross, the count, the key.
+    /// The cross pulses while a kit is running.
+    void drawKits(float x, float y, const PlayerComponent& ps) {
+        const bool any = ps.repairKits > 0;
+        const float k = ps.repairing ? (0.5f + 0.5f * std::sin(m_time * 7.f)) : 0.f;
+        const sf::Color c = ps.repairing ? sf::Color(255, static_cast<uint8_t>(215 + 40 * k), 90)
+            : any ? sf::Color(255, 210, 70) : sf::Color(110, 100, 80);
+        const float cx = x + 12.f, cy = y + 17.f, a = 9.f + 2.f * k, b = 3.2f;
+        sf::RectangleShape h({ a * 2.f, b * 2.f }), v({ b * 2.f, a * 2.f });
+        h.setOrigin({ a, b }); v.setOrigin({ b, a });
+        h.setPosition({ cx, cy }); v.setPosition({ cx, cy });
+        h.setFillColor(c); v.setFillColor(c);
+        m_window->draw(h); m_window->draw(v);
+        if (!m_font) return;
+        ui::label(*m_window, m_font, x + 28.f, y + 3.f, "x" + std::to_string(ps.repairKits), 22,
+            any ? sf::Color(255, 230, 150) : sf::Color(130, 120, 100));
+        ui::label(*m_window, m_font, x + 66.f, y + 9.f, ps.repairing ? "REPAIRING" : "Q", 11,
+            ps.repairing ? c : sf::Color(150, 150, 158));
+    }
+
+    /**
+     * @brief The exploration tag under the scrap counter.
+     *
+     * CRUISE (cyan, fills while it fades back in) when nothing is on you;
+     * HUNT (red, pulsing) when something is; HUNT in grey with the reason
+     * when the sub-zone itself forbids cruising.
+     */
+    void drawMode(float x, float y, const PlayerComponent& ps) {
+        if (!m_font) return;
+        const bool cruise = ps.cruise > 0.f;
+        const float w = 112.f, h = 18.f;
+        sf::Color edge, fill, text;
+        const char* word;
+        if (cruise) {
+            word = "CRUISE";
+            edge = sf::Color(70, 230, 210);
+            fill = sf::Color(10, 46, 44, 210);
+            text = sf::Color(170, 255, 240);
+        }
+        else if (ps.cruiseBlocked && ps.huntedBy == 0) {
+            word = "HUNT";
+            edge = sf::Color(120, 120, 128);
+            fill = sf::Color(24, 24, 28, 200);
+            text = sf::Color(170, 170, 178);
+        }
+        else {
+            word = "HUNT";
+            edge = pulse(sf::Color(255, 60, 60), sf::Color(255, 150, 140), 5.f);
+            fill = sf::Color(52, 10, 12, 220);
+            text = sf::Color(255, 205, 200);
+        }
+        quad(x - 2.f, y - 2.f, w + 4.f, h + 4.f, edge, 8.f);
+        quad(x, y, w, h, fill, 8.f);
+        if (cruise && ps.cruise < 1.f)   // fading back in: the tag fills
+            quad(x, y + h - 4.f, w * ps.cruise, 4.f, sf::Color(edge.r, edge.g, edge.b, 200), 4.f);
+        ui::label(*m_window, m_font, x + 16.f, y - 1.f, word, 15, text);
+        if (!cruise && ps.cruiseBlocked && ps.huntedBy == 0)
+            ui::label(*m_window, m_font, x + w + 16.f, y + 1.f, "DENSE FIELD", 11, sf::Color(150, 150, 158));
+    }
 };

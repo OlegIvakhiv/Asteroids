@@ -56,27 +56,16 @@ public:
 
         m_rng.seed(std::random_device{}());
 
-        const int count = static_cast<int>(cfg("dust_count", 240.f));
         m_motes.clear();
-        m_motes.reserve(count);
 
-        // Seed the field across a generous box around the player's start.
+        // Seed the field across the whole view round the player's start.
         size_t idx = m_em->getEntityIndex(m_playerEntityId);
         const sf::Vector2f origin = (idx != (size_t)-1) ? m_em->transforms[idx].position
             : sf::Vector2f(0.f, 0.f);
-        const sf::Vector2f half = halfExtent();
-
-        std::uniform_real_distribution<float> dx(-half.x, half.x);
-        std::uniform_real_distribution<float> dy(-half.y, half.y);
-        std::uniform_real_distribution<float> dd(0.35f, 1.0f);
-
-        for (int i = 0; i < count; ++i) {
-            Mote m;
-            m.position = origin + sf::Vector2f(dx(m_rng), dy(m_rng));
-            m.depth = dd(m_rng);
-            m.size = 1.0f + m.depth * 1.6f;
-            m_motes.push_back(m);
-        }
+        m_half = halfExtent();
+        const int count = targetCount(m_half);
+        m_motes.reserve(count);
+        for (int i = 0; i < count; ++i) m_motes.push_back(makeMote(origin, m_half, { 0.f, 0.f }));
     }
 
     void update(float dt) override {
@@ -95,6 +84,19 @@ public:
         const float speed = std::sqrt(vel.x * vel.x + vel.y * vel.y);
 
         const sf::Vector2f half = halfExtent();
+
+        // ====================================================================
+        // 0. THE FIELD FOLLOWS THE VIEW'S SIZE
+        //    `dust_count` is the density at a 1920x1080 view. A bigger window,
+        //    or the camera pulling out (a boss arena), opens a ring round the
+        //    old box: it gets its share of new motes there, where the eye
+        //    has not seen any yet. Zooming back in drops the ones now outside
+        //    instead of wrapping them all onto the edges in a heap.
+        // ====================================================================
+        if (std::fabs(half.x - m_half.x) > m_half.x * 0.03f || std::fabs(half.y - m_half.y) > m_half.y * 0.03f) {
+            resize(camCenter, m_half, half);
+            m_half = half;
+        }
 
         // ====================================================================
         // 1. TOROIDAL WRAP AROUND THE CAMERA
@@ -158,7 +160,11 @@ private:
             static_cast<uint8_t>(cfg("dust_color_b", 255.f)));
 
         if (m_zone) {
-            if (const zonearch::ZoneDef* z = m_zone->def()) {
+            if (m_zone->blend.active) {
+                tint = m_zone->blend.dustColor;
+                baseAlpha = m_zone->blend.dustAlpha;
+            }
+            else if (const zonearch::ZoneDef* z = m_zone->def()) {
                 tint = z->dustColor;
                 baseAlpha = z->dustAlpha;
             }
@@ -186,6 +192,42 @@ private:
         m_window->draw(va);
     }
 
+    /// Motes for a box of this half-size at `dust_count` per 1920x1080 view.
+    int targetCount(sf::Vector2f half) const {
+        const float pad = cfg("dust_region_padding", 1.25f);
+        const float ref = (1920.f * pad) * (1080.f * pad);
+        const float n = cfg("dust_count", 240.f) * (4.f * half.x * half.y) / ref;
+        return std::clamp(static_cast<int>(n), 1, static_cast<int>(cfg("dust_max", 1400.f)));
+    }
+
+    /// A mote somewhere in the box round `c`, outside `hole` (half-size;
+    /// zero = anywhere).
+    Mote makeMote(sf::Vector2f c, sf::Vector2f half, sf::Vector2f hole) {
+        std::uniform_real_distribution<float> dx(-half.x, half.x);
+        std::uniform_real_distribution<float> dy(-half.y, half.y);
+        std::uniform_real_distribution<float> dd(0.35f, 1.0f);
+        Mote m;
+        sf::Vector2f o(dx(m_rng), dy(m_rng));
+        for (int t = 0; t < 12 && std::fabs(o.x) < hole.x && std::fabs(o.y) < hole.y; ++t) o = { dx(m_rng), dy(m_rng) };
+        m.position = c + o;
+        m.depth = dd(m_rng);
+        m.size = 1.0f + m.depth * 1.6f;
+        return m;
+    }
+
+    void resize(sf::Vector2f c, sf::Vector2f oldHalf, sf::Vector2f half) {
+        // Shrinking: drop what is now outside.
+        m_motes.erase(std::remove_if(m_motes.begin(), m_motes.end(), [&](const Mote& m) {
+            return std::fabs(m.position.x - c.x) > half.x || std::fabs(m.position.y - c.y) > half.y;
+            }), m_motes.end());
+        // Growing: fill the new ring (or top up anywhere after a shrink).
+        const int want = targetCount(half);
+        const sf::Vector2f hole(std::min(oldHalf.x, half.x), std::min(oldHalf.y, half.y));
+        while (static_cast<int>(m_motes.size()) < want)
+            m_motes.push_back(makeMote(c, half, (half.x > oldHalf.x || half.y > oldHalf.y) ? hole : sf::Vector2f(0.f, 0.f)));
+        if (static_cast<int>(m_motes.size()) > want) m_motes.resize(static_cast<size_t>(want));
+    }
+
     /// Half-size of the region motes are kept inside, padded for zoom-out.
     sf::Vector2f halfExtent() const {
         sf::Vector2f size = m_view ? m_view->getSize() : sf::Vector2f(m_window->getSize());
@@ -211,5 +253,6 @@ private:
     uint32_t m_playerEntityId = 0;
 
     std::vector<Mote> m_motes;
+    sf::Vector2f m_half{ 0.f, 0.f };   ///< The box the field was last sized for
     mutable std::mt19937 m_rng;
 };

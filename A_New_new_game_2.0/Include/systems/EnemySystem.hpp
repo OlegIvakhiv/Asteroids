@@ -37,6 +37,8 @@
 #include "utils/LevelGen.hpp"
 #include <SFML/System/Clock.hpp>
 #include <cmath>
+#include <algorithm>
+#include <limits>
 #include <cstdlib>
 #include <vector>
 #include <string>
@@ -71,8 +73,22 @@ public:
         // Dev toggles. The clocks still run while a spawner is off; they are
         // reset on the next attempt, so switching one back on gives a single
         // spawn, not a burst of banked time.
-        if (!m_dev || m_dev->asteroidSpawnerOn) updateAsteroids(playerPos);
-        if (!m_dev || m_dev->directorOn)        updateFactions(dt, playerPos);
+        // A boss arena is sealed: nothing spawns while it stands.
+        const bool sealed = m_em->bossArena.active;
+        if (!sealed && (!m_dev || m_dev->asteroidSpawnerOn)) updateAsteroids(playerPos);
+        if (!sealed && (!m_dev || m_dev->directorOn))        updateFactions(dt, playerPos);
+
+        // The level's placed contents: fields stream in and out around the
+        // ship, sleeping packs arm and spring. Runs even with the spawners
+        // off -- a field is terrain, not a spawn.
+        if (m_level && m_level->active) {
+            m_fieldTimer -= dt;
+            if (m_fieldTimer <= 0.f) {
+                m_fieldTimer = 0.2f;
+                updateField(playerPos);
+                updatePacks(playerPos);
+            }
+        }
     }
 
     /**
@@ -84,7 +100,7 @@ public:
      *
      * @return The new entity id, or 0 if the type does not exist.
      */
-    uint32_t spawnAsteroid(const std::string& typeKey, sf::Vector2f pos, sf::Vector2f vel) {
+    uint32_t spawnAsteroid(const std::string& typeKey, sf::Vector2f pos, sf::Vector2f vel, float sizeRoll = -1.f) {
         if (!m_em || !m_lua || !m_ef) return 0;
 
         sol::optional<sol::table> cfgOpt = (*m_lua)["asteroid_types"][typeKey];
@@ -96,7 +112,7 @@ public:
         sol::table config = *cfgOpt;
 
         const uint32_t astId = m_ef->createAsteroid(*m_em, pos, vel,
-            config["base_size"], config, m_worldId);
+            config["base_size"], config, m_worldId, sizeRoll);
 
         const size_t astIdx = m_em->getEntityIndex(astId);
         if (astIdx != (size_t)-1) {
@@ -167,10 +183,25 @@ private:
 
         if (m_asteroidSpawnClock.getElapsedTime().asSeconds() <= astInterval) return;
 
+        // ROCK MODE (zones.lua `rock_mode`):
+        //   "drift"  (default) rocks drift in from every bearing at the ship
+        //   "field"  none at all -- the sub-zone's placed field IS its rocks
+        //            (an asteroid field with a drifting stream on top is a
+        //            billiard table)
+        //   "stream" one-way comet stream: every rock comes from one side,
+        //            the heading rolled per cell
+        const std::string mode = zone && zone->config.valid()
+            ? zone->config["rock_mode"].get_or<std::string>("drift") : std::string("drift");
+        if (mode == "field") { m_asteroidSpawnClock.restart(); return; }
+
+        // The cap counts only what drifted in: a placed field never crowds it out.
         int currentAsteroids = 0;
-        for (const auto& p : m_em->physics) {
-            BodyUserData* ud = bodyUD(p.bodyId);
-            if (ud && ud->type == BodyType::Asteroid) ++currentAsteroids;
+        const bool levelOn = m_level && m_level->active;
+        for (size_t i = 0; i < m_em->physics.size(); ++i) {
+            BodyUserData* ud = bodyUD(m_em->physics[i].bodyId);
+            if (!ud || ud->type != BodyType::Asteroid) continue;
+            if (levelOn && m_level->placedById.count(m_em->transforms[i].entityId)) continue;
+            ++currentAsteroids;
         }
         if (currentAsteroids >= maxAstCount) return;
 
@@ -201,15 +232,52 @@ private:
         }
         sol::table config = *cfgOpt;
 
-        // In a level, nothing is born in the Void: try a few bearings for one
-        // that lands inside the edge, and skip the tick if none does.
+        sol::table speedRange = config["speed_range"];
+        float speed = speedRange[1].get<float>() +
+            (rand() % 100 / 100.f) * (speedRange[2].get<float>() - speedRange[1].get<float>());
+
+        // ---- The comet stream: upstream of the ship, all one way ----
+        float heading = std::numeric_limits<float>::quiet_NaN();
+        if (mode == "stream" && m_level && m_level->active) {
+            const int cell = m_level->cellOf(playerPos);
+            if (cell >= 0 && static_cast<size_t>(cell) < m_level->level.cellStream.size())
+                heading = m_level->level.cellStream[static_cast<size_t>(cell)];
+        }
+        if (!std::isnan(heading)) {
+            sol::optional<sol::table> st = zone->config["stream"];
+            const float spread = (st ? (*st)["spread"].get_or(16.f) : 16.f) * 3.14159f / 180.f;
+            const float speedK = st ? (*st)["speed"].get_or(1.7f) : 1.7f;
+            const sf::Vector2f fwd(std::cos(heading), std::sin(heading)), side(-fwd.y, fwd.x);
+            sf::Vector2f spawnPos;
+            bool ok = false;
+            for (int tries = 0; tries < 6 && !ok; ++tries) {
+                // A wide front upstream, so the stream fills the screen rather
+                // than aiming at the ship: a point on the upstream half of the
+                // spawn circle. (Kept ON the circle -- anything further out
+                // than PhysicsSystem's 3000 px cull is deleted the frame it
+                // is born.)
+                const float lateral = ((rand() % 2001) / 1000.f - 1.f) * spawnRadius * (st ? (*st)["width"].get_or(0.6f) : 0.6f);
+                const float along = std::sqrt(std::max(0.f, spawnRadius * spawnRadius - lateral * lateral));
+                spawnPos = playerPos - fwd * along + side * lateral;
+                ok = !m_level || m_level->spawnable(spawnPos, 300.f, 120.f);
+            }
+            if (!ok) { m_asteroidSpawnClock.restart(); return; }
+            const float a = heading + ((rand() % 2001) / 1000.f - 1.f) * spread;
+            spawnAsteroid(selectedType, spawnPos, sf::Vector2f(std::cos(a), std::sin(a)) * (speed * speedK));
+            m_asteroidSpawnClock.restart();
+            return;
+        }
+
+        // In a level, nothing is born in the Void (or inside a rock pile):
+        // try a few bearings for one that lands clear, and skip the tick if
+        // none does.
         float angle = 0.f;
         sf::Vector2f spawnPos;
         bool placed = false;
         for (int tries = 0; tries < 6 && !placed; ++tries) {
             angle = (rand() % 360) * 3.14159f / 180.f;
             spawnPos = playerPos + sf::Vector2f(std::cos(angle) * spawnRadius, std::sin(angle) * spawnRadius);
-            placed = !m_level || m_level->spawnable(spawnPos, 300.f);
+            placed = !m_level || m_level->spawnable(spawnPos, 300.f, 120.f);
         }
         if (!placed) { m_asteroidSpawnClock.restart(); return; }
 
@@ -217,13 +285,183 @@ private:
         const sf::Vector2f dir = (playerPos + offset) - spawnPos;
         const float len = std::max(1.0f, std::sqrt(dir.x * dir.x + dir.y * dir.y));
 
-        sol::table speedRange = config["speed_range"];
-        const float speed = speedRange[1].get<float>() +
-            (rand() % 100 / 100.f) * (speedRange[2].get<float>() - speedRange[1].get<float>());
-
         spawnAsteroid(selectedType, spawnPos, (dir / len) * speed);
 
         m_asteroidSpawnClock.restart();
+    }
+
+    // ========================================================================
+    // PLACED FIELDS -- streamed in and out around the ship
+    // ========================================================================
+    /**
+     * @brief Bring the level's placed objects to life near the ship.
+     *
+     * A field cell holds thousands of rocks; only the ones within STREAM_IN
+     * are entities. PhysicsSystem culls asteroids past its despawn radius
+     * (3000 px) -- that is how they leave. Telling a culled object from a
+     * destroyed one is done by where it was last seen: gone while far away
+     * means culled (it comes back when you do), gone while close means
+     * something broke it (it stays broken, and gives its nav cells back).
+     */
+    void updateField(sf::Vector2f playerPos) {
+        levelgen::Level& L = m_level->level;
+        if (L.placed.empty()) return;
+        static constexpr float STREAM_IN = 2350.f, CULLED = 2700.f;
+
+        // ---- Live ones: still there? ----
+        for (auto it = m_level->placedById.begin(); it != m_level->placedById.end();) {
+            levelgen::Placed& o = L.placed[static_cast<size_t>(it->second)];
+            const size_t idx = m_em->getEntityIndex(it->first);
+            if (idx == (size_t)-1) {
+                const float d = std::hypot(o.pos.x - playerPos.x, o.pos.y - playerPos.y);
+                if (d > CULLED) o.state = 0;          // culled: waits for you
+                else {
+                    o.state = 2;                      // destroyed
+                    if (o.still) L.navStamp(o.pos, o.radius + 55.f, -1);
+                }
+                o.id = 0;
+                it = m_level->placedById.erase(it);
+                continue;
+            }
+            o.pos = m_em->transforms[idx].position;   // a drifter resumes where it went
+            o.angle = m_em->transforms[idx].rotation; // ...facing the way it was
+            ++it;
+        }
+
+        // ---- Waiting ones in reach: spawn, nearest first, a budget a tick ----
+        const int pc = m_level->cellOf(playerPos);
+        if (pc < 0) return;
+        m_streamCandidates.clear();
+        const sf::Vector2i g = L.cells[static_cast<size_t>(pc)];
+        for (size_t ci = 0; ci < L.cells.size(); ++ci) {
+            const sf::Vector2i d = L.cells[ci] - g;
+            if (std::abs(d.x) > 1 || std::abs(d.y) > 1) continue;
+            for (int oi : L.placedByCell[ci]) {
+                const levelgen::Placed& o = L.placed[static_cast<size_t>(oi)];
+                if (o.state != 0) continue;
+                const float dd = (o.pos.x - playerPos.x) * (o.pos.x - playerPos.x) + (o.pos.y - playerPos.y) * (o.pos.y - playerPos.y);
+                if (dd < STREAM_IN * STREAM_IN) m_streamCandidates.push_back({ dd, oi });
+            }
+        }
+        std::sort(m_streamCandidates.begin(), m_streamCandidates.end());
+        const size_t budget = 70;
+        for (size_t k = 0; k < m_streamCandidates.size() && k < budget; ++k) {
+            levelgen::Placed& o = L.placed[static_cast<size_t>(m_streamCandidates[k].second)];
+            const uint32_t id = spawnAsteroid(L.placedTypes[o.type], o.pos, o.vel / SCALE, o.sizeRoll);
+            if (!id) { o.state = 2; continue; }
+            const size_t idx = m_em->getEntityIndex(id);
+            if (idx != (size_t)-1 && b2Body_IsValid(m_em->physics[idx].bodyId)) {
+                const b2BodyId b = m_em->physics[idx].bodyId;
+                b2Body_SetTransform(b, b2Body_GetPosition(b), b2MakeRot(o.angle * 3.14159265f / 180.f));
+                m_em->transforms[idx].rotation = o.angle;
+                b2Body_SetAngularVelocity(b, o.spin);
+                // Still objects settle after a shove instead of drifting off:
+                // a field that slowly disperses is a field that is not there.
+                // Their slow turn is left alone -- that is what keeps a still
+                // field alive.
+                if (o.still) b2Body_SetLinearDamping(b, 0.9f);
+            }
+            o.state = 1;
+            o.id = id;
+            m_level->placedById[id] = m_streamCandidates[k].second;
+        }
+    }
+
+public:
+    /// Put a unit in a link group (EnemyComponent::linkGroup).
+    void linkTo(uint32_t id, uint32_t group) {
+        const size_t i = m_em->getEntityIndex(id);
+        if (i != (size_t)-1 && i < m_em->enemies.size()) m_em->enemies[i].linkGroup = group;
+    }
+
+    /// A dormant hull lying among placed wrecks has to move like them: the
+    /// usual ambush drift (20-50 px/s) is a tell in a cemetery where every
+    /// real wreck hangs still. Nearly still, a slow turn, its own heading.
+    void settleLikeWreck(uint32_t id, float faceDeg) {
+        const size_t i = m_em->getEntityIndex(id);
+        if (i == (size_t)-1 || !b2Body_IsValid(m_em->physics[i].bodyId)) return;
+        const b2BodyId b = m_em->physics[i].bodyId;
+        const float da = (rand() % 1000) / 1000.f * 6.2831853f;
+        const float sp = (0.03f + (rand() % 1000) / 1000.f * 0.10f);      // m/s: 1-4 px/s
+        b2Body_SetTransform(b, b2Body_GetPosition(b), b2MakeRot(faceDeg * 3.14159265f / 180.f));
+        m_em->transforms[i].rotation = faceDeg;
+        b2Body_SetLinearVelocity(b, { std::cos(da) * sp, std::sin(da) * sp });
+        b2Body_SetAngularVelocity(b, ((rand() % 2001) / 1000.f - 1.f) * 0.06f);
+    }
+
+private:
+    /// A director ambusher in a zone of placed wrecks (`ambush_cover = true`)
+    /// lies down beside one instead of out in the open. Returns false when
+    /// there is no live wreck near enough to hide by.
+    bool hideBesideCover(sf::Vector2f& pos) {
+        if (!m_level || !m_level->active) return false;
+        const levelgen::Level& L = m_level->level;
+        float best = 1400.f * 1400.f; int bi = -1;
+        for (const auto& kv : m_level->placedById) {
+            const levelgen::Placed& o = L.placed[static_cast<size_t>(kv.second)];
+            if (o.radius < 28.f) continue;
+            const float dd = (o.pos.x - pos.x) * (o.pos.x - pos.x) + (o.pos.y - pos.y) * (o.pos.y - pos.y);
+            if (dd < best) { best = dd; bi = kv.second; }
+        }
+        if (bi < 0) return false;
+        const levelgen::Placed& o = L.placed[static_cast<size_t>(bi)];
+        for (int t = 0; t < 6; ++t) {
+            const float a = (rand() % 360) * 3.14159f / 180.f;
+            const sf::Vector2f q = o.pos + sf::Vector2f(std::cos(a), std::sin(a)) * (o.radius + 70.f + rand() % 60);
+            if (m_level->spawnable(q, 600.f, 60.f)) { pos = q; return true; }
+        }
+        return false;
+    }
+
+    // ========================================================================
+    // SLEEPING PACKS -- the wreck cemetery's ambushes
+    // ========================================================================
+    void updatePacks(sf::Vector2f playerPos) {
+        levelgen::Level& L = m_level->level;
+        for (auto& s : L.packs) {
+            if (s.state == 2) continue;
+            const float d = std::hypot(s.pos.x - playerPos.x, s.pos.y - playerPos.y);
+            if (s.state == 0) {
+                // Armed: the sleepers are laid out before you can see them.
+                if (d > 3300.f) continue;
+                s.ids.clear();
+                const uint32_t link = m_em->newLinkGroup();   // a pack wakes, and fights, as one
+                for (size_t k = 0; k < s.units.size(); ++k) {
+                    sf::Vector2f at = s.pos;
+                    float face = (rand() % 360) * 1.f;
+                    if (k < s.slots.size()) { at = s.slots[k]; face = s.slotAngle[k]; }
+                    else {
+                        const float a = (k + 0.3f) * 6.2831853f / std::max<size_t>(1, s.units.size());
+                        at += sf::Vector2f(std::cos(a), std::sin(a)) * (180.f + rand() % 300);
+                    }
+                    const uint32_t id = summon(s.units[k], at, true);
+                    if (!id) continue;
+                    s.ids.push_back(id);
+                    linkTo(id, link);
+                    settleLikeWreck(id, face);
+                }
+                s.state = 1;
+                continue;
+            }
+            // Sleeping. Gone while you were far = culled: lay them out again later.
+            bool anyAlive = false, anyAwake = false;
+            for (uint32_t id : s.ids) {
+                const size_t i = m_em->getEntityIndex(id);
+                if (i == (size_t)-1 || i >= m_em->enemies.size()) continue;
+                anyAlive = true;
+                if (!m_em->enemies[i].dormant) anyAwake = true;
+            }
+            if (!anyAlive) { s.state = (d > 6000.f) ? 0 : 2; continue; }
+            // Close enough, or one of them already up: they ALL come up.
+            if (d < s.wakeRadius || anyAwake) {
+                for (uint32_t id : s.ids) {
+                    const size_t i = m_em->getEntityIndex(id);
+                    if (i != (size_t)-1 && i < m_em->enemies.size() && m_em->enemies[i].dormant)
+                        m_em->enemies[i].provoked = true;
+                }
+                s.state = 2;
+            }
+        }
     }
 
     // ========================================================================
@@ -308,6 +546,19 @@ private:
         }
         if (liveUnits >= maxActive) return;
 
+        // ---- The zone's own say (zones.lua) ----
+        //   unit_weights = { BARGE = 1.6 }   some units come more (or less) often here
+        //   ambush_scale = 1.8               more of the field's units arrive dormant
+        //   squads = { chance = 0.5, groups = { { "RAIDER", "RAIDER", "RAIDER" }, ... } }
+        const zonearch::ZoneDef* zdef = m_zone ? m_zone->def() : nullptr;
+        sol::optional<sol::table> zcfg;
+        if (zdef && zdef->config.valid()) zcfg = zdef->config;
+        const auto weightOf = [&](uint8_t id) {
+            float w = archetypes[id].weight;
+            if (zcfg) w *= (*zcfg)["unit_weights"][archetypes[id].key].get_or(1.f);
+            return w;
+        };
+
         // ---- Build the candidate list ----
         m_candidates.clear();
         float totalWeight = 0.f;
@@ -315,12 +566,12 @@ private:
         for (uint8_t id : fac.units) {
             const auto& a = archetypes[id];
             if (a.summonOnly)                          continue;   // Wardogs et al
-            if (a.weight <= 0.f)                       continue;
+            if (weightOf(id) <= 0.f)                   continue;
             if (m_liveCount[id] >= a.maxActive)        continue;
             if (liveThreat + a.threatCost > maxThreat) continue;
 
             m_candidates.push_back(id);
-            totalWeight += a.weight;
+            totalWeight += weightOf(id);
         }
         if (m_candidates.empty()) return;
 
@@ -328,7 +579,7 @@ private:
         float roll = (static_cast<float>(rand()) / static_cast<float>(RAND_MAX)) * totalWeight;
         uint8_t chosen = m_candidates.back();
         for (uint8_t id : m_candidates) {
-            roll -= archetypes[id].weight;
+            roll -= weightOf(id);
             if (roll <= 0.f) { chosen = id; break; }
         }
 
@@ -347,7 +598,8 @@ private:
         // the player's own course brings them to it. Standing still, there is
         // no "ahead", so it falls back to a random bearing like everything
         // else.
-        const float ambushChance = def.config["ambush_chance"].get_or(0.f);
+        const float ambushChance = def.config["ambush_chance"].get_or(0.f)
+            * (zcfg ? (*zcfg)["ambush_scale"].get_or(1.f) : 1.f);
         const bool dormant = ambushChance > 0.f
             && (rand() % 10000) < static_cast<int>(ambushChance * 10000.f);
 
@@ -370,9 +622,64 @@ private:
             angle = (rand() % 360) * 3.14159f / 180.f;
             spawnPos = playerPos + sf::Vector2f(std::cos(angle) * dist, std::sin(angle) * dist);
         }
-        if (m_level && !m_level->spawnable(spawnPos, 600.f)) return;
+        // ...and never inside a rock pile.
+        for (int tries = 0; tries < 8 && m_level && !m_level->spawnable(spawnPos, 600.f, 160.f); ++tries) {
+            angle = (rand() % 360) * 3.14159f / 180.f;
+            spawnPos = playerPos + sf::Vector2f(std::cos(angle) * dist, std::sin(angle) * dist);
+        }
+        if (m_level && !m_level->spawnable(spawnPos, 600.f, 160.f)) return;
 
-        m_ef->createEnemy(*m_em, spawnPos, *m_lua, m_worldId, *m_registry, chosen, dormant);
+        // ---- Squadrons: a zone that fields them sends a group, not a unit ----
+        if (!dormant && zcfg) {
+            sol::optional<sol::table> sq = (*zcfg)["squads"];
+            // Per-unit squads first: `by_unit = { RAIDER = { chance = 1, groups = {...} } }`
+            // decides how THAT unit arrives (a Raider never alone, say);
+            // anything not listed falls back to the zone's general groups.
+            sol::optional<sol::table> pick;
+            if (sq) {
+                sol::optional<sol::table> bu = (*sq)["by_unit"];
+                sol::optional<sol::table> mine;
+                if (bu) mine = (*bu)[def.key].get<sol::optional<sol::table>>();
+                sol::optional<sol::table> src = mine ? mine : sq;
+                if ((rand() % 1000) < static_cast<int>((*src)["chance"].get_or(0.f) * 1000.f)) pick = src;
+            }
+            const int overUnits = sq ? (*sq)["overflow_units"].get_or(2) : 2;
+            const int overThreat = sq ? (*sq)["overflow_threat"].get_or(6) : 6;
+            if (pick) {
+                sol::optional<sol::table> groups = (*pick)["groups"];
+                if (groups && groups->size() > 0) {
+                    sol::optional<sol::table> grp = (*groups)[1 + rand() % groups->size()];
+                    if (grp && grp->size() > 0) {
+                        int units = liveUnits, threat = liveThreat, spawned = 0;
+                        const uint32_t link = m_em->newLinkGroup();   // a squad fights as one
+                        for (size_t k = 1; k <= grp->size(); ++k) {
+                            const uint8_t id = m_registry->idOf((*grp)[k].get_or<std::string>(""));
+                            if (id == enemyarch::INVALID_ARCHETYPE) continue;
+                            const auto& a = archetypes[id];
+                            // The first one always comes (it replaces the unit
+                            // the director rolled); the rest only while the
+                            // zone's budget still has room for them.
+                            if (spawned > 0 && (units >= maxActive + overUnits || threat + a.threatCost > maxThreat + overThreat)) break;
+                            const float ga = k * 2.1f, gr = (k == 1) ? 0.f : 150.f + rand() % 90;
+                            sf::Vector2f gp = spawnPos + sf::Vector2f(std::cos(ga), std::sin(ga)) * gr;
+                            if (m_level && !m_level->spawnable(gp, 400.f, 120.f)) gp = spawnPos;
+                            linkTo(m_ef->createEnemy(*m_em, gp, *m_lua, m_worldId, *m_registry, id, false), link);
+                            ++units; threat += a.threatCost; ++spawned;
+                            if (id < m_liveCount.size()) ++m_liveCount[id];
+                        }
+                        if (spawned > 0) return;
+                    }
+                }
+            }
+        }
+
+        bool hidden = false;
+        if (dormant && zcfg && (*zcfg)["ambush_cover"].get_or(false)) {
+            hidden = hideBesideCover(spawnPos);
+            if (!hidden) return;   // a sleeper alone in the open is no disguise: skip it
+        }
+        const uint32_t newId = m_ef->createEnemy(*m_em, spawnPos, *m_lua, m_worldId, *m_registry, chosen, dormant);
+        if (hidden && newId) settleLikeWreck(newId, (rand() % 360) * 1.f);
 
         // ---- Escort: a pack leader arrives with his pack ----
         // `escort = { "RAIDER", ... }` on the archetype (the Bloodseeker). In
@@ -383,6 +690,9 @@ private:
         if (dormant) return;
         sol::optional<sol::table> escort = def.config["escort"];
         if (!escort) return;
+        // Leader and escort fight as one.
+        const uint32_t link = m_em->newLinkGroup();
+        linkTo(newId, link);
         int units = liveUnits + 1;
         int threat = liveThreat + def.threatCost;
         ++m_liveCount[chosen];
@@ -395,8 +705,8 @@ private:
             if (m_liveCount[id] >= a.maxActive) continue;
             const float ea = (rand() % 360) * 3.14159f / 180.f;
             const float er = 130.f + rand() % 90;
-            m_ef->createEnemy(*m_em, spawnPos + sf::Vector2f(std::cos(ea), std::sin(ea)) * er,
-                *m_lua, m_worldId, *m_registry, id, false);
+            linkTo(m_ef->createEnemy(*m_em, spawnPos + sf::Vector2f(std::cos(ea), std::sin(ea)) * er,
+                *m_lua, m_worldId, *m_registry, id, false), link);
             ++units; threat += a.threatCost; ++m_liveCount[id];
         }
     }
@@ -411,6 +721,8 @@ private:
     DevState* m_dev = nullptr;
     zonearch::ZoneState* m_zone = nullptr;
     levelgen::LevelState* m_level = nullptr;
+    float m_fieldTimer = 0.f;
+    std::vector<std::pair<float, int>> m_streamCandidates;
 
     // ---- Timers ----
     sf::Clock          m_asteroidSpawnClock;

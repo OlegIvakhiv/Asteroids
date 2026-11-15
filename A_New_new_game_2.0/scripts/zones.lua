@@ -492,12 +492,30 @@ local YARD = zones.RAKSHARI
 zones.OPEN_FIELD = extend(OPEN, {
     display   = "Asteroid Field",
     sky_group = "OPEN",
-    -- Big rocks, magma in among them. (Stage 2: placed and still, with
-    -- tunnels through; the drifting stream is switched off here.)
-    rock_interval     = 0.30,
-    rock_max_count    = 90,
-    rock_spawn_radius = 2300,
-    rocks = { SMALL = 8, MEDIUM = 36, LARGE = 42, MAGMATIC = 14 },
+    -- A field you fly THROUGH, not one that flies at you. The rocks are placed
+    -- when the level is made and sit still (a shove moves one, then it
+    -- settles). No drifting stream on top: that would be a billiard table.
+    rock_mode = "field",
+    cruise    = false,      -- too dense to explore at full burn: always HUNT here
+    -- Points of interest per cell, min..max (types in scripts/pois.lua).
+    pois      = { MINE = { 1, 1 }, OUTPOST = { 0, 1 }, SCOUTS = { 1, 2 } },
+    field = {
+        spacing      = 210,     -- px between candidate spots
+        fill         = 0.70,    -- how much of the cell the piles cover
+        density      = 0.68,    -- how packed a pile is
+        noise_scale  = 4200,    -- px between piles
+        types        = { LARGE = 52, MEDIUM = 40, SMALL = 8 },
+        -- Smaller rocks lying against a big one: piles, not evenly sown gravel.
+        clump        = { chance = 0.45, count = { 1, 3 }, gap = { 6, 40 },
+                         types = { MEDIUM = 75, SMALL = 25 } },
+        -- Pockets where the mediums are magma: shoot one and the pile goes up.
+        magma        = { type = "MAGMATIC", replaces = "MEDIUM", share = 0.30, scale = 2600 },
+        tunnels      = 2,       -- winding lanes besides the ones joining the neighbours
+        tunnel_width = 700,
+        drift        = 0,       -- still: enemies route around the piles
+        spin         = 0.12,
+        edge_margin  = 900,
+    },
     factions = {
         RAKSHARI = { interval_scale = 1.1, threat_scale = 0.9, active_scale = 0.9 },
     },
@@ -506,7 +524,11 @@ zones.OPEN_FIELD = extend(OPEN, {
 zones.OPEN_EMPTY = extend(OPEN, {
     display   = "Empty Space",
     sky_group = "OPEN",
-    -- Literally nothing: a few rocks, a thin director.
+    -- Literally nothing: a few rocks, a thin director -- and the things you
+    -- came this far out to find.
+    -- BATTLECRUISER: the Dreadnought. One per Empty Space cell until the
+    -- level's 1-2 (`per_level` in pois.lua) are placed.
+    pois      = { DERELICT = { 0, 1 }, DISTRESS = { 1, 1 }, SQUAD = { 0, 1 }, BATTLECRUISER = { 1, 1 } },
     rock_interval     = 1.6,
     rock_max_count    = 14,
     rocks = { SMALL = 30, MEDIUM = 40, LARGE = 22, MAGMATIC = 8 },
@@ -518,10 +540,19 @@ zones.OPEN_EMPTY = extend(OPEN, {
 zones.OPEN_COMET = extend(OPEN, {
     display   = "Comet Stream",
     sky_group = "OPEN",
-    -- The normal drifting field, busier. (Stage 2: every rock streams one
-    -- way, the direction rolled per sub-zone.)
-    rock_interval     = 0.28,
-    rock_max_count    = 80,
+    -- Every rock comes from one side and goes to the other. The heading is
+    -- rolled per cell; the full map shows it once you have been there.
+    rock_mode = "stream",
+    -- Shielded: the stream goes round them.
+    pois      = { RIG = { 1, 1 }, OUTPOST_SHIELDED = { 0, 1 }, SCOUTS = { 1, 1 } },
+    stream = {
+        spread = 16,    -- degrees either side of the heading
+        speed  = 1.7,   -- x the rock type's own speed
+        width  = 0.6,   -- how wide the front is, x rock_spawn_radius either side
+    },
+    rock_interval     = 0.14,
+    rock_max_count    = 90,
+    rock_spawn_radius = 2400,
     rocks = { SMALL = 30, MEDIUM = 34, LARGE = 22, MAGMATIC = 14 },
     factions = {
         RAKSHARI = { interval_scale = 1.2, threat_scale = 0.85, active_scale = 0.85 },
@@ -533,39 +564,78 @@ zones.OPEN_COMET = extend(OPEN, {
 zones.YARD_SCRAP = extend(YARD, {
     display   = "Scrapyard",
     sky_group = "YARD",
-    -- The most junk, in play and behind it.
-    rock_interval     = 0.30,
-    rock_max_count    = 88,
-    rocks = {
-        SCRAP_CHUNK = 50, SCRAP = 64, SCRAP_LARGE = 62,
-        WRECK_RAIDER = 6, WRECK_LIGHT = 4, WRECK_MANIAC = 3, WRECK_BERSERKER = 3,
-        UNSTABLE_CORE = 30,
+    -- The most junk, in play and behind it: placed piles drifting slowly,
+    -- and a thin stream of loose junk on top.
+    rock_mode = "drift",
+    pois      = { CAMP = { 1, 1 }, CRANE = { 1, 1 }, SCOUTS = { 1, 1 } },
+    rock_interval     = 0.9,
+    rock_max_count    = 26,
+    rocks = { SCRAP_CHUNK = 50, SCRAP = 64, SCRAP_LARGE = 40, UNSTABLE_CORE = 20 },
+    field = {
+        spacing      = 380,
+        fill         = 0.62,
+        density      = 0.45,
+        noise_scale  = 5200,
+        types        = { SCRAP_LARGE = 44, SCRAP = 46, SCRAP_CHUNK = 18,
+                         WRECK_RAIDER = 4, WRECK_LIGHT = 3, WRECK_MANIAC = 2, UNSTABLE_CORE = 6 },
+        clump        = { chance = 0.5, count = { 1, 3 }, gap = { 4, 30 },
+                         types = { SCRAP = 45, SCRAP_CHUNK = 55 } },
+        tunnels      = 3,
+        tunnel_width = 600,
+        drift        = 16,      -- px/s: everything here is going somewhere, slowly
+        spin         = 0.10,
+        edge_margin  = 900,
     },
     landmarks = { count = 0 },   -- the Citadel belongs to its own sub-zone
+    ambush_cover = true,
 })
 zones.YARD_SCRAP.props.count = 30
 
 zones.YARD_CEMETERY = extend(YARD, {
     display   = "Wreck Cemetery",
     sky_group = "YARD",
-    -- Mostly dead ships. (Stage 2: still or slowly drifting, with sleeping
-    -- packs hidden among them.)
-    rock_interval     = 0.40,
-    rock_max_count    = 70,
-    rocks = {
-        SCRAP_CHUNK = 18, SCRAP = 22, SCRAP_LARGE = 20,
-        WRECK_RAIDER = 30, WRECK_LIGHT = 22, WRECK_MANIAC = 18, WRECK_BERSERKER = 18,
-        WRECK_MEDIUM = 14, WRECK_HEAVY = 7, WRECK_BARGE = 3,
-        UNSTABLE_CORE = 16,
+    -- Dead ships, hanging still. Some of them are not dead: SLEEPING PACKS lie
+    -- among the wrecks, and come up together when you come close -- or when
+    -- you wake one of them.
+    rock_mode = "drift",
+    pois      = { WRECK_OUTPOST = { 1, 1 }, NEST = { 1, 1 }, SQUAD = { 0, 1 } },
+    rock_interval     = 1.2,
+    rock_max_count    = 16,
+    rocks = { SCRAP_CHUNK = 30, SCRAP = 30, UNSTABLE_CORE = 10 },
+    field = {
+        spacing      = 470,
+        fill         = 0.64,
+        density      = 0.62,
+        noise_scale  = 6000,
+        types        = { WRECK_RAIDER = 30, WRECK_LIGHT = 22, WRECK_MANIAC = 18, WRECK_BERSERKER = 18,
+                         WRECK_MEDIUM = 14, WRECK_HEAVY = 7, WRECK_BARGE = 3,
+                         SCRAP_LARGE = 14, SCRAP = 10 },
+        tunnels      = 2,
+        tunnel_width = 650,
+        drift        = 4,       -- all but still
+        spin         = 0.08,    -- rad/s max: every hull turns, slowly
+        edge_margin  = 900,
     },
+    packs = {
+        count = { 2, 4 },       -- per cell
+        size  = { 3, 5 },
+        units = { RAIDER = 3, BERSERKER = 2, MANIAC = 1.2, BLOODSEEKER = 0.4 },
+        cover = { WRECK_RAIDER = 3, WRECK_BERSERKER = 2, WRECK_MANIAC = 2, WRECK_LIGHT = 1, WRECK_MEDIUM = 1 },
+        wake_radius = 650,      -- px from the pack's centre
+    },
+    -- More of the director's own units arrive dormant here, too -- and they
+    -- lie down beside a wreck, never out in the open.
+    ambush_scale = 1.8,
+    ambush_cover = true,
     landmarks = { count = 0 },
 })
 
 zones.YARD_CITADEL = extend(YARD, {
-    display   = "Citadel Exterior",
+    display   = "Citadel Zone",
     sky_group = "YARD",
-    -- Little debris, the heaviest director in the game. (Stage 2: squadrons;
-    -- stage 3: dense POIs.)
+    -- Little debris, the heaviest director in the game, and squadrons.
+    -- The most packed with POIs of anywhere.
+    pois      = { CAMP_SMALL = { 1, 2 }, OUTPOST_HEAVY = { 1, 1 }, LAIR = { 0, 1 }, DOCK = { 1, 1 } },
     rock_interval     = 1.10,
     rock_max_count    = 30,
     rocks = {
@@ -575,7 +645,33 @@ zones.YARD_CITADEL = extend(YARD, {
     factions = {
         RAKSHARI = { interval_scale = 0.6, threat_scale = 1.5, active_scale = 1.4 },
     },
+    -- The heavy units come more often here; the Bloodseeker most of all
+    -- (the highest Bloodseeker weight in the game).
+    unit_weights = { BLOODSEEKER = 2.4, BARGE = 1.6, BERSERKER = 1.4, MANIAC = 1.4 },
+    -- How each unit ARRIVES here. Raiders never alone: three of them under a
+    -- Berserker or a Maniac. Berserkers and Maniacs in ones and twos. Barges
+    -- with one or two Raiders. (The Bloodseeker brings its own escort.)
+    squads = {
+        chance = 0,              -- nothing else is grouped
+        overflow_units  = 4,     -- a squad may run this far past the zone's caps
+        overflow_threat = 12,
+        by_unit = {
+            RAIDER = { chance = 1.0, groups = {
+                { "RAIDER", "RAIDER", "RAIDER", "BERSERKER" },
+                { "RAIDER", "RAIDER", "RAIDER", "MANIAC" },
+            } },
+            BERSERKER = { chance = 1.0, groups = {
+                { "BERSERKER" }, { "BERSERKER", "BERSERKER" }, { "BERSERKER", "MANIAC" },
+            } },
+            MANIAC = { chance = 1.0, groups = {
+                { "MANIAC" }, { "MANIAC", "MANIAC" }, { "MANIAC", "BERSERKER" },
+            } },
+            BARGE = { chance = 1.0, groups = {
+                { "BARGE", "RAIDER" }, { "BARGE", "RAIDER", "RAIDER" },
+            } },
+        },
+    },
 })
--- One Citadel, not a pool of three.
-zones.YARD_CITADEL.landmarks.count = 1
-
+-- ONE Citadel, standing over the cell rather than following the camera.
+zones.YARD_CITADEL.landmarks.count  = 1
+zones.YARD_CITADEL.landmarks.anchor = true

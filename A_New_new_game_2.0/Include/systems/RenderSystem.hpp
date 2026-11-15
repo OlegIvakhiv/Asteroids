@@ -82,12 +82,24 @@ public:
         m_chaos = 0.f;   // rebuilt from the enemies below; read by drawScreenSpace
         m_magmaPulseTime += dt;
 
+        // Off-screen rocks and wrecks are not drawn. A placed field streams in
+        // a few hundred of them around the ship, most of them outside the view;
+        // each one is several draw calls. (Nothing below mutates an asteroid's
+        // state -- it is all drawing -- so skipping one changes nothing.)
+        const sf::View& view = m_window->getView();
+        const sf::Vector2f vc = view.getCenter();
+        const sf::Vector2f vh = view.getSize() * 0.5f + sf::Vector2f(320.f, 320.f);
+
         for (size_t i = 0; i < m_em->renders.size(); ++i) {
             auto& tf = m_em->transforms[i];
             auto& rd = m_em->renders[i];
 
             BodyUserData* ud = bodyUD(m_em->physics[i].bodyId);
             BodyType type = ud ? ud->type : BodyType::Asteroid;
+
+            if (type == BodyType::Asteroid
+                && (std::abs(tf.position.x - vc.x) > vh.x || std::abs(tf.position.y - vc.y) > vh.y))
+                continue;
 
             sf::Vector2f drawPos = tf.position;
             float drawRot = tf.rotation;
@@ -253,7 +265,14 @@ public:
                 // Painted colours win; the Lua defaults remain the fallback for
                 // a legacy ship that has no livery.
                 const ship::Paint& paint = playerStats.livery.paint;
-                if (playerStats.isParrying) {
+                if (playerStats.repairing) {
+                    // Repair kit running: the hull outline breathes yellow.
+                    const float pulse = (std::sin(playerStats.repairPulse * 7.f) + 1.f) / 2.f;
+                    rd.shape.setOutlineThickness(2.5f + pulse * 2.5f);
+                    rd.shape.setOutlineColor(sf::Color(255, static_cast<uint8_t>(205 + 40 * pulse),
+                        static_cast<uint8_t>(40 + 80 * pulse), 230));
+                }
+                else if (playerStats.isParrying) {
                     float pulse = (std::sin(playerStats.parryTimer * 30.f) + 1.f) / 2.f;
                     rd.shape.setOutlineThickness(2.0f + pulse * 5.0f);
                     rd.shape.setOutlineColor(sf::Color(paint.parry.r, paint.parry.g, paint.parry.b,
@@ -661,9 +680,11 @@ public:
                         tf.position.x + (local.x * std::cos(hr) - local.y * std::sin(hr)),
                         tf.position.y + (local.x * std::sin(hr) + local.y * std::cos(hr)));
 
+                    // A boss aims each mount on its own (BossSystem).
+                    const bool own = ec.perMount && mi < 4;
                     sf::Transform txf;
                     txf.translate(mountPos);
-                    txf.rotate(sf::degrees(ec.turretAngle));
+                    txf.rotate(sf::degrees(own ? ec.mountAngle[mi] : ec.turretAngle));
 
                     sf::RenderStates tst;
                     tst.transform = txf;
@@ -680,6 +701,7 @@ public:
                     if (ec.shotgunState != 0 && ec.shotgunDuration > 0.f)
                         heat = std::max(heat, 1.f - ec.shotgunTimer / ec.shotgunDuration);
                     if (ec.shotgunFlash > 0.f) heat = 1.f;
+                    if (own) heat = std::clamp(ec.mountHeat[mi], 0.f, 1.f);
 
                     // ---- The model: utils/TurretModel.hpp ----
                     // The same polygons a dormant or dead hull bakes cold, at
@@ -742,8 +764,9 @@ public:
                     }
 
                     // Muzzle flash, both barrels.
-                    if (ec.turretMuzzleFlash > 0.f) {
-                        const float u = std::clamp(ec.turretMuzzleFlash / 0.11f, 0.f, 1.f);
+                    if ((!own && ec.turretMuzzleFlash > 0.f) || (own && ec.mountHeat[mi] > 1.f)) {
+                        const float u = own ? std::clamp(ec.mountHeat[mi] - 1.f, 0.f, 1.f)
+                            : std::clamp(ec.turretMuzzleFlash / 0.11f, 0.f, 1.f);
                         const sf::Color fc(255, 230, 150, static_cast<uint8_t>(230 * u));
                         for (const auto& mz : turretmodel::muzzles(ts)) {
                             sf::VertexArray fl(sf::PrimitiveType::Triangles, 3);
@@ -776,7 +799,7 @@ public:
                     }
 
                     // ---- Turret eye: a faint searchlight while it hunts ----
-                    if (ec.visualState != EnemyState::COMBAT) {
+                    if (ec.visualState != EnemyState::COMBAT && !own) {
                         const float vr = adef.config["turret_vision_range"].get_or(0.f);
                         if (vr > 0.f) {
                             float vh = adef.config["turret_vision_fov"].get_or(60.f) * 0.5f;
@@ -981,7 +1004,52 @@ public:
 
         drawShockRings();
         drawBeams();
+        drawEnemyHpBars(dt);
         pruneDetailCache();
+    }
+
+    // ========================================================================
+    // ENEMY HEALTH BARS
+    // ========================================================================
+    // Over the hull, from the first hit until 4 s after the last one; never on
+    // a sleeper (a bar would give the ambush away). Width follows the hull,
+    // a white "ghost" drains behind the red so a burst reads as a burst.
+    struct HpSeen { float last = -1.f; float ghost = -1.f; float timer = 0.f; bool live = false; };
+    std::unordered_map<uint32_t, HpSeen> m_hpSeen;
+
+    void drawEnemyHpBars(float dt) {
+        for (auto& kv : m_hpSeen) kv.second.live = false;
+        fieldgeom::Mesh m;
+        for (size_t i = 0; i < m_em->physics.size() && i < m_em->enemies.size(); ++i) {
+            const BodyUserData* ud = bodyUD(m_em->physics[i].bodyId);
+            if (!ud || ud->type != BodyType::Enemy) continue;
+            const auto& ec = m_em->enemies[i];
+            const auto& h = m_em->healths[i];
+            HpSeen& s = m_hpSeen[m_em->transforms[i].entityId];
+            s.live = true;
+            if (s.last < 0.f) s.last = s.ghost = h.currentHp;
+            if (h.currentHp < s.last - 0.01f) s.timer = 4.f;
+            s.last = h.currentHp;
+            if (h.currentHp > s.ghost) s.ghost = h.currentHp;
+            else s.ghost += (h.currentHp - s.ghost) * (1.f - std::exp(-3.5f * dt));
+            if (s.timer > 0.f) s.timer -= dt;
+            if (s.timer <= 0.f || ec.dormant || ec.hideHpBar || h.maxHp <= 0.f) continue;
+
+            const float a = std::min(1.f, s.timer / 0.6f);
+            const float r = std::max(18.f, h.visualRadius > 0.f ? h.visualRadius : 30.f);
+            const float w = std::clamp(r * 1.7f, 40.f, 170.f), bh = r > 70.f ? 6.f : 4.5f;
+            const sf::Vector2f p = m_em->transforms[i].position + sf::Vector2f(-w * 0.5f, -(r + 16.f));
+            const float f = std::clamp(h.currentHp / h.maxHp, 0.f, 1.f);
+            const float g = std::clamp(s.ghost / h.maxHp, 0.f, 1.f);
+            const auto A = [&](int v) { return static_cast<uint8_t>(v * a); };
+            fieldgeom::rect(m, p.x - 1.5f, p.y - 1.5f, w + 3.f, bh + 3.f, sf::Color(8, 6, 8, A(200)));
+            fieldgeom::rect(m, p.x, p.y, w, bh, sf::Color(70, 22, 22, A(170)));
+            if (g > f) fieldgeom::rect(m, p.x + w * f, p.y, w * (g - f), bh, sf::Color(255, 235, 220, A(200)));
+            fieldgeom::rect(m, p.x, p.y, w * f, bh, sf::Color(255, 70, 55, A(240)));
+            fieldgeom::rect(m, p.x, p.y, w * f, 1.2f, sf::Color(255, 170, 150, A(200)));   // top sheen
+        }
+        if (!m.empty()) m_window->draw(m.v.data(), m.v.size(), sf::PrimitiveType::Triangles);
+        for (auto it = m_hpSeen.begin(); it != m_hpSeen.end();) it = it->second.live ? std::next(it) : m_hpSeen.erase(it);
     }
 
     /**
@@ -1848,6 +1916,20 @@ private:
 
         fieldgeom::Mesh m;
 
+        if (rd.fieldStyle == Style::Poi) {
+            // Lights: a soft halo and a hot core; blinkers flash, the rest breathe.
+            for (const auto& o : rd.fieldFx) {
+                float on = 0.75f + 0.25f * std::sin(t * 1.6f + o.phase);
+                if (o.blink) on = std::sin(t * 3.2f + o.phase * 3.f) > 0.2f ? 1.f : 0.15f;
+                if (soft) fieldgeom::disc(m, W(o.p), o.r * 3.2f, sf::Color(o.c.r, o.c.g, o.c.b, static_cast<uint8_t>(40 * on)), 10);
+                fieldgeom::disc(m, W(o.p), o.r, sf::Color(
+                    static_cast<uint8_t>(std::min(255, o.c.r + 40)), static_cast<uint8_t>(std::min(255, o.c.g + 40)),
+                    static_cast<uint8_t>(std::min(255, o.c.b + 40)), static_cast<uint8_t>(235 * on)), 8);
+            }
+            if (!m.empty()) m_window->draw(m.v.data(), m.v.size(), sf::PrimitiveType::Triangles);
+            return;
+        }
+
         if (rd.fieldStyle == Style::Rock) {
             for (const auto& o : rd.fieldFx) {
                 const float flicker = 0.6f + 0.4f * std::sin(t * 1.2f + o.phase);
@@ -2219,10 +2301,13 @@ private:
     void drawBeams() {
         for (const auto& b : m_em->beams) {
             const float f = std::clamp(b.timer / std::max(0.001f, b.maxTimer), 0.f, 1.f);
+            const bool proton = b.style == 1 && !b.reflected;   // the Dreadnought's: plasma green
             const sf::Color rim = b.reflected ? sf::Color(255, 220, 60, static_cast<uint8_t>(190 * f))
-                                              : sf::Color(255, 70, 50, static_cast<uint8_t>(190 * f));
+                                : proton ? sf::Color(60, 255, 140, static_cast<uint8_t>(190 * f))
+                                         : sf::Color(255, 70, 50, static_cast<uint8_t>(190 * f));
             drawBand(b.a, b.b, b.width * (1.1f + 0.9f * (1.f - f)), rim, rim);
-            const sf::Color core(250, 244, 230, static_cast<uint8_t>(255 * f));
+            const sf::Color core = proton ? sf::Color(225, 255, 235, static_cast<uint8_t>(255 * f))
+                                          : sf::Color(250, 244, 230, static_cast<uint8_t>(255 * f));
             drawBand(b.a, b.b, b.width * 0.45f * f + 1.f, core, core);
         }
     }

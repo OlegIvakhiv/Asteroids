@@ -46,6 +46,8 @@
 #include <unordered_map>
 #include <vector>
 #include <iostream>
+#include <queue>
+#include <limits>
 
 namespace levelgen {
 
@@ -186,6 +188,61 @@ namespace levelgen {
     // THE LEVEL
     // ========================================================================
 
+    // ---- What a sub-zone puts IN the level (filled by utils/FieldGen) ----
+
+    /// One object placed at generation: a rock in a field, a pile in the yard,
+    /// a dead ship in the cemetery. It only becomes an entity near the player
+    /// (EnemySystem streams it in and out), so a level can hold thousands.
+    struct Placed {
+        sf::Vector2f pos;             ///< where it is (updated while live, so a drifter resumes where it went)
+        sf::Vector2f vel;             ///< px/s drift
+        float spin = 0.f;             ///< rad/s
+        float angle = 0.f;            ///< degrees; rolled at generation, kept while live
+        float radius = 30.f;          ///< px at its rolled size (nav and clearance)
+        float sizeRoll = 0.5f;        ///< 0..1 across the type's size range; rolled once, at generation
+        uint8_t type = 0;             ///< index into Level::placedTypes
+        uint8_t state = 0;            ///< 0 waiting, 1 live, 2 gone (destroyed)
+        bool  still = false;          ///< damped: shoved, it settles again
+        int   cell = -1;
+        int   poi = -1;               ///< index into Level::pois when it belongs to one (structures, caches, ore)
+        uint32_t id = 0;              ///< entity id while live
+    };
+
+    /// A point of interest (scripts/pois.lua): structures, loot, guards and a
+    /// shield, placed at generation; PoiSystem brings it to life.
+    struct Poi {
+        std::string type;             ///< poi_types key ("OUTPOST")
+        std::string display;          ///< what the map calls it
+        std::string icon;             ///< map glyph
+        std::string variant;          ///< rolled sub-kind ("trap" / "convoy" for a distress call)
+        sf::Vector2f pos;
+        float radius = 600.f;         ///< footprint: nothing else is generated inside
+        float shield = 0.f;           ///< px; 0 = none. Keeps outside rocks and junk out
+        int   cell = -1;
+        bool  discovered = false;     ///< on the map
+        uint8_t state = 0;            ///< 0 waiting, 1 guards out, 2 cleared
+        std::vector<std::string> guards;   ///< archetype keys
+        std::vector<char> guardLoot;  ///< parallel: 1 = this guard carries the loot (the barge)
+        std::vector<char> guardSleeps;///< parallel: 1 = laid out dormant (a docked Barge), whatever guardsDormant says
+        bool  guardsDormant = false;
+        float guardLeash = 900.f;
+        std::vector<uint32_t> guardIds;
+        std::vector<int> objects;     ///< indices into Level::placed
+    };
+
+    /// A sleeping pack in the wreck cemetery: dormant hulls among dead ones.
+    /// Come close, or wake one, and they ALL come up together.
+    struct PackSite {
+        sf::Vector2f pos;
+        std::vector<std::string> units;
+        float wakeRadius = 650.f;
+        uint8_t state = 0;            ///< 0 armed, 1 spawned (sleeping), 2 sprung
+        std::vector<uint32_t> ids;
+        std::vector<sf::Vector2f> slots;  ///< where each sleeper lies: in the gaps between its cover wrecks
+        std::vector<float> slotAngle;     ///< and which way it faces (degrees)
+        int cell = -1;
+    };
+
     struct Level {
         int index = 0;                ///< 0-based: SECTOR 01 is index 0
         uint32_t seed = 0;
@@ -208,6 +265,158 @@ namespace levelgen {
         /// The Void border's outline, world px, as line segments.
         std::vector<std::pair<sf::Vector2f, sf::Vector2f>> outline;
 
+        // ---- Contents (utils/FieldGen) ----
+        std::vector<std::string> placedTypes;          ///< asteroids.lua keys, by Placed::type
+        std::vector<Placed>      placed;
+        std::vector<std::vector<int>> placedByCell;    ///< indices into `placed`
+        std::vector<PackSite>    packs;
+        std::vector<Poi>         pois;
+        std::vector<float>       cellStream;           ///< per cell: stream heading (rad), NaN = none
+
+        // ---- Navigation: what blocks a ship (static placed objects) ----
+        // Counts, not flags, so a destroyed rock can give its cells back.
+        sf::Vector2f navOrigin;
+        int   navW = 0, navH = 0;
+        float navStep = 160.f;
+        std::vector<uint8_t> nav;
+        bool hasNav() const { return !nav.empty(); }
+
+        void navInit() {
+            navStep = 160.f;
+            navOrigin = boundsMin();
+            const sf::Vector2f mx = boundsMax();
+            navW = static_cast<int>(std::ceil((mx.x - navOrigin.x) / navStep)) + 1;
+            navH = static_cast<int>(std::ceil((mx.y - navOrigin.y) / navStep)) + 1;
+            nav.assign(static_cast<size_t>(navW) * navH, 0);
+        }
+        bool navCell(sf::Vector2f p, int& x, int& y) const {
+            x = static_cast<int>(std::floor((p.x - navOrigin.x) / navStep));
+            y = static_cast<int>(std::floor((p.y - navOrigin.y) / navStep));
+            return x >= 0 && y >= 0 && x < navW && y < navH;
+        }
+        sf::Vector2f navCentre(int x, int y) const {
+            return navOrigin + sf::Vector2f((x + 0.5f) * navStep, (y + 0.5f) * navStep);
+        }
+        bool navBlockedXY(int x, int y) const {
+            if (x < 0 || y < 0 || x >= navW || y >= navH) return true;
+            return nav[static_cast<size_t>(y) * navW + x] != 0;
+        }
+        bool navBlocked(sf::Vector2f p) const {
+            if (nav.empty()) return false;
+            int x, y;
+            return navCell(p, x, y) && nav[static_cast<size_t>(y) * navW + x] != 0;
+        }
+        /// Anything blocked within r of p?
+        bool navBlockedNear(sf::Vector2f p, float r) const {
+            if (nav.empty()) return false;
+            int x0, y0, x1, y1;
+            navCell(p - sf::Vector2f(r, r), x0, y0);
+            navCell(p + sf::Vector2f(r, r), x1, y1);
+            for (int y = std::max(0, y0); y <= std::min(navH - 1, y1); ++y)
+                for (int x = std::max(0, x0); x <= std::min(navW - 1, x1); ++x)
+                    if (nav[static_cast<size_t>(y) * navW + x]) {
+                        const sf::Vector2f c = navCentre(x, y);
+                        if ((c.x - p.x) * (c.x - p.x) + (c.y - p.y) * (c.y - p.y) <= (r + navStep * 0.7f) * (r + navStep * 0.7f)) return true;
+                    }
+            return false;
+        }
+        /// Mark (+1) or release (-1) the cells a disc covers.
+        void navStamp(sf::Vector2f p, float r, int delta) {
+            if (nav.empty()) return;
+            int x0, y0, x1, y1;
+            navCell(p - sf::Vector2f(r, r), x0, y0);
+            navCell(p + sf::Vector2f(r, r), x1, y1);
+            for (int y = std::max(0, y0); y <= std::min(navH - 1, y1); ++y)
+                for (int x = std::max(0, x0); x <= std::min(navW - 1, x1); ++x) {
+                    const sf::Vector2f c = navCentre(x, y);
+                    if ((c.x - p.x) * (c.x - p.x) + (c.y - p.y) * (c.y - p.y) > r * r) continue;
+                    uint8_t& v = nav[static_cast<size_t>(y) * navW + x];
+                    if (delta > 0) v = static_cast<uint8_t>(std::min(255, v + 1));
+                    else if (v > 0) --v;
+                }
+        }
+        /// Straight line a -> b clear of blocked cells?
+        bool navClear(sf::Vector2f a, sf::Vector2f b) const {
+            if (nav.empty()) return true;
+            const sf::Vector2f d = b - a;
+            const float L = std::sqrt(d.x * d.x + d.y * d.y);
+            const int steps = std::max(1, static_cast<int>(L / (navStep * 0.5f)));
+            for (int i = 1; i <= steps; ++i)
+                if (navBlocked(a + d * (static_cast<float>(i) / steps))) return false;
+            return true;
+        }
+
+        /**
+         * @brief A* on the nav grid, inside a window around both ends.
+         * @return false if no route (or the search ran out of budget).
+         * The route comes back string-pulled: only the corners a ship
+         * actually has to turn at.
+         */
+        bool navPath(sf::Vector2f from, sf::Vector2f to, std::vector<sf::Vector2f>& out, int budget = 9000) const {
+            out.clear();
+            if (nav.empty()) return false;
+            int sx, sy, gx, gy;
+            if (!navCell(from, sx, sy) || !navCell(to, gx, gy)) return false;
+            // Goal inside a pile: the nearest open cell to it.
+            if (navBlockedXY(gx, gy)) {
+                bool found = false;
+                for (int r = 1; r <= 8 && !found; ++r)
+                    for (int dy = -r; dy <= r && !found; ++dy)
+                        for (int dx = -r; dx <= r && !found; ++dx)
+                            if (!navBlockedXY(gx + dx, gy + dy)) { gx += dx; gy += dy; found = true; }
+                if (!found) return false;
+            }
+            const int pad = 30;
+            const int wx0 = std::max(0, std::min(sx, gx) - pad), wy0 = std::max(0, std::min(sy, gy) - pad);
+            const int wx1 = std::min(navW - 1, std::max(sx, gx) + pad), wy1 = std::min(navH - 1, std::max(sy, gy) + pad);
+            const int ww = wx1 - wx0 + 1, wh = wy1 - wy0 + 1;
+            if (ww * wh > 260 * 260) return false;
+            std::vector<float> g(static_cast<size_t>(ww) * wh, std::numeric_limits<float>::max());
+            std::vector<int> parent(static_cast<size_t>(ww) * wh, -1);
+            const auto idx = [&](int x, int y) { return (y - wy0) * ww + (x - wx0); };
+            const auto h = [&](int x, int y) {
+                const float dx = static_cast<float>(std::abs(x - gx)), dy = static_cast<float>(std::abs(y - gy));
+                return (dx + dy) + (1.4142f - 2.f) * std::min(dx, dy);
+            };
+            using Node = std::pair<float, int>;
+            std::priority_queue<Node, std::vector<Node>, std::greater<Node>> open;
+            const int s = idx(sx, sy), goal = idx(gx, gy);
+            g[static_cast<size_t>(s)] = 0.f;
+            open.push({ h(sx, sy), s });
+            int expanded = 0;
+            bool reached = false;
+            static const int DX[8] = { 1, -1, 0, 0, 1, 1, -1, -1 }, DY[8] = { 0, 0, 1, -1, 1, -1, 1, -1 };
+            while (!open.empty() && expanded < budget) {
+                const auto [f, cur] = open.top(); open.pop();
+                const int cx = cur % ww + wx0, cy = cur / ww + wy0;
+                if (f - h(cx, cy) > g[static_cast<size_t>(cur)] + 0.001f) continue;
+                ++expanded;
+                if (cur == goal) { reached = true; break; }
+                for (int k = 0; k < 8; ++k) {
+                    const int nx = cx + DX[k], ny = cy + DY[k];
+                    if (nx < wx0 || ny < wy0 || nx > wx1 || ny > wy1 || navBlockedXY(nx, ny)) continue;
+                    if (k >= 4 && (navBlockedXY(cx + DX[k], cy) || navBlockedXY(cx, cy + DY[k]))) continue;   // no corner cutting
+                    const int ni = idx(nx, ny);
+                    const float ng = g[static_cast<size_t>(cur)] + (k < 4 ? 1.f : 1.4142f);
+                    if (ng < g[static_cast<size_t>(ni)]) {
+                        g[static_cast<size_t>(ni)] = ng;
+                        parent[static_cast<size_t>(ni)] = cur;
+                        open.push({ ng + h(nx, ny), ni });
+                    }
+                }
+            }
+            if (!reached) return false;
+            std::vector<sf::Vector2f> raw;
+            for (int c = goal; c != -1; c = parent[static_cast<size_t>(c)]) raw.push_back(navCentre(c % ww + wx0, c / ww + wy0));
+            std::reverse(raw.begin(), raw.end());
+            // String-pull.
+            sf::Vector2f anchor = from;
+            for (size_t i = 1; i < raw.size(); ++i)
+                if (!navClear(anchor, raw[i])) { out.push_back(raw[i - 1]); anchor = raw[i - 1]; }
+            out.push_back(raw.empty() ? to : raw.back());
+            return true;
+        }
+
         sf::Vector2f cellCentre(int i) const {
             return { cells[static_cast<size_t>(i)].x * cellSize, cells[static_cast<size_t>(i)].y * cellSize };
         }
@@ -219,6 +428,37 @@ namespace levelgen {
             for (size_t i = 0; i < cells.size(); ++i)
                 if (cells[i].x == gx && cells[i].y == gy) return static_cast<int>(i);
             return -1;
+        }
+
+        /**
+         * @brief How much each nearby cell "owns" a point, for blending across
+         * sub-zone borders. Own cell 1; a neighbour 1 at the shared border,
+         * falling to 0 `band` px past it; smoothed and normalised. Exactly on
+         * a border two cells split it 50/50, so whatever is blended from these
+         * weights is continuous -- nothing pops as the player crosses.
+         * `out` gets (cell index, weight) pairs that sum to 1.
+         */
+        void cellWeights(sf::Vector2f p, float band, std::vector<std::pair<int, float>>& out) const {
+            out.clear();
+            if (cells.empty()) return;
+            int c0 = cellAt(p);
+            if (c0 < 0) c0 = nearestCell(p);
+            const sf::Vector2i g = cells[static_cast<size_t>(c0)];
+            const float h = cellSize * 0.5f;
+            float sum = 0.f;
+            for (size_t i = 0; i < cells.size(); ++i) {
+                const sf::Vector2i d = cells[i] - g;
+                if (std::abs(d.x) > 1 || std::abs(d.y) > 1) continue;
+                const sf::Vector2f c = cellCentre(static_cast<int>(i));
+                const float dx = std::max(0.f, std::fabs(p.x - c.x) - h);
+                const float dy = std::max(0.f, std::fabs(p.y - c.y) - h);
+                float w = static_cast<int>(i) == c0 ? 1.f : std::clamp(1.f - std::sqrt(dx * dx + dy * dy) / band, 0.f, 1.f);
+                w = w * w * (3.f - 2.f * w);
+                if (w <= 0.f) continue;
+                out.push_back({ static_cast<int>(i), w });
+                sum += w;
+            }
+            for (auto& e : out) e.second /= sum;
         }
 
         /// The nearest cell to a point -- for things just past the edge.
@@ -515,6 +755,7 @@ namespace levelgen {
             fog.assign(static_cast<size_t>(fogW) * fogH, 0);
             cellVisited.assign(level.cells.size(), 0);
             marks.clear();
+            placedById.clear();
             ++fogVersion;
             playerCell = -1;
             playerEdge = 1e9f;
@@ -524,9 +765,28 @@ namespace levelgen {
         }
         void end() { active = false; marks.clear(); }
 
+        /// Dev: the whole map, as if every corner had been flown.
+        void revealAll() {
+            std::fill(fog.begin(), fog.end(), static_cast<uint8_t>(1));
+            std::fill(cellVisited.begin(), cellVisited.end(), static_cast<uint8_t>(1));
+            for (auto& p : level.pois) p.discovered = true;
+            ++fogVersion;
+        }
+
         /// May a body spawn here? (Inside, with a margin from the edge.)
-        bool spawnable(sf::Vector2f p, float margin = 500.f) const {
-            return !active || level.inside(p, margin);
+        bool spawnable(sf::Vector2f p, float margin = 500.f, float clearance = 0.f) const {
+            if (!active) return true;
+            if (!level.inside(p, margin)) return false;
+            return clearance <= 0.f || !level.navBlockedNear(p, clearance);
+        }
+
+        /// Entity id -> index in level.placed, for everything streamed in.
+        std::unordered_map<uint32_t, int> placedById;
+
+        /// The sub-zone a point is in (nearest cell past the edge).
+        int cellOf(sf::Vector2f p) const {
+            int c = level.cellAt(p);
+            return c >= 0 ? c : level.nearestCell(p);
         }
 
         bool seen(int fx, int fy) const {

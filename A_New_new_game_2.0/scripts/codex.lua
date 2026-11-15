@@ -80,6 +80,15 @@ codex_entries = {
         counter   = "READ THE LAMP. DO NOT DODGE EARLY. KILL IT AND THE PACK TURNS.",
     },
 
+    DREADNOUGHT = {
+        class     = "BATTLECRUISER  //  MINI-BOSS",
+        threat    = 1.00,
+        behaviour = { "CLOSE IN AND HIS BUOYS CAGE YOU IN HIGH VOLTAGE.",
+                      "80% ARMOUR. SHELLS ON THE MARKERS: NO DODGE, GET OUT.",
+                      "UNDER HALF: TEARS ROUND THE CAGE, THEN RAMS." },
+        counter   = "PARRY THE GREEN LASER BACK. DODGE THE RAM INTO THE CAGE.",
+    },
+
     -- ===== VOID OBJECTS =====
 
     ASTEROID = {

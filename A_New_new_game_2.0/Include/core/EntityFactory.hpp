@@ -16,6 +16,7 @@
 
 #include "core/EnemyArchetypes.hpp"
 #include "utils/FieldObjectModels.hpp"   // lab models: rock, scrap template, unstable core
+#include "utils/PoiModels.hpp"           // point-of-interest objects: structures, caches, ore
 #include "utils/WreckDetail.hpp"
 #include "EntityManager.hpp"
 #include "utils/ShipDesign.hpp"
@@ -342,7 +343,8 @@ public:
 
         // Box2D physics body
         b2BodyDef bodyDef = b2DefaultBodyDef();
-        bodyDef.type = b2_dynamicBody;
+        // POI structures are anchored: `static_body = true` (asteroids.lua).
+        bodyDef.type = config["static_body"].get_or(false) ? b2_staticBody : b2_dynamicBody;
         BodyUserData* ud = new BodyUserData{ BodyType::Asteroid, entityId };
         bodyDef.userData = ud;
         bodyDef.position = { pos.x / SCALE, pos.y / SCALE };
@@ -372,6 +374,7 @@ public:
 
         // Lab model state (FieldObjectModels.hpp), for the same reason.
         fieldmodel::Model fieldModel;
+        std::vector<poimodel::Light> poiLights;   // detail = "poi" only
         RenderComponent::FieldStyle fieldStyle = RenderComponent::FieldStyle::None;
 
         const float pixelRadius = finalSize * SCALE;
@@ -557,6 +560,20 @@ public:
             else if (detail == "unstable_core") {
                 fieldModel = fieldmodel::buildUnstableCore(pixelRadius, fseed);
                 fieldStyle = RenderComponent::FieldStyle::UnstableCore;
+            }
+            else if (detail == "poi") {
+                // Point-of-interest objects (utils/PoiModels.hpp): structures,
+                // caches, scrap-rich ore. Lights ride the fx list.
+                poimodel::Model pm = poimodel::build(config["poi_model"].get_or<std::string>(""),
+                    pixelRadius, fseed, config["poi_palette"].get_or<std::string>("rust"));
+                if (pm.ok()) {
+                    fieldModel.outline = pm.outline;
+                    fieldModel.physics = pm.physics;
+                    fieldModel.tris = std::move(pm.tris);
+                    fieldModel.debris = pm.debris;
+                    poiLights = std::move(pm.lights);
+                }
+                fieldStyle = RenderComponent::FieldStyle::Poi;
             }
 
             if (fieldStyle != RenderComponent::FieldStyle::None) {
@@ -790,6 +807,9 @@ public:
                 em.healths.back().scrapMin = static_cast<uint16_t>(lo);
                 em.healths.back().scrapMax = static_cast<uint16_t>(hi);
             }
+            em.healths.back().kitChance = config["kit_chance"].get_or(0.f);
+            em.healths.back().beaconChance = config["beacon_chance"].get_or(0.f);
+            em.healths.back().indestructible = config["indestructible"].get_or(false);
 
             // Per-type core, falling back to the global visual so nothing
             // that relied on `magma_core_size` changes behaviour.
@@ -897,6 +917,8 @@ public:
             rc.fieldFx.clear();
             for (const auto& f : fieldModel.fx)
                 rc.fieldFx.push_back({ f.p, f.r, f.phase });
+            for (const auto& l : poiLights)
+                rc.fieldFx.push_back({ l.p, l.r, l.phase, l.c, l.blink });
             rc.glintSpots = std::move(fieldModel.glintSpots);
             rc.fieldGlowR = fieldModel.glowRadius;
             rc.fieldPhase = fieldModel.phase;

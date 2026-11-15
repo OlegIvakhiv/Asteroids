@@ -40,6 +40,7 @@ public:
      */
     void init(const SystemContext& ctx) override {
         m_em = ctx.em;
+        m_haveLast = false;
         m_window = ctx.drawTarget();
         m_playerEntityId = ctx.playerEntityId;
         m_zone = ctx.zone;
@@ -61,17 +62,27 @@ public:
     void update(float dt) override {
         if (!m_em || !m_window) return;
 
-        // ---- 1. Get player velocity ----
+        // ---- 1. How far the CAMERA moved ----
+        // The stars used to scroll with the ship's velocity. That is the same
+        // thing while the camera follows the ship -- and wrong when it does
+        // not: in a boss arena the camera holds still and the sky must too.
+        // Camera shake is left out (CameraSystem writes the unshaken centre).
+        (void)dt;
         size_t playerIdx = m_em->getEntityIndex(m_playerEntityId);
         if (playerIdx == (size_t)-1) return;
-
-        b2Vec2 b2Vel = b2Body_GetLinearVelocity(m_em->physics[playerIdx].bodyId);
-        sf::Vector2f playerVelocity(b2Vel.x * SCALE, b2Vel.y * SCALE);
+        sf::Vector2f move(0.f, 0.f);
+        if (m_em->camValid) {
+            if (m_haveLast) move = m_em->camCentre - m_lastCam;
+            m_lastCam = m_em->camCentre;
+            m_haveLast = true;
+            // A jump (teleport, new level) is not a scroll.
+            if (move.x * move.x + move.y * move.y > 1500.f * 1500.f) move = { 0.f, 0.f };
+        }
 
         // ---- 2. Update star positions (parallax) ----
         const sf::Vector2f bounds = m_em->starFieldSize;
         for (auto& star : m_em->stars) {
-            star.position -= playerVelocity * dt * star.parallaxFactor;
+            star.position -= move * star.parallaxFactor;
 
             if (star.position.x < 0)        star.position.x += bounds.x;
             if (star.position.x > bounds.x) star.position.x -= bounds.x;
@@ -133,6 +144,8 @@ private:
     /// Reused every frame: resize() keeps capacity, so after the first busy
     /// frame this never touches the allocator again.
     sf::VertexArray m_starVerts{ sf::PrimitiveType::Triangles };
+    sf::Vector2f m_lastCam{ 0.f, 0.f };
+    bool m_haveLast = false;
 
     // ---- System dependencies (set via init) ----
     EntityManager* m_em = nullptr;

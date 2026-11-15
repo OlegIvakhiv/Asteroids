@@ -51,6 +51,7 @@
 #include "utils/GameConfig.hpp"
 #include "utils/ClassTuning.hpp"
 #include "utils/SeekTarget.hpp"
+#include "systems/CruiseSystem.hpp"
 #include <cfloat>
 #include <cmath>
 #include <cstdlib>
@@ -96,7 +97,8 @@ public:
             return;
         }
 
-        bool fireHeld = InputRegistry::isPressed(binds["fire"].get<std::string>());
+        // A repair kit running: no weapons at all (RepairSystem).
+        bool fireHeld = InputRegistry::isPressed(binds["fire"].get<std::string>()) && !playerStats.repairing;
         bool detonateKey = InputRegistry::isPressed(
             (*m_lua)["rift_detonate_key"].get_or(std::string("MouseRight"))
         );
@@ -111,16 +113,19 @@ public:
         m_riftKeyWasDown = detonateKey;
         if (!detonateKey) m_riftRearmLock = false;
 
-        const float shotEnergy = wcfg("shot_energy_cost", 3.f) * (refit ? kit.shotEnergyScale : 1.f);
-        const float shotHeat = wcfg("shot_heat", 5.0f) * (refit ? kit.shotHeatScale : 1.f);
-        const float riftEnergy = wcfg("rift_energy_cost", 24.f) * riftCostScale;
-        const float riftHeat = wcfg("rift_heat", 52.f);
+        // CRUISE: shooting costs less while nothing is engaged (rock clearing).
+        const float cruiseK = CruiseSystem::shotCost(*m_lua, playerStats.cruise);
+        const float shotEnergy = wcfg("shot_energy_cost", 3.f) * (refit ? kit.shotEnergyScale : 1.f) * cruiseK;
+        const float shotHeat = wcfg("shot_heat", 5.0f) * (refit ? kit.shotHeatScale : 1.f) * cruiseK;
+        const float riftEnergy = wcfg("rift_energy_cost", 24.f) * riftCostScale * cruiseK;
+        const float riftHeat = wcfg("rift_heat", 52.f) * cruiseK;
         const float riftChargeDrain = wcfg("rift_charge_drain", 4.f) * riftCostScale;
 
         // ====================================================================
         // 1. RIFT SHOT CHARGING
         // ====================================================================
         const bool canStartRift =
+            !playerStats.repairing &&
             !m_riftRearmLock &&
             playerStats.riftCooldown <= 0.f &&
             !playerStats.riftBoltInFlight &&

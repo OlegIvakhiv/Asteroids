@@ -78,6 +78,7 @@ public:
         m_registry = ctx.enemyRegistry;
         m_dev = ctx.dev;
         m_zone = ctx.zone;
+        m_level = ctx.level;
 
         m_ui.attach(m_window);
         m_pick = Pick::None;
@@ -803,6 +804,21 @@ private:
 
     // ---- WORLD ----
     void tabWorld(float& y) {
+        heading(y, "LEVEL");
+        {
+            const bool lv = m_level && m_level->active;
+            // Exactly a rift jump: hull, energy, heat and scrap carry over.
+            if (action(y, "NEXT LEVEL (AS RIFT JUMP)", !lv) && lv) {
+                m_level->wantNextLevel = true;
+                toast("JUMPING TO THE NEXT SECTOR");
+            }
+            if (action(y, "REVEAL MAP", !lv) && lv) {
+                m_level->revealAll();
+                toast("MAP REVEALED");
+            }
+            if (!lv) line(y, "NO LEVEL IN PLAY", tui::TEXT_DIM);
+        }
+
         heading(y, "ZONE");
         if (!m_zone || !m_zone->registry || m_zone->registry->empty()) {
             line(y, "NO ZONES LOADED -- CHECK CONSOLE", tui::RED);
@@ -1220,6 +1236,7 @@ private:
     DevState* m_dev = nullptr;
 
     zonearch::ZoneState* m_zone = nullptr;
+    levelgen::LevelState* m_level = nullptr;
 
     EnemySystem* m_enemySys = nullptr;
     AISystem* m_aiSys = nullptr;

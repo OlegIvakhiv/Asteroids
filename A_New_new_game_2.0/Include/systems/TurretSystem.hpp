@@ -116,6 +116,7 @@ public:
             if (!ud || ud->type != BodyType::Enemy) continue;
 
             auto& ec = m_em->enemies[i];
+            if (ec.isBoss) continue;   // BossSystem aims its guns itself
             ec.turretSees = false;   // set again below if the gun is live and sees you
             // Dev freeze: a frozen hull with a live turret still shoots you.
             if (m_dev && m_dev->isAIFrozen(ud->entityId)) continue;

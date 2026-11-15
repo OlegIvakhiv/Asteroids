@@ -100,15 +100,23 @@ public:
             s.age += dt;
             s.pulled = false;
 
-            if (s.age >= life) { removeAt(i); continue; }
+            if (s.age >= (s.kind ? life * 2.f : life)) { removeAt(i); continue; }
 
             if (alive && s.age >= delay) {
                 sf::Vector2f d = pPos - s.position;
                 const float dist = std::sqrt(d.x * d.x + d.y * d.y);
 
                 // ---- Collected ----
-                if (dist <= collectR) {
-                    m_em->scrap += s.value;
+                if (dist <= collectR + (s.kind ? 10.f : 0.f)) {
+                    if (s.kind == 1) {          // repair kit
+                        ++m_em->players[p].repairKits;
+                        m_em->sfxUi("player.repair.pickup");
+                    }
+                    else if (s.kind == 2) {     // beacon map: PoiSystem decodes it
+                        ++m_em->beaconMaps;
+                        m_em->sfxUi("hud.beacon.pickup");
+                    }
+                    else { m_em->scrap += s.value; m_em->runScrap += s.value; }
                     collectFx(s.position, pVel);
                     removeAt(i);
                     continue;
@@ -149,7 +157,7 @@ public:
         const sf::Color rim(255, 244, 214);
 
         size_t n = 0;
-        for (const auto& s : list) n += s.pulled ? 18 : 12;
+        for (const auto& s : list) n += (s.pulled ? 18 : 12) + (s.kind ? 24 : 0);
         m_verts.resize(n);
         size_t v = 0;
 
@@ -157,7 +165,7 @@ public:
             // Last seconds: blink, faster as it runs out. Hidden half the
             // time rather than faded, so it reads as a timer, not as dimming.
             bool visible = true;
-            const float left = life - s.age;
+            const float left = (s.kind ? life * 2.f : life) - s.age;
             if (left < blink) {
                 const float hz = 2.f + 6.f * (1.f - left / std::max(0.01f, blink));
                 visible = std::fmod(s.age * hz, 1.f) < 0.6f;
@@ -193,6 +201,40 @@ public:
                 m_verts[v++] = sf::Vertex{ p0, c }; m_verts[v++] = sf::Vertex{ p2, c }; m_verts[v++] = sf::Vertex{ p3, c };
                 };
             const float half = s.size * 0.5f;
+            if (s.kind == 1) {
+                // Repair kit: a yellow cross on a dark plate. Drawn upright.
+                const float pulse = 0.5f + 0.5f * std::sin(s.age * 5.f);
+                const auto bar = [&](float hw, float hh, sf::Color c) {
+                    const sf::Vector2f p0 = s.position + sf::Vector2f(-hw, -hh), p1 = s.position + sf::Vector2f(hw, -hh);
+                    const sf::Vector2f p2 = s.position + sf::Vector2f(hw, hh), p3 = s.position + sf::Vector2f(-hw, hh);
+                    m_verts[v++] = sf::Vertex{ p0, c }; m_verts[v++] = sf::Vertex{ p1, c }; m_verts[v++] = sf::Vertex{ p2, c };
+                    m_verts[v++] = sf::Vertex{ p0, c }; m_verts[v++] = sf::Vertex{ p2, c }; m_verts[v++] = sf::Vertex{ p3, c };
+                    };
+                bar(half + 2.f, half + 2.f, sf::Color(40, 32, 10, a));
+                bar(half + 1.f, half * 0.34f + 1.f, sf::Color(255, 250, 220, a));
+                bar(half * 0.34f + 1.f, half + 1.f, sf::Color(255, 250, 220, a));
+                const sf::Color y(255, static_cast<uint8_t>(200 + 50 * pulse), 60, a);
+                bar(half, half * 0.34f, y);
+                bar(half * 0.34f, half, y);
+                for (int k = 0; k < 6; ++k) m_verts[v++] = sf::Vertex{ s.position, sf::Color::Transparent };
+                continue;
+            }
+            if (s.kind == 2) {
+                // Beacon map: a cyan diamond with a pulsing rim.
+                const float pulse = 0.5f + 0.5f * std::sin(s.age * 4.f);
+                const auto diamond = [&](float h, sf::Color c) {
+                    const sf::Vector2f t = s.position + sf::Vector2f(0, -h), r2 = s.position + sf::Vector2f(h * 0.75f, 0);
+                    const sf::Vector2f b = s.position + sf::Vector2f(0, h), l = s.position + sf::Vector2f(-h * 0.75f, 0);
+                    m_verts[v++] = sf::Vertex{ t, c }; m_verts[v++] = sf::Vertex{ r2, c }; m_verts[v++] = sf::Vertex{ b, c };
+                    m_verts[v++] = sf::Vertex{ t, c }; m_verts[v++] = sf::Vertex{ b, c }; m_verts[v++] = sf::Vertex{ l, c };
+                    };
+                diamond(half + 4.f + 3.f * pulse, sf::Color(90, 230, 255, static_cast<uint8_t>(a * (0.25f + 0.25f * pulse))));
+                diamond(half + 1.5f, sf::Color(220, 250, 255, a));
+                diamond(half, sf::Color(60, 200, 255, a));
+                diamond(half * 0.4f, sf::Color(255, 255, 255, a));
+                for (int k = 0; k < 6 * 2; ++k) m_verts[v++] = sf::Vertex{ s.position, sf::Color::Transparent };
+                continue;
+            }
             sf::Color r = rim;  r.a = a;
             sf::Color f = s.pulled ? faceHot : face;  f.a = a;
             square(half + 0.9f, r);

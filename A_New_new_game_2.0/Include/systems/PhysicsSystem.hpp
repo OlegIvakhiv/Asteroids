@@ -123,6 +123,7 @@ public:
             BodyUserData* ud = bodyUD(bodyId);
             BodyType type = ud ? ud->type : BodyType::Asteroid;
             if (type == BodyType::Bullet) continue;
+            if (i < m_em->healths.size() && m_em->healths[i].noCull) continue;   // the arena wall
 
             b2Vec2 pos = b2Body_GetPosition(bodyId);
             float dx = pos.x - playerPos.x;

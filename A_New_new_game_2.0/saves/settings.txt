@@ -1,6 +1,6 @@
 # VOID HUNTER // machine rites. Plain text; levels are 0.0 - 1.0.
 volume_master 0.8
-volume_effects 1
-volume_tells 1
-volume_ambience 0.8
+volume_effects 0.9
+volume_tells 0.9
+volume_ambience 0.65
 volume_interface 0.8

@@ -950,6 +950,22 @@ public:
             BodyType type = ud ? ud->type : BodyType::Asteroid;
             bool shouldDestroy = false;
 
+            // A POI structure takes the hit (the flash shows it) and stands.
+            if (m_em->healths[i].indestructible && m_em->healths[i].currentHp <= 0)
+                m_em->healths[i].currentHp = m_em->healths[i].maxHp;
+
+            // ---- Boss armour: every drop since the last pass, folded ----
+            {
+                auto& h = m_em->healths[i];
+                if (h.armourMark >= 0.f) {
+                    if (h.currentHp < h.armourMark && h.armour > 0.f)
+                        h.currentHp = h.armourMark - (h.armourMark - h.currentHp) * (1.f - std::clamp(h.armour, 0.f, 1.f));
+                    h.armourMark = std::max(0.f, h.currentHp);
+                }
+                // The boss dies on its own clock (BossSystem).
+                if (h.holdDeath && h.currentHp <= 0.f) { h.currentHp = 0.f; continue; }
+            }
+
             if (m_em->healths[i].currentHp <= 0) {
                 shouldDestroy = true;
                 sf::Vector2f deathPos = m_em->transforms[i].position;
@@ -960,6 +976,7 @@ public:
                     // not. scoreRewards is no longer credited anywhere -- it
                     // survives only as the size tag parry and Rift read.
                     dropScrap(i, rollScrap(m_em->healths[i].scrapMin, m_em->healths[i].scrapMax));
+                    dropExtras(i, m_em->healths[i].kitChance, m_em->healths[i].beaconChance);
                     sfxFieldBreak(i, deathPos);
                     bool isExplosive = m_em->healths[i].isExplosive;
 
@@ -1060,7 +1077,18 @@ public:
                     // Executed by a Bloodseeker: the Rakshari kept that
                     // salvage. Only kills the PLAYER's fight caused pay out.
                     const bool executed = i < m_em->enemies.size() && m_em->enemies[i].executed;
-                    if (!executed) dropScrap(i, enemyScrap(i));
+                    if (!executed) {
+                        const auto& ec = m_em->enemies[i];
+                        // The run's record (BountySystem: word gets around).
+                        ++m_em->runKills;
+                        if (m_registry) if (const auto* kd = m_registry->byId(ec.archetype)) m_em->bountyHeat += std::max(1, kd->threatCost);
+                        dropScrap(i, static_cast<int>(std::round(enemyScrap(i) * ec.lootScale)));
+                        // Beacon maps: `beacon_drop` on the archetype (enemy.lua),
+                        // 10% when unset; a POI loot carrier adds its own odds.
+                        float beacon = 0.10f;
+                        if (m_registry) beacon = m_registry->resolve(ec.archetype).config["beacon_drop"].get_or(0.10f);
+                        dropExtras(i, ec.lootKitChance, std::min(1.f, beacon + ec.lootBeaconChance));
+                    }
                     else m_em->spawnShockRing(deathPos, 8.f, 90.f, 0.30f,
                         sf::Color(214, 172, 92), 4.f, 240.f);
                     // A Bloodseeker's death turns his pack on itself.
@@ -1801,10 +1829,20 @@ private:
      * glances off at an angle. The reflection is the player's beam (same
      * pierce, reflect_* damage) and gets one bounce.
      */
-    void traceBeam(size_t playerIdx, const BeamShot& s) {
+    void traceBeam(size_t playerIdx, const BeamShot& s0) {
         struct Hit { size_t j; float t; float perp; BodyType type; float r; };
         std::vector<Hit> hits;
-        const float half = s.width * 0.5f;
+        const float half = s0.width * 0.5f;
+
+        // ---- A boss arena's wall: the beam stops on it, maybe bounces ----
+        BeamShot s = s0;
+        float wallT = -1.f;
+        sf::Vector2f wallN(0.f, 0.f);
+        if (s.wallBounces >= 0 && m_em->bossArena.active && m_em->bossArena.walled) {
+            float t;
+            sf::Vector2f n;
+            if (m_em->bossArena.rayHit(s.origin, s.dir, t, n) && t < s.range) { wallT = t; wallN = n; s.range = t; }
+        }
         for (size_t j = 0; j < m_em->physics.size(); ++j) {
             if (!b2Body_IsValid(m_em->physics[j].bodyId)) continue;
             BodyUserData* ud = bodyUD(m_em->physics[j].bodyId);
@@ -1829,7 +1867,7 @@ private:
             if (j == playerIdx) {
                 auto& ps = m_em->players[playerIdx];
                 auto& ph = m_em->healths[playerIdx];
-                if (ps.parryTimer > 0.f && s.bounce < 2) {
+                if (ps.parryTimer > 0.f && (s.bounce < 2 || s.parryHome)) {
                     // ---- MIRROR ----
                     const sf::Vector2f pc = m_em->transforms[playerIdx].position;
                     const float R = h.r + half;
@@ -1852,6 +1890,17 @@ private:
                     r.bounce = s.bounce + 1;
                     r.pierceDamage = wcfg("lancer_reflect_damage", 380.f);
                     r.killHp = wcfg("lancer_reflect_kill_hp", 500.f);
+                    // The Dreadnought's proton laser goes straight home.
+                    const size_t home = s.parryHome ? m_em->getEntityIndex(s.parryHome) : (size_t)-1;
+                    if (home != (size_t)-1) {
+                        const sf::Vector2f to = m_em->transforms[home].position - entry;
+                        const float tl = std::sqrt(to.x * to.x + to.y * to.y);
+                        if (tl > 1.f) { r.dir = to / tl; r.origin = entry + r.dir * 2.f; r.range = tl + 400.f; }
+                        r.pierceDamage = s.parryDamage;
+                        r.breach = true;
+                        r.parryHome = 0;
+                        r.wallBounces = 0;
+                    }
 
                     m_em->spawnShockRing(entry, 6.f, 80.f, 0.22f, sf::Color(250, 244, 230), 4.f, 255.f);
                     m_em->spawnShockRing(entry, 4.f, 46.f, 0.16f, parryColor(), 3.f, 240.f);
@@ -1881,6 +1930,12 @@ private:
                 if (hp.maxHp <= s.killHp) hp.currentHp = -1.f;           // through it
                 else {
                     hp.currentHp -= s.pierceDamage;
+                    // A returned proton laser: past the armour, and it breaks it.
+                    if (s.breach) {
+                        if (hp.armourMark >= 0.f) hp.armourMark -= s.pierceDamage;
+                        ++ej.protonHits;
+                        m_em->spawnShockRing(at, 10.f, 200.f, 0.35f, sf::Color(255, 220, 120), 6.f, 240.f);
+                    }
                     if (hp.currentHp > 0.f && !ej.dormant)
                         staggerEnemy(j, s.dir, 650.f, 0.8f);
                 }
@@ -1903,7 +1958,24 @@ private:
         fx.b = s.origin + s.dir * end;
         fx.width = s.width;
         fx.reflected = s.byPlayer;
+        fx.style = s.style;
         m_em->beams.push_back(fx);
+
+        // ---- Off the arena wall: a splash of sparks, and on it goes ----
+        if (wallT >= 0.f && end >= wallT - 0.5f) {
+            const sf::Vector2f hitW = s.origin + s.dir * wallT;
+            m_em->spawnImpact(hitW, sf::Color(255, 160, 80), -wallN * 300.f);
+            m_em->spawnShockRing(hitW, 4.f, 50.f, 0.2f, sf::Color(255, 200, 120), 3.f, 230.f);
+            if (s.wallBounces > 0) {
+                BeamShot nb = s;
+                const float dn = s.dir.x * wallN.x + s.dir.y * wallN.y;
+                nb.dir = s.dir - wallN * (2.f * dn);
+                nb.origin = hitW + nb.dir * 2.f;
+                nb.range = std::max(0.f, s0.range - wallT);
+                nb.wallBounces = s.wallBounces - 1;
+                if (nb.range > 20.f) traceBeam(playerIdx, nb);
+            }
+        }
         // Sparks shed along the line.
         for (int k = 0; k < 26; ++k) {
             const float t = (rand() % 1000) / 1000.f * end;
@@ -2429,6 +2501,18 @@ private:
         }
         if (sd.is<double>()) return std::max(0, static_cast<int>(sd.as<double>()));
         return 0;
+    }
+
+    /// Roll the special pickups out of entity i: a repair kit, a beacon map.
+    void dropExtras(size_t i, float kitChance, float beaconChance) {
+        const auto roll = [](float c) { return c > 0.f && (rand() % 10000) < static_cast<int>(c * 10000.f); };
+        sf::Vector2f vel(0.f, 0.f);
+        if (b2Body_IsValid(m_em->physics[i].bodyId)) {
+            const b2Vec2 v = b2Body_GetLinearVelocity(m_em->physics[i].bodyId);
+            vel = { v.x * SCALE, v.y * SCALE };
+        }
+        if (roll(kitChance)) m_em->spawnPickup(m_em->transforms[i].position, vel, 1);
+        if (roll(beaconChance)) m_em->spawnPickup(m_em->transforms[i].position, vel, 2);
     }
 
     /// Throw `amount` scrap out of entity i, carrying its momentum.

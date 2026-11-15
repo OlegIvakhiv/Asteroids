@@ -161,8 +161,18 @@ public:
         }
         targetZoom += m_zoomKick;
 
-        m_zoom += (targetZoom - m_zoom) * (1.f - std::exp(-cfg("zoom_smoothing", 5.f) * dt));
-        m_zoom = std::clamp(m_zoom, 0.75f, cfg("zoom_max", 1.32f));
+        // ---- Boss arena hold: frame the whole arena ----
+        // The zoom eases out to fit `camLockSize` and back in when the hold
+        // ends; the usual 0.75..zoom_max clamp applies only when free.
+        if (m_em->camLock && m_em->camLockSize.x > 1.f) {
+            const float fit = std::max(m_em->camLockSize.x / std::max(1.f, m_baseSize.x),
+                m_em->camLockSize.y / std::max(1.f, m_baseSize.y));
+            m_zoom += (fit + m_zoomKick - m_zoom) * (1.f - std::exp(-2.2f * dt));
+        }
+        else {
+            m_zoom += (targetZoom - m_zoom) * (1.f - std::exp(-(m_zoom > cfg("zoom_max", 1.32f) + 0.05f ? 2.2f : cfg("zoom_smoothing", 5.f)) * dt));
+            if (m_zoom <= cfg("zoom_max", 1.32f) + 0.05f) m_zoom = std::clamp(m_zoom, 0.75f, cfg("zoom_max", 1.32f));
+        }
 
         // ====================================================================
         // 5. FOLLOW + LOOK-AHEAD
@@ -174,8 +184,8 @@ public:
             lead = (vel / speed) * leadAmt;
         }
 
-        const sf::Vector2f targetCenter = tf.position + lead;
-        const float follow = cfg("camera_follow_speed", 8.f);
+        const sf::Vector2f targetCenter = m_em->camLock ? m_em->camLockCentre : tf.position + lead;
+        const float follow = m_em->camLock ? 2.6f : cfg("camera_follow_speed", 8.f);
         m_smoothCenter += (targetCenter - m_smoothCenter) * (1.f - std::exp(-follow * dt));
 
         // ====================================================================
@@ -186,6 +196,8 @@ public:
         const float devScale = m_dev ? m_dev->viewScale : 1.f;
         m_view->setSize(m_baseSize * m_zoom * devScale);
         m_view->setCenter(m_smoothCenter + m_shakeOffset);
+        m_em->camCentre = m_smoothCenter;
+        m_em->camValid = true;
         m_view->setRotation(sf::degrees(m_shakeAngle));
         m_window->setView(*m_view);
     }
@@ -222,7 +234,7 @@ public:
         // star view would outgrow the 1.5x field margin and show bare edges
         // (see COVERAGE RULE). Stars are backdrop; they do not need to agree.
         sf::View v;
-        v.setSize(m_baseSize * m_zoom);
+        v.setSize(m_baseSize * std::min(m_zoom, cfg("zoom_max", 1.32f)));   // a boss hold zooms the world, not the stars
         v.setCenter(fieldSize * 0.5f + m_shakeOffset);
         v.setRotation(sf::degrees(m_shakeAngle));
         return v;

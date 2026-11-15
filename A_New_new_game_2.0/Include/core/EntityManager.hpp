@@ -222,6 +222,8 @@ public:
         scrapPickups.clear();
         codexKills.clear();
         sounds.clear();
+        bossArena = BossArena{};
+        camLock = false;
         // NOTE: `stars` is deliberately NOT cleared -- the starfield is
         // cosmetic background, not game state, and initBackground() is
         // expensive-ish (regenerates 800 stars with an RNG loop).
@@ -229,6 +231,10 @@ public:
         entityIdMap.clear();
         nextEntityId = 1;
         scrap = 0;
+        beaconMaps = 0;
+        runKills = 0;
+        runScrap = 0;
+        bountyHeat = 0.f;
 
         timeScale = 1.f;
         hitstopFreeze = 0.f;
@@ -340,6 +346,92 @@ public:
         }
         sfx("scrap.drop", pos);
     }
+
+    /// A special pickup: kind 1 = repair kit, 2 = beacon map. Flies out of
+    /// the wreck like scrap, waits longer, and ScrapSystem's magnet takes it.
+    void spawnPickup(sf::Vector2f pos, sf::Vector2f inheritVel, uint8_t kind) {
+        ScrapPickup p;
+        p.kind = kind;
+        p.value = 0;
+        const float a = (rand() % 360) * 3.14159f / 180.f;
+        const float sp = 60.f + rand() % 80;
+        p.position = pos;
+        p.velocity = sf::Vector2f(std::cos(a), std::sin(a)) * sp + inheritVel * 0.35f;
+        p.rotation = static_cast<float>(rand() % 360);
+        p.spin = ((rand() % 2) ? 1.f : -1.f) * 60.f;
+        p.size = 12.f;
+        scrapPickups.push_back(p);
+        sfx("scrap.drop", pos, 1.f, 0.7f);
+    }
+
+    /// Beacon maps picked up and not yet decoded (PoiSystem spends them).
+    int beaconMaps = 0;
+
+    /// The run's record, carried through rift jumps (BountySystem reads it):
+    /// ships the player's fight killed, scrap ever picked up, and the heat
+    /// those kills raised (threat cost per kill; decays in BountySystem).
+    int   runKills = 0;
+    int   runScrap = 0;
+    float bountyHeat = 0.f;
+
+    // ===== BOSS ARENA (BossSystem writes it) =====
+    /// While active: nothing spawns (director, drifting rocks, bounty
+    /// hunters, POI guards), and nothing from outside gets in.
+    /// The wall is a regular polygon (the Dreadnought's: a hexagon of tether
+    /// beams). `walled` = the beams are lit: rays stop and bounce on it.
+    struct BossArena {
+        bool active = false;
+        bool walled = false;
+        sf::Vector2f centre{ 0.f, 0.f };
+        float radius = 0.f;             ///< centre to a corner
+        int   sides = 6;
+        float rot = 0.f;                ///< radians, the first corner's bearing
+
+        float apothem() const { return radius * std::cos(3.14159265f / sides); }
+        sf::Vector2f corner(int k) const {
+            const float a = rot + k * 6.2831853f / sides;
+            return centre + sf::Vector2f(std::cos(a), std::sin(a)) * radius;
+        }
+        /// Outward normal of the edge corner(k) -> corner(k+1).
+        sf::Vector2f normal(int k) const {
+            const float a = rot + (k + 0.5f) * 6.2831853f / sides;
+            return { std::cos(a), std::sin(a) };
+        }
+        /// > 0 inside: px to the nearest wall. < 0 outside.
+        float wallDist(sf::Vector2f p) const {
+            const sf::Vector2f o = p - centre;
+            float m = -1e9f;
+            for (int k = 0; k < sides; ++k) { const sf::Vector2f n = normal(k); m = std::max(m, o.x * n.x + o.y * n.y); }
+            return apothem() - m;
+        }
+        /// From inside, along unit d: distance to the wall and its outward normal.
+        bool rayHit(sf::Vector2f p, sf::Vector2f d, float& t, sf::Vector2f& n) const {
+            const sf::Vector2f o = p - centre;
+            const float a = apothem();
+            t = 1e9f;
+            for (int k = 0; k < sides; ++k) {
+                const sf::Vector2f nk = normal(k);
+                const float dn = d.x * nk.x + d.y * nk.y;
+                if (dn <= 1e-5f) continue;
+                const float tk = (a - (o.x * nk.x + o.y * nk.y)) / dn;
+                if (tk >= 0.f && tk < t) { t = tk; n = nk; }
+            }
+            return t < 1e8f;
+        }
+    } bossArena;
+    /// Camera hold: CameraSystem frames `camLockSize` px (w, h) round the
+    /// centre (the whole arena) instead of following the ship.
+    bool camLock = false;
+    sf::Vector2f camLockCentre{ 0.f, 0.f };
+    sf::Vector2f camLockSize{ 0.f, 0.f };
+    /// The camera's centre without shake (CameraSystem writes it): the
+    /// starfield scrolls with the CAMERA, not the ship.
+    sf::Vector2f camCentre{ 0.f, 0.f };
+    bool camValid = false;
+
+    /// A fresh id for EnemyComponent::linkGroup.
+    uint32_t newLinkGroup() { return ++m_linkGroups; }
+    uint32_t m_linkGroups = 0;
 
     // ===== DEV =====
     /// God mode. Written every frame by DevSystem from DevState and read ONLY

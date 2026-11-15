@@ -274,7 +274,13 @@ private:
         const levelgen::Level& L = m_level->level;
         const std::string& key = L.cellZone[static_cast<size_t>(cell)];
         const std::string before = m_zone && m_zone->def() ? skyGroup(*m_zone->def()) : std::string();
-        if (m_zone) m_zone->setByKey(key);
+        if (m_zone) {
+            // An anchored landmark (the Citadel) stands over this cell.
+            m_zone->hasAnchor = true;
+            m_zone->anchor = L.cellCentre(cell);
+            m_zone->setByKey(key);
+            m_zone->dirty = true;
+        }
         const std::string after = m_zone && m_zone->def() ? skyGroup(*m_zone->def()) : std::string();
         // A new sky is a hard cut in ZoneSystem: hide it under a short fade.
         if (announce && before != after) m_em->spawnScreenFlash(sf::Color(3, 2, 6), 0.55f, 235.f);
@@ -329,7 +335,8 @@ private:
                 mk.kind = m_em->enemies[i].dormant ? levelgen::MarkKind::Hulk : levelgen::MarkKind::Hostile;
                 mk.size = m_em->enemies[i].dormant ? 1.4f : 1.f;
             }
-            else if (ud->type == BodyType::Asteroid && m_em->healths[i].visualRadius >= 45.f) {
+            else if (ud->type == BodyType::Asteroid && m_em->healths[i].visualRadius >= 45.f
+                && !m_level->placedById.count(m_em->transforms[i].entityId)) {   // placed: the map draws those itself
                 mk.kind = levelgen::MarkKind::Hulk;
                 mk.size = std::clamp(m_em->healths[i].visualRadius / 45.f, 1.f, 2.2f);
             }
@@ -564,6 +571,39 @@ private:
                     va.append({ p0, col }); va.append({ p1, col }); va.append({ p2, col });
                     va.append({ p0, col }); va.append({ p2, col }); va.append({ p3, col });
                 }
+            // Placed objects where you have looked: the field as it was when seen.
+            const auto dot = [&](sf::Vector2f p, float worldR, sf::Color c) {
+                const float hh = std::max(worldR, k * (full ? 0.9f : 1.f));
+                va.append({ p + sf::Vector2f(-hh, -hh), c }); va.append({ p + sf::Vector2f(hh, -hh), c }); va.append({ p + sf::Vector2f(hh, hh), c });
+                va.append({ p + sf::Vector2f(-hh, -hh), c }); va.append({ p + sf::Vector2f(hh, hh), c }); va.append({ p + sf::Vector2f(-hh, hh), c });
+                };
+            for (size_t ci = 0; ci < L.placedByCell.size(); ++ci) {
+                const sf::Vector2f cc = L.cellCentre(static_cast<int>(ci));
+                const float hs = L.cellSize * 0.5f;
+                if (cc.x + hs < lo.x || cc.x - hs > hi.x || cc.y + hs < lo.y || cc.y - hs > hi.y) continue;
+                for (int oi : L.placedByCell[ci]) {
+                    const levelgen::Placed& o = L.placed[static_cast<size_t>(oi)];
+                    if (o.state == 2 || o.pos.x < lo.x || o.pos.x > hi.x || o.pos.y < lo.y || o.pos.y > hi.y) continue;
+                    const int fx = static_cast<int>((o.pos.x - m_level->fogOrigin.x) / fc), fy = static_cast<int>((o.pos.y - m_level->fogOrigin.y) / fc);
+                    if (!m_level->seen(fx, fy)) continue;
+                    dot(o.pos, o.radius * 0.8f, sf::Color(96, 104, 118));
+                }
+            }
+            // Comet streams you have flown: which way they run.
+            for (size_t ci = 0; ci < L.cellStream.size() && ci < m_level->cellVisited.size(); ++ci) {
+                if (std::isnan(L.cellStream[ci]) || !m_level->cellVisited[ci]) continue;
+                const sf::Vector2f cc = L.cellCentre(static_cast<int>(ci));
+                const sf::Vector2f f(std::cos(L.cellStream[ci]), std::sin(L.cellStream[ci])), sd(-f.y, f.x);
+                const sf::Color ac(120, 190, 230, 150);
+                for (int a = -1; a <= 1; ++a) {
+                    const sf::Vector2f base = cc + sd * (a * L.cellSize * 0.18f) - f * (L.cellSize * 0.12f);
+                    const sf::Vector2f tip = base + f * (L.cellSize * 0.24f);
+                    const float w = L.cellSize * 0.035f;
+                    va.append({ tip, ac }); va.append({ tip - f * (w * 2.2f) + sd * w, ac }); va.append({ tip - f * (w * 2.2f) - sd * w, ac });
+                    va.append({ base + sd * (w * 0.25f), ac }); va.append({ tip - f * (w * 2.f) + sd * (w * 0.25f), ac }); va.append({ tip - f * (w * 2.f) - sd * (w * 0.25f), ac });
+                    va.append({ base + sd * (w * 0.25f), ac }); va.append({ tip - f * (w * 2.f) - sd * (w * 0.25f), ac }); va.append({ base - sd * (w * 0.25f), ac });
+                }
+            }
             m_window->draw(va);
             if (full) { m_mapCache = va; m_mapCacheVersion = m_level->fogVersion; }
         }
@@ -628,6 +668,13 @@ private:
         }
         m_window->draw(blips);
 
+        // ---- Points of interest, once on the map ----
+        for (const auto& p : L.pois) {
+            if (!p.discovered) continue;
+            if (p.pos.x < lo.x - 400.f || p.pos.x > hi.x + 400.f || p.pos.y < lo.y - 400.f || p.pos.y > hi.y + 400.f) continue;
+            drawPoiGlyph(p, (full ? 8.f : 6.5f) * k, k);
+        }
+
         // ---- The rift: always marked ----
         {
             const float pulse = 0.6f + 0.4f * std::sin(m_time * 4.f);
@@ -656,6 +703,51 @@ private:
     }
 
     sf::View screenView(sf::Vector2f ws) const { return sf::View(sf::FloatRect({ 0.f, 0.f }, ws)); }
+
+    /// A POI on the map: the shape says what it is, the colour how it stands.
+    /// Amber = loot, red = a fight, grey = cleared. `h` is its half-size.
+    void drawPoiGlyph(const levelgen::Poi& p, float h, float k) {
+        const std::string& ic = p.icon;
+        int n = 4; float rot = 0.f; bool threat = false; bool ring = false;
+        if (ic == "mine") n = 3;
+        else if (ic == "outpost") { n = 4; rot = 0.785f; }
+        else if (ic == "camp") n = 5;
+        else if (ic == "rig" || ic == "crane") n = 4;
+        else if (ic == "derelict") { n = 6; }
+        else if (ic == "distress") { n = 12; threat = true; }
+        // The Dreadnought: a distress call's pulse, bigger, in blood red,
+        // ringed -- you can tell it apart once you know to look.
+        else if (ic == "battlecruiser") { n = 12; threat = true; h *= 1.35f; }
+        else if (ic == "scouts" || ic == "squad") { n = 3; rot = 3.1416f; threat = true; }
+        else if (ic == "nest" || ic == "lair") { n = 8; threat = true; }
+        else if (ic == "dock") { n = 12; ring = true; }
+        sf::Color c = threat ? sf::Color(255, 90, 70) : sf::Color(255, 190, 80);
+        if (ic == "distress") c = withA(c, 0.6f + 0.4f * std::sin(m_time * 5.f));
+        if (ic == "battlecruiser") c = sf::Color(236, 56, 76, static_cast<uint8_t>(255 * (0.6f + 0.4f * std::sin(m_time * 3.f))));
+        if (p.state == 2) c = sf::Color(120, 120, 128);
+        if (ic == "battlecruiser") {
+            sf::CircleShape o(h * 1.45f, 24);
+            o.setOrigin({ h * 1.45f, h * 1.45f });
+            o.setPosition(p.pos);
+            o.setFillColor(sf::Color::Transparent);
+            o.setOutlineThickness(k * 1.2f);
+            o.setOutlineColor(sf::Color(c.r, c.g, c.b, static_cast<uint8_t>(c.a * 0.55f)));
+            m_window->draw(o);
+        }
+        sf::CircleShape g(h, static_cast<size_t>(n));
+        g.setOrigin({ h, h });
+        g.setPosition(p.pos);
+        g.setRotation(sf::radians(rot - 1.5708f + (n == 3 ? 0.f : 0.f)));
+        g.setFillColor(ring ? sf::Color::Transparent : sf::Color(18, 12, 8, 230));
+        g.setOutlineThickness(k * (ring ? 2.2f : 1.6f));
+        g.setOutlineColor(c);
+        m_window->draw(g);
+        sf::CircleShape dot(h * 0.28f, 8);
+        dot.setOrigin({ h * 0.28f, h * 0.28f });
+        dot.setPosition(p.pos);
+        dot.setFillColor(c);
+        m_window->draw(dot);
+    }
 
     void drawMinimap(sf::Vector2f ws) {
         const levelgen::Level& L = m_level->level;
@@ -735,10 +827,16 @@ private:
         }
         const sf::Vector2f rs = toScreen(L.rift);
         text("VOID RIFT", { rs.x, rs.y + 14.f }, 12, ui::VIOLET, 1.6f, false, true);
+        for (const auto& p : L.pois) {
+            if (!p.discovered) continue;
+            const sf::Vector2f s = toScreen(p.pos);
+            text(upper(p.display) + (p.state == 2 ? " (CLEARED)" : ""), { s.x, s.y + 13.f }, 10,
+                p.state == 2 ? ui::TEXT_DEAD : withA(sf::Color(255, 200, 110), 0.9f), 1.4f, false, true);
+        }
 
         // Legend, centred under the panel; the key on its own line.
         const float ly = pos.y + size.y + 22.f;
-        const char* names[6] = { "YOU", "VOID RIFT", "HOSTILE", "LAST SEEN", "HULK / ROCK", "UNCHARTED" };
+        const char* names[7] = { "YOU", "VOID RIFT", "POINT OF INTEREST", "HOSTILE", "LAST SEEN", "HULK / ROCK", "UNCHARTED" };
         float total = 0.f;
         for (const char* nm : names) total += 34.f + textW(nm, 12);
         float lx = ws.x * 0.5f - (total - 18.f) * 0.5f;
@@ -749,6 +847,7 @@ private:
             };
         legend(ui::CYAN, "YOU");
         legend(ui::VIOLET, "VOID RIFT");
+        legend(sf::Color(255, 190, 80), "POINT OF INTEREST");
         legend(ui::RED, "HOSTILE");
         legend(sf::Color(150, 40, 30), "LAST SEEN");
         legend(sf::Color(110, 118, 130), "HULK / ROCK");

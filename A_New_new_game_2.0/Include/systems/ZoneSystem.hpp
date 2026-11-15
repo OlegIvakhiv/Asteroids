@@ -58,6 +58,7 @@
 #include "core/EntityManager.hpp"
 #include "utils/ZoneArchetypes.hpp"
 #include "utils/CitadelModel.hpp"      // builtin landmark: the Rakshari citadel
+#include "utils/LevelGen.hpp"          // in a level: blend across sub-zone borders
 #include <SFML/Graphics.hpp>
 #include <vector>
 #include <random>
@@ -72,10 +73,14 @@ public:
         m_window = ctx.drawTarget();
         m_view = ctx.gameView;
         m_zone = ctx.zone;
+        m_level = ctx.level;
 
         m_rng.seed(std::random_device{}());
         m_junk.clear();
         m_landmarks.clear();
+        m_pools.clear();
+        m_levelKey = 0;
+        if (m_zone) m_zone->blend.active = false;
 
         // A restart rebuilds every system, but the zone itself survives it --
         // so force one apply so the starfield and props match whatever zone
@@ -93,6 +98,15 @@ public:
      * looking at when they switch.
      */
     void applyIfDirty() {
+        if (inLevel()) { applyLevel(); return; }
+        if (m_zone) m_zone->blend.active = false;
+        if (m_wasLevel) {   // left a level: everything comes back the plain way
+            m_wasLevel = false;
+            m_pools.clear();
+            m_citadelRT.clear();
+            m_applied.valid = false;
+            if (m_zone) m_zone->dirty = true;
+        }
         if (!m_zone || !m_zone->dirty) return;
         m_zone->dirty = false;
 
@@ -110,7 +124,9 @@ public:
         const bool sameSky = was && m_applied.sky == skyGroup(*z)
             && m_applied.stars == z->starCount && m_applied.tint == z->starTint;
         if (!sameSky) applySky(*z);
-        if (!was || !sameLayer(m_applied.landmarks, z->landmarks)) {
+        const bool anchorMoved = z->landmarks.anchored
+            && (m_applied.hasAnchor != m_zone->hasAnchor || m_applied.anchor != m_zone->anchor);
+        if (!was || !sameLayer(m_applied.landmarks, z->landmarks) || anchorMoved) {
             m_citadelRT.clear();   // landmark slots are about to mean different props
             seedLayer(z->landmarks, m_landmarks);
         }
@@ -122,6 +138,8 @@ public:
         m_applied.tint = z->starTint;
         m_applied.junk = z->junk;
         m_applied.landmarks = z->landmarks;
+        m_applied.hasAnchor = m_zone->hasAnchor;
+        m_applied.anchor = m_zone->anchor;
     }
 
     /**
@@ -135,6 +153,8 @@ public:
         m_time += dt;
         const sf::Vector2f cam = m_view ? m_view->getCenter() : sf::Vector2f(0.f, 0.f);
 
+        if (inLevel()) { updateLevel(cam, dt); return; }
+
         // Farthest first, so a base sits BEHIND the scrap drifting past it.
         step(m_landmarks, cam, dt);
         step(m_junk, cam, dt);
@@ -143,7 +163,11 @@ public:
     }
 
     /// Live prop count, for the dev stats panel.
-    size_t propCount() const { return m_junk.size() + m_landmarks.size(); }
+    size_t propCount() const {
+        size_t n = m_junk.size() + m_landmarks.size();
+        for (const auto& p : m_pools) n += p.props.size();
+        return n;
+    }
 
 private:
     struct Prop {
@@ -155,6 +179,7 @@ private:
         float spin = 0.f;           ///< deg/sec, signed
         float pad = 1.6f;           ///< its layer's wrap padding
         float alpha = 0.5f;         ///< from its layer, by depth
+        bool  anchored = false;     ///< stands over ZoneState::anchor, never wraps
     };
 
     // ========================================================================
@@ -200,10 +225,16 @@ private:
     }
 
     void seedLayer(const zonearch::PropLayer& L, std::vector<Prop>& out) {
+        const sf::Vector2f cam = m_view ? m_view->getCenter() : sf::Vector2f(0.f, 0.f);
+        seedLayerAt(L, out, cam, L.anchored && m_zone && m_zone->hasAnchor,
+            m_zone ? m_zone->anchor : sf::Vector2f());
+    }
+
+    void seedLayerAt(const zonearch::PropLayer& L, std::vector<Prop>& out, sf::Vector2f cam,
+        bool anchored, sf::Vector2f anchor) {
         out.clear();
         if (!m_zone || !m_zone->registry || !L.active()) return;
 
-        const sf::Vector2f cam = m_view ? m_view->getCenter() : sf::Vector2f(0.f, 0.f);
         const sf::Vector2f half = halfExtent(L.pad);
 
         std::uniform_real_distribution<float> dDepth(L.depthMin, L.depthMax);
@@ -237,6 +268,13 @@ private:
             p.pad = L.pad;
             // Seeded in LAYER space, around this prop's own layer centre.
             p.layerPos = cam * p.depth + sf::Vector2f(dx(m_rng), dy(m_rng));
+            // Anchored: world = P + C(1-d) puts it exactly over the anchor
+            // when the camera is there, and parallaxes like any far prop.
+            if (anchored) {
+                p.anchored = true;
+                p.layerPos = anchor * p.depth
+                    + sf::Vector2f(dx(m_rng), dy(m_rng)) * 0.15f;
+            }
             out.push_back(p);
         }
     }
@@ -246,6 +284,7 @@ private:
     void step(std::vector<Prop>& layer, sf::Vector2f cam, float dt) {
         for (auto& p : layer) {
             p.rotation += p.spin * dt;
+            if (p.anchored) continue;
 
             const sf::Vector2f half = halfExtent(p.pad);
             std::uniform_real_distribution<float> jx(-half.x, half.x);
@@ -265,10 +304,190 @@ private:
     }
 
     // ========================================================================
+    // IN A LEVEL: everything blended by POSITION, nothing reseeded at a border
+    // ========================================================================
+    // Outside a level a zone change re-rolls the sky and the props, which is
+    // right for the menu and the feed. In a level the player crosses sub-zone
+    // borders every minute, and a re-roll there is a visible cut. So in a level:
+    //   - ONE starfield for the whole level, re-tinted and thinned every frame
+    //     from the cells' weights at the camera (LevelGen::cellWeights);
+    //   - void and dust colours blended the same way (ZoneState::blend);
+    //   - one prop pool per distinct layer near the camera, kept while it is
+    //     near; each prop fades by how much ITS OWN zone owns the spot it
+    //     appears at, so Rakshari junk shows over the border into open space
+    //     and thins out across it;
+    //   - every anchored landmark (the Citadel) placed when the level starts,
+    //     over its cell, and never reseeded -- visible from next door.
+    static constexpr float BLEND_BAND = 3500.f;   ///< px past a border over which two sub-zones mix
+
+    struct Pool {
+        zonearch::PropLayer layer;
+        bool landmark = false;
+        int  anchorCell = -1;          ///< >= 0: anchored landmark over that cell, always shown
+        std::vector<Prop> props;
+        std::vector<float> mul;        ///< per-prop alpha weight, this frame
+        std::vector<char> owns;        ///< per level cell: does its zone have this layer?
+        float idle = 0.f;              ///< seconds since a nearby cell last wanted it
+    };
+
+    bool inLevel() const { return m_level && m_level->active && m_zone && m_zone->registry; }
+
+    const zonearch::ZoneDef* zoneOfCell(int ci) const {
+        const auto& L = m_level->level;
+        if (ci < 0 || static_cast<size_t>(ci) >= L.cellZone.size()) return nullptr;
+        return m_zone->registry->byId(m_zone->registry->idOf(L.cellZone[static_cast<size_t>(ci)]));
+    }
+
+    void applyLevel() {
+        m_zone->dirty = false;
+        m_wasLevel = true;
+        const auto& L = m_level->level;
+        const uint32_t gen = m_zone->registry->generation();
+        const uint64_t key = (static_cast<uint64_t>(L.seed) << 16) ^ static_cast<uint64_t>(L.index + 1);
+        const sf::Vector2f cam = m_view ? m_view->getCenter() : sf::Vector2f(0.f, 0.f);
+
+        if (m_levelKey != key || m_levelGen != gen || m_starBase.empty()) {
+            m_levelKey = key;
+            m_levelGen = gen;
+            m_pools.clear();
+            m_citadelRT.clear();
+            m_junk.clear();
+            m_landmarks.clear();
+            m_applied.valid = false;
+            // One starfield for the whole level, at the densest sub-zone's count.
+            int maxStars = 1;
+            for (size_t ci = 0; ci < L.cells.size(); ++ci)
+                if (const auto* z = zoneOfCell(static_cast<int>(ci))) maxStars = std::max(maxStars, z->starCount);
+            if (m_em && m_window) {
+                m_em->initBackground(m_window->getSize(), maxStars);
+                m_starBase.clear();
+                for (const auto& s : m_em->stars) m_starBase.push_back(s.color);
+            }
+            m_starMax = static_cast<float>(maxStars);
+            m_lastStarKey = -1.f;
+            // Every anchored landmark in the level, from the first frame.
+            for (size_t ci = 0; ci < L.cells.size(); ++ci) {
+                const auto* z = zoneOfCell(static_cast<int>(ci));
+                if (!z || !z->landmarks.active() || !z->landmarks.anchored) continue;
+                Pool p;
+                p.layer = z->landmarks;
+                p.landmark = true;
+                p.anchorCell = static_cast<int>(ci);
+                seedLayerAt(p.layer, p.props, cam, true, L.cellCentre(static_cast<int>(ci)));
+                m_pools.push_back(std::move(p));
+            }
+        }
+
+        // ---- The blend at the camera ----
+        L.cellWeights(cam, BLEND_BAND, m_w);
+        float v[3] = {}, d[4] = {}, t[3] = {}, ta = 0.f, sc = 0.f, wsum = 0.f;
+        for (const auto& cw : m_w) {
+            const auto* z = zoneOfCell(cw.first);
+            if (!z) continue;
+            const float w = cw.second;
+            v[0] += z->voidColor.r * w; v[1] += z->voidColor.g * w; v[2] += z->voidColor.b * w;
+            d[0] += z->dustColor.r * w; d[1] += z->dustColor.g * w; d[2] += z->dustColor.b * w; d[3] += z->dustAlpha * w;
+            t[0] += z->starTint.r * w; t[1] += z->starTint.g * w; t[2] += z->starTint.b * w;
+            ta += z->starAlphaScale * w;
+            sc += z->starCount * w;
+            wsum += w;
+        }
+        if (wsum <= 0.f) return;
+        for (float& x : v) x /= wsum;
+        for (float& x : d) x /= wsum;
+        for (float& x : t) x /= wsum;
+        ta /= wsum; sc /= wsum;
+        const auto u8 = [](float x) { return static_cast<std::uint8_t>(std::clamp(x, 0.f, 255.f)); };
+        auto& b = m_zone->blend;
+        b.active = true;
+        b.voidColor = sf::Color(u8(v[0]), u8(v[1]), u8(v[2]));
+        b.dustColor = sf::Color(u8(d[0]), u8(d[1]), u8(d[2]));
+        b.dustAlpha = d[3];
+
+        // ---- Stars: tint, alpha and density, from the untinted originals ----
+        const float starKey = t[0] + t[1] * 7.f + t[2] * 49.f + ta * 1000.f + sc * 0.37f;
+        if (m_em && m_starBase.size() == m_em->stars.size() && std::fabs(starKey - m_lastStarKey) > 0.01f) {
+            m_lastStarKey = starKey;
+            const float keep = std::clamp(sc / std::max(1.f, m_starMax), 0.f, 1.f);
+            for (size_t i = 0; i < m_em->stars.size(); ++i) {
+                const sf::Color c = m_starBase[i];
+                // A fixed threshold per star: a thinner sky loses stars one by
+                // one, it does not fade them all. (A different hash from the
+                // Void's thinning, so the two do not take the same stars.)
+                const float u = static_cast<float>((i * 40503u + 977u) % 1000u) / 1000.f;
+                const float on = std::clamp((keep - u) / 0.04f, 0.f, 1.f);
+                m_em->stars[i].color = sf::Color(
+                    u8(c.r * t[0] / 255.f), u8(c.g * t[1] / 255.f), u8(c.b * t[2] / 255.f),
+                    u8(c.a * ta * on));
+            }
+        }
+    }
+
+    void touch(const zonearch::PropLayer& layer, bool landmark, sf::Vector2f cam) {
+        if (!layer.active()) return;
+        for (auto& p : m_pools)
+            if (p.anchorCell < 0 && p.landmark == landmark && sameLayer(p.layer, layer)) { p.idle = 0.f; return; }
+        Pool p;
+        p.layer = layer;
+        p.landmark = landmark;
+        seedLayerAt(layer, p.props, cam, false, {});
+        m_pools.push_back(std::move(p));
+    }
+
+    void updateLevel(sf::Vector2f cam, float dt) {
+        const auto& L = m_level->level;
+
+        // Pools for every layer within reach: seeded BEFORE their props can
+        // show, so they never pop in; dropped a while after the last one left.
+        L.cellWeights(cam, BLEND_BAND + 5000.f, m_wWide);
+        for (auto& p : m_pools) if (p.anchorCell < 0) p.idle += dt;
+        for (const auto& cw : m_wWide) {
+            const auto* z = zoneOfCell(cw.first);
+            if (!z) continue;
+            touch(z->junk, false, cam);
+            if (!z->landmarks.anchored) touch(z->landmarks, true, cam);
+        }
+        bool droppedLandmark = false;
+        m_pools.erase(std::remove_if(m_pools.begin(), m_pools.end(), [&](const Pool& p) {
+            const bool drop = p.anchorCell < 0 && p.idle > 3.f;
+            if (drop && p.landmark) droppedLandmark = true;
+            return drop; }), m_pools.end());
+        if (droppedLandmark) m_citadelRT.clear();   // landmark slots shift
+
+        // Each prop fades by how much its own zone owns where it appears.
+        for (auto& p : m_pools) {
+            step(p.props, cam, dt);
+            p.mul.assign(p.props.size(), 1.f);
+            if (p.anchorCell >= 0) continue;
+            p.owns.assign(L.cells.size(), 0);
+            for (size_t ci = 0; ci < L.cells.size(); ++ci) {
+                const auto* z = zoneOfCell(static_cast<int>(ci));
+                if (!z) continue;
+                const zonearch::PropLayer& zl = p.landmark ? z->landmarks : z->junk;
+                p.owns[ci] = zl.active() && !(p.landmark && zl.anchored) && sameLayer(zl, p.layer);
+            }
+            for (size_t k = 0; k < p.props.size(); ++k) {
+                const Prop& pr = p.props[k];
+                const sf::Vector2f world = pr.layerPos + cam * (1.f - pr.depth);
+                L.cellWeights(world, BLEND_BAND, m_wp);
+                float w = 0.f;
+                for (const auto& cw : m_wp) if (p.owns[static_cast<size_t>(cw.first)]) w += cw.second;
+                p.mul[k] = w;
+            }
+        }
+
+        // Farthest first: landmarks, then the junk in front of them.
+        size_t slot = 0;
+        for (const auto& p : m_pools) if (p.landmark) { draw(p.props, cam, &p.mul, slot); slot += p.props.size(); }
+        for (const auto& p : m_pools) if (!p.landmark) draw(p.props, cam, &p.mul, 0);
+    }
+
+    // ========================================================================
     // DRAW
     // ========================================================================
 
-    void draw(const std::vector<Prop>& layer, sf::Vector2f cam) const {
+    void draw(const std::vector<Prop>& layer, sf::Vector2f cam,
+        const std::vector<float>* mul = nullptr, size_t slotBase = 0) const {
         if (layer.empty()) return;
 
         sf::VertexArray fills(sf::PrimitiveType::Triangles);
@@ -281,17 +500,19 @@ private:
         for (size_t pi = 0; pi < layer.size(); ++pi) {
             const auto& p = layer[pi];
             if (!p.def || !p.def->valid()) continue;
+            const float m = (mul && pi < mul->size()) ? (*mul)[pi] : 1.f;
+            if (m < 0.004f) continue;
 
             // A builtin model draws itself, now, in layer order.
             if (!p.def->builtin.empty()) {
-                if (p.def->builtin == "RAKSHARI_CITADEL") drawCitadel(p, pi, cam);
+                if (p.def->builtin == "RAKSHARI_CITADEL") drawCitadel(p, slotBase + pi, cam, m);
                 continue;
             }
 
             // Far props are smaller and dimmer. Drawing a distant prop at full
             // size but slow motion is the classic broken-parallax look.
             const float sizeF = p.scale * (0.5f + 0.5f * p.depth);
-            const float alphaF = p.alpha;
+            const float alphaF = p.alpha * m;
 
             const float rad = p.rotation * 3.14159265f / 180.f;
             const float ca = std::cos(rad), sa = std::sin(rad);
@@ -372,7 +593,7 @@ private:
      * is full of 0.6px detail. Re-rendered at 30 Hz -- it is a distant,
      * slow thing, and the sprite itself still moves every frame.
      */
-    void drawCitadel(const Prop& p, size_t slot, sf::Vector2f cam) const {
+    void drawCitadel(const Prop& p, size_t slot, sf::Vector2f cam, float alphaMul = 1.f) const {
         const float sizeF = p.scale * (0.5f + 0.5f * p.depth);
         const sf::Vector2f origin = p.layerPos + cam * (1.f - p.depth);
 
@@ -404,7 +625,7 @@ private:
             }
         }
 
-        const float alpha = std::clamp(p.alpha, 0.f, 1.f);
+        const float alpha = std::clamp(p.alpha * alphaMul, 0.f, 1.f);
 
         if (cr->failed) {
             // Correct shapes, slightly glassy layering -- still better than nothing.
@@ -469,6 +690,17 @@ private:
     sf::RenderTarget* m_window = nullptr;   ///< ctx.drawTarget(): the window, or a hidden world's texture
     sf::View* m_view = nullptr;
     zonearch::ZoneState* m_zone = nullptr;
+    levelgen::LevelState* m_level = nullptr;
+
+    // ---- In a level (see "IN A LEVEL") ----
+    std::vector<Pool> m_pools;
+    std::vector<sf::Color> m_starBase;       ///< the level starfield before tint
+    float    m_starMax = 1.f;
+    float    m_lastStarKey = -1.f;
+    uint64_t m_levelKey = 0;
+    uint32_t m_levelGen = 0;
+    bool     m_wasLevel = false;
+    std::vector<std::pair<int, float>> m_w, m_wWide, m_wp;   ///< reused weight buffers
 
     /// What was last applied, by value (sub-zone diffing; see applyIfDirty).
     struct Applied {
@@ -478,6 +710,8 @@ private:
         int stars = 0;
         sf::Color tint;
         zonearch::PropLayer junk, landmarks;
+        bool hasAnchor = false;
+        sf::Vector2f anchor;
     } m_applied;
     std::vector<Prop> m_junk;        ///< Near layer: drifting scrap
     std::vector<Prop> m_landmarks;   ///< Far layer: stations and bases

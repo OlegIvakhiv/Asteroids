@@ -1864,10 +1864,281 @@ enemy_archetypes.BLOODSEEKER.duel_range = overlay(enemy_archetypes.BLOODSEEKER, 
 
 
 -- ============================================================================
+-- DREADNOUGHT -- mini-boss. The Rakshari battlecruiser.
+--
+-- Never spawned by the director: one waits at each "Heavy Battlecruiser
+-- Activity" POI (pois.lua, Empty Space, 1-2 a map). BossSystem flies it --
+-- AISystem and TurretSystem leave it alone -- and everything that makes the
+-- fight lives in `boss = { ... }` below.
+--
+--   AMBUSH    come within `trigger_range` (shoot it from further out and it
+--             comes for you): the war horn, a pulse, and six TETHER BUOYS fly
+--             off the hull, lock in a hexagon `arena_radius` round you and
+--             light up -- a high-voltage cage. Nothing else gets in, nothing
+--             spawns, rounds die on the beams, the camera frames the cage.
+--   HE CIRCLES YOU, and runs two things at once: the HULL picks attacks at
+--             random (`weights`), and every gun the hull is not using runs
+--             its OWN loop (`gun_weights`: bursts and the small shotgun cone).
+--             Nothing the hull has is skipped more than `max_skip` picks
+--             running. The PROTON LASER closes a series (`proton_series`):
+--             every gun falls silent for it -- it is about the parry.
+--             The SHOTGUN SECTORS and the BOMBARDMENT are solo as well: guns
+--             silent, and never while his rockets are still in the air.
+--   ARMOUR    `armour` (0.8) off every hit -- until his PROTON LASER is
+--             parried back into him, or he rams the cage: BREACHED for
+--             `breach_time` s.
+--   PHASE 2   under `phase2_at` HP: everything faster (`p1_speed` is the
+--             slower first phase), and the
+--             TURBO-DRIVE -- he tears round the cage dumping every gun on
+--             you, then rams, lightning fast.
+--   DEATH     overheats (cracks, glow), bursts into `chunks` breakable
+--             pieces of his own hull that barely drift, and drops `loot`.
+--
+-- Hull: the approved mockup, variant B, 15% longer, no engines. The red dot
+-- at (0,-4.6) is the REACTOR CORE (BossSystem draws it: red, orange when
+-- breached, white-hot when it dies).
+-- ----------------------------------------------------------------------------
+enemy_archetypes.DREADNOUGHT = derive {
+    display = "Dreadnought",
+    faction = "RAKSHARI",
+
+    hull = {
+        { 0, -59.8 }, { 6, -48.3 }, { 10, -46 }, { 14, -28.75 },
+        { 24, -32.2 }, { 20, -11.5 }, { 35, -5.75 }, { 42, 17.25 },
+        { 50, 23 }, { 38, 21.85 }, { 30, 25.3 }, { 34, 43.7 },
+        { 38, 52.9 }, { 28, 41.4 }, { 18, 34.5 }, { 10, 48.3 },
+        { 0, 41.4 }, { -10, 48.3 }, { -18, 34.5 }, { -28, 41.4 },
+        { -38, 52.9 }, { -34, 43.7 }, { -30, 25.3 }, { -38, 21.85 },
+        { -50, 23 }, { -42, 17.25 }, { -35, -5.75 }, { -20, -11.5 },
+        { -24, -32.2 }, { -14, -28.75 }, { -10, -46 }, { -6, -48.3 },
+    },
+    plates = {
+        { points = { { 0, -58.77 }, { 5.4, -48.41 }, { 0, -42.2 }, { -5.4, -48.41 } },
+          shade = 1.6, mirror = false, accent = true },   -- ram prow
+        { points = { { -6, -41.4 }, { 6, -41.4 }, { 8, -4.6 }, { 7, 27.6 }, { 4, 39.1 }, { -4, 39.1 }, { -7, 27.6 }, { -8, -4.6 } },
+          shade = 0.62, mirror = false },   -- dark spine
+        { points = { { -3, -39.1 }, { 3, -39.1 }, { 4, 34.5 }, { -4, 34.5 } },
+          shade = 1.28, mirror = false },   -- light rib
+        { points = { { 0, -43.7 }, { 8, -36.8 }, { 10, -23 }, { 0, -11.5 } },
+          shade = 1.28 },   -- forward deck
+        { points = { { 15, -23 }, { 22, -25.3 }, { 18, -9.2 }, { 12, -9.2 } },
+          shade = 1.28, mirror = false },   -- shoulder plate starboard
+        { points = { { -15, -23 }, { -22, -25.3 }, { -18, -9.2 }, { -12, -9.2 } },
+          shade = 0.62, mirror = false },   -- shoulder plate port
+        { points = { { 22, -2.3 }, { 35, -2.3 }, { 38, 13.8 }, { 25, 20.7 } },
+          shade = 0.62 },   -- wing plate
+        { points = { { 25.08, 0.97 }, { 28.74, -0.2 }, { 32.74, 16.48 }, { 29.08, 17.64 } },
+          shade = 0.36 },   -- pod tube
+        { points = { { 25.85, 1.87 }, { 27.97, 1.2 }, { 31.97, 15.57 }, { 29.85, 16.25 } },
+          shade = 0.95 },   -- pod bore
+        { points = { { 29.51, -0.44 }, { 33.18, -1.6 }, { 37.18, 15.07 }, { 33.51, 16.23 } },
+          shade = 0.36 },   -- pod tube
+        { points = { { 30.28, 0.47 }, { 32.4, -0.21 }, { 36.4, 14.17 }, { 34.28, 14.84 } },
+          shade = 0.95 },   -- pod bore
+    },
+    scars = {
+        { { 12, -6.9 }, { 34, 0 } },
+        { { -12, -6.9 }, { -34, 0 } },
+        { { 14, 25.3 }, { 28, 23 } },
+        { { -14, 25.3 }, { -28, 23 } },
+    },
+    turrets = { { x = 0, y = -23 }, { x = -18, y = 11.5 }, { x = 18, y = 11.5 } },
+
+    scale                = 2.0,    -- r ~130 px: a Barge and a half
+    hitbox_scale         = 0.92,
+    scar_width           = 1.4,
+    turret_size          = 16.0,
+    turret_enabled       = false,  -- BossSystem aims the three guns
+    thruster_rate        = 0.0,    -- no engines on the Rakshari hulls
+    color = { r = 184, g = 64, b = 54 },
+
+    density              = 30.0,
+    lineardrag_factor    = 0.0,    -- flown by velocity, not by force
+    angulardrag_factor   = 0.0,
+    hp                   = 5000.0,
+    score_reward         = 12000,
+    scrap_drop           = { 150, 190 },
+    beacon_drop          = 0.0,    -- the loot below is guaranteed instead
+    stagger_resist       = 1.0,
+    stun_resist          = 1.0,
+    fire_rate            = 999.0,
+    attack_range         = 0.0,
+    storm_enabled        = false,
+    ram_enabled          = false,
+    summon_enabled       = false,
+    personality_variance = false,
+
+    -- the guns' rounds (BossSystem reads bullet_* as the base round)
+    bullet_speed         = 640.0,
+    bullet_damage        = 9.0,
+    bullet_lifetime      = 3.2,
+    bullet_iframes       = 0.25,
+    -- the wing pods (same rocket as the Maniac's, per these keys). They leave
+    -- sideways (`rocket_spread` in the boss table) and turn gently, so they
+    -- swing out on a big curve and come at you from the left and the right.
+    rocket_speed         = 440.0,
+    rocket_track_time    = 2.4,
+    rocket_track_turn    = 95.0,    -- deg/s: a wide arc, not a snap
+    rocket_skid_turn     = 25.0,
+    rocket_fuse          = 4.6,
+    rocket_impact_damage = 6.0,
+    rocket_blast_radius  = 140.0,
+    rocket_blast_damage  = 16.0,
+
+    spawn_weight         = 0.0,
+    summon_only          = true,
+    max_active           = 2,
+    threat_cost          = 8,      -- bounty heat on the kill (a Barge is 6)
+    ambush_chance        = 0.0,
+
+    wreckage             = false,  -- his hull becomes the chunks, not flying shards
+
+    boss = {
+        bar_name        = "DREADNOUGHT",
+        trigger_range   = 1000.0,   -- px from the hull
+        arena_radius    = 800.0,    -- centre to a buoy (the hexagon's corner)
+        view_margin     = 250.0,    -- px of the world kept in frame round the cage (room for the boss bar)
+        horn_time       = 2.0,      -- s from the horn to the fight
+        buoy_flight     = 0.6,      -- s a buoy takes to its corner
+        buoy_stagger    = 0.07,     -- s between buoys leaving the hull
+        beam_ignite     = 0.1,      -- s a beam takes to cross, corner to corner
+        beam_wave       = 14.0,     -- px the beams writhe
+        beam_crackle    = 7.0,      -- px of jitter on top
+        beam_touch_damage = 0.0,    -- touching the beams: a zap and a shove; damage if > 0
+        armour          = 0.80,
+        breach_time     = 6.0,
+        phase2_at       = 0.50,
+        p1_speed        = 0.85,     -- every tell and interval / this: phase 1 is 15% slower
+        p2_speed        = 1.0,      -- ...and phase 2 runs at full speed
+
+        -- he CIRCLES you, facing you
+        orbit_radius    = 420.0,
+        orbit_radius_p2 = 340.0,
+        orbit_speed     = 255.0,    -- px/s round you
+        orbit_speed_p2  = 300.0,
+        orbit_flip      = { 2.5, 5.0 },   -- s between changes of direction
+        turn_rate       = 68.0,     -- deg/s, the hull
+        turn_rate_p2    = 80.0,
+        gun_traverse    = 200.0,    -- deg/s, each turret
+
+        -- THE HULL: weighted random, gaps in s between its attacks
+        max_skip        = 4,
+        gap             = { 0.53, 1.0 },
+        gap_p2          = { 0.45, 0.85 },
+        weights         = { volley = 2, rockets = 2, bombard = 2.0, spin = 1.4, sectors = 1.6 },
+        weights_p2      = { volley = 1.5, rockets = 1.6, bombard = 1.9, spin = 1.4, sectors = 1.5, drift = 2.6 },
+        -- the proton laser is not in the weights: it ENDS a series of these
+        proton_series   = { 3, 5 },   -- never before 3 other attacks, always by the 5th
+        proton_series_p2 = { 3, 4 },
+        proton_chance   = 0.4,        -- per pick once the series is long enough
+
+        -- THE GUNS: each one not held by the hull runs its own loop
+        gun_weights     = { burst = 3, blast = 2 },
+        gun_cd          = { 0.82, 1.65 },  -- s a gun rests between its own actions
+        gun_cd_p2       = { 0.7, 1.4 },
+        gun_busy_max    = 2,        -- guns acting on their own at once
+        gun_busy_max_p2 = 2,
+        -- burst: a short fan
+        burst_tell      = 0.25,
+        burst_rounds    = 4,
+        burst_interval  = 0.07,
+        burst_spread    = 16.0,
+        burst_damage    = 9.0,
+        -- blast: the small shotgun -- one gun's cone, the Barge's tell
+        blast_tell      = 0.45,     -- tracks for 70% of it, then holds
+        blast_half      = 20.0,     -- deg
+        blast_range     = 700.0,
+        blast_pellets   = 9,
+        blast_damage    = 8.0,
+
+        -- VOLLEY: every gun's burst at once
+        volley_tell     = 0.35,
+        volley_rounds   = 6,
+        volley_spread   = 24.0,
+        volley_interval = 0.07,
+        volley_stagger  = 0.12,     -- s between guns (0 in phase 2)
+        volley_damage   = 9.0,
+
+        -- ROCKETS: two per wing pod
+        rockets         = 4,
+        rocket_spread   = 100.0,    -- deg off his nose they leave at, each side
+        rocket_tell     = 0.45,
+        rocket_interval = 0.1,
+
+        -- BOMBARDMENT: the guns lob shells; markers show where. No dodge, no parry.
+        -- SOLO (no gun fire with it) and CHAINED: 1-3 bombardments, each one
+        -- landing before the next is marked.
+        bomb_chain      = { 1, 3 },
+        bomb_chain_p2   = { 1, 3 },
+        bomb_chain_gap  = 0.3,      -- s between one landing and the next marking
+        bomb_delay      = 1.65,     -- s shell flight = marker to impact
+        bomb_delay_p2   = 1.4,
+        bomb_fire_interval = 0.05,  -- s between shells leaving the guns
+        bomb_radius     = 105.0,
+        bomb_damage     = 0.30,     -- x your max HP
+        bomb_spacing    = 210.0,
+        bomb_random     = { 7, 9 },
+
+        -- SPIN: the guns whirl, a tight circular storm
+        spin_windup     = 0.6,
+        spin_time       = 3.0,
+        spin_time_p2    = 3.0,
+        spin_rate       = 230.0,
+        spin_interval   = 0.06,
+        spin_speed      = 430.0,
+        spin_damage     = 8.0,
+
+        -- SHOTGUN SECTORS: wedges the length of the cage, in turn. SOLO: guns silent
+        sectors         = 4,
+        sectors_p2      = 4,
+        sector_half     = 24.0,
+        sector_step     = 40.0,
+        sector_tell     = 0.7,
+        sector_interval = 0.3,
+        sector_pellets  = 22,
+        sector_damage   = 10.0,
+
+        -- PROTON LASER: the bow gun charges a green beam; it bounces off the
+        -- cage, and sometimes he BANKS it off a wall at you. PARRY IT.
+        proton_charge   = 1.1,
+        proton_lock     = 0.22,
+        proton_width    = 22.0,
+        proton_range    = 5000.0,
+        proton_bounces  = 2,        -- off the cage walls
+        proton_bounces_p2 = 3,
+        proton_bank     = 0.45,     -- chance it is aimed off a wall, not at you
+        proton_damage   = 0.45,     -- x your max HP
+        proton_reflect  = 450.0,    -- what a parried one does to HIM, past the armour
+
+        -- TURBO-DRIVE + RAM (phase 2)
+        drift_time      = 3.6,
+        drift_speed     = 1350.0,
+        drift_lane      = 200.0,    -- px inside the cage wall
+        drift_fire_interval = 0.15, -- s between rounds, per gun, while he drifts
+        drift_damage    = 8.0,
+        ram_windup      = 0.55,
+        ram_speed       = 2600.0,
+        ram_damage      = 0.50,     -- x your max HP
+        ram_knock       = 1600.0,
+        ram_stun        = 6.0,      -- s you are out of it
+        wall_damage     = 300.0,    -- what the cage does to HIM, past the armour
+        wall_stun       = 6.0,
+
+        -- DEATH
+        death_time      = 3.2,
+        chunks          = { 4, 6 },
+        chunk_type      = "DREAD_CHUNK",
+        chunk_damping   = 3.5,      -- they settle within a second of the blast
+        loot            = { kits = 2, beacons = 2 },
+    },
+}
+
+
+-- ============================================================================
 -- ARCHETYPE ORDER -- APPEND ONLY
 -- ============================================================================
 
-archetype_order = { "WARDOG", "RAIDER", "BARGE", "BERSERKER", "MANIAC", "BLOODSEEKER" }
+archetype_order = { "WARDOG", "RAIDER", "BARGE", "BERSERKER", "MANIAC", "BLOODSEEKER", "DREADNOUGHT" }
 
 
 -- ============================================================================
@@ -1971,3 +2242,39 @@ squad_ai = {
 -- ============================================================================
 
 enemy_config = enemy_archetypes.RAIDER
+-- ============================================================================
+-- SOCIAL AI (AISystem note 50): who hears about a fight
+-- ============================================================================
+-- Any player damage puts the victim in COMBAT. Linked units (a POI's guards,
+-- a Barge and its Wardogs, a Bloodseeker and his escort, a squad, a hunter
+-- party) go into COMBAT together. The rest is radius and chance:
+ai_social = {
+    combat_call        = 1700,   -- px: a unit FIGHTING you puts patrols this close on ALERT, at you
+    alert_call         = 650,    -- px: a unit SEARCHING makes patrols this close curious...
+    alert_join         = 0.45,   -- ...this share of them follow him to the same spot
+    death_call         = 1500,   -- px: a kill alarms everyone this close to the wreck
+    death_player_range = 4500,   -- px: (a ship that vanished farther from you than this was culled, not killed)
+    listen_cooldown    = 3.0,    -- s before a unit that heard (or ignored) a call can hear another
+}
+
+-- ============================================================================
+-- BOUNTY (BountySystem.hpp): kill enough and the Rakshari send hunters
+-- ============================================================================
+bounty = {
+    trigger        = 10,     -- heat (threat cost of kills) before a contract can be put out
+    decay          = 0.05,   -- heat lost per second
+    chance         = 0.5,    -- per kill past the trigger
+    first_cooldown = 60,     -- s into a sector before the first hunt can start
+    cooldown       = 120,    -- s after a hunt ends before the next
+    warn_time      = 8,      -- s of warning before they arrive
+    spawn_distance = 2600,   -- px from you, off-screen
+    step_down      = 0.3,    -- chance the party is one tier below your best
+    -- Your record as one number: sectors cleared, scrap ever picked up, kills.
+    rank = { per_sector = 1.0, per_scrap = 1 / 150, per_kill = 1 / 12 },
+    tiers = {
+        { name = "Raider bounty party",  min_rank = 0, units = { "RAIDER", "RAIDER", "RAIDER", "BERSERKER" } },
+        { name = "Berserker hunt",       min_rank = 2, units = { "BERSERKER", "BERSERKER", "BERSERKER", "MANIAC", "MANIAC" } },
+        { name = "Barge war party",      min_rank = 4, units = { "BARGE", "BARGE", "RAIDER", "RAIDER", "RAIDER", "RAIDER" } },
+        { name = "The Bloodseeker's own", min_rank = 6, units = { "BLOODSEEKER", "RAIDER", "RAIDER", "BERSERKER", "BERSERKER" } },
+    },
+}

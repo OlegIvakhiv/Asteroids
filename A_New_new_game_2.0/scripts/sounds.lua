@@ -362,6 +362,71 @@ sounds = {
     ["amb.citadel"] = { files = { "sfx/amb.citadel.wav" },
         gain = 0.11, max_voices = 1, priority = 5, loop = true },  -- Rust Citadel furnace (far)
 
+    -- HUD · exploration mode (synth placeholders) -------------------------
+    ["hud.mode.hunt"] = { files = { "sfx/hud.mode.hunt.wav" },
+        gain = 0.55, max_voices = 1, priority = 2, min_interval = 0.5 },  -- CRUISE -> HUNT: something is on you (two falling pulses, 0.30 s)
+    ["hud.mode.cruise"] = { files = { "sfx/hud.mode.cruise.wav" },
+        gain = 0.40, max_voices = 1, priority = 4, min_interval = 0.5 },  -- HUNT -> CRUISE: clear (soft rising sweep, 0.55 s)
+
+    -- Player · repair kit (synth placeholders) -------------------------------
+    ["player.repair.start"] = { files = { "sfx/player.repair.start.wav" },
+        gain = 0.60, max_voices = 1, priority = 2 },  -- Q: ratchet clicks + rising servo (0.55 s)
+    ["player.repair.done"] = { files = { "sfx/player.repair.done.wav" },
+        gain = 0.45, max_voices = 1, priority = 3 },  -- Mend finished: two bright notes (0.6 s)
+    ["player.repair.break"] = { files = { "sfx/player.repair.break.wav" },
+        gain = 0.65, max_voices = 1, priority = 2 },  -- A hit broke it: fizz + falling tone (0.35 s)
+
+    ["player.repair.pickup"] = { files = { "sfx/player.repair.pickup.wav" },
+        gain = 0.60, max_voices = 1, priority = 2 },  -- Repair kit picked up: clank + bright note (0.4 s)
+
+    -- HUD · points of interest (synth placeholders) ---------------------------
+    ["hud.poi.discovered"] = { files = { "sfx/hud.poi.discovered.wav" },
+        gain = 0.45, max_voices = 1, priority = 3, min_interval = 0.4 },  -- A POI went on the map: ping + two tones (0.75 s)
+    ["hud.poi.cleared"] = { files = { "sfx/hud.poi.cleared.wav" },
+        gain = 0.45, max_voices = 1, priority = 3 },  -- Its guards are dead: three resolving notes (0.8 s)
+    ["hud.beacon.pickup"] = { files = { "sfx/hud.beacon.pickup.wav" },
+        gain = 0.55, max_voices = 1, priority = 2 },  -- Beacon map picked up: data chirp (0.35 s)
+    ["hud.beacon.decoded"] = { files = { "sfx/hud.beacon.decoded.wav" },
+        gain = 0.50, max_voices = 1, priority = 2 },  -- Beacon decoded, a POI charted: rising arpeggio (0.9 s)
+    ["hud.zone.charted"] = { files = { "sfx/hud.zone.charted.wav" },
+        gain = 0.45, max_voices = 1, priority = 3 },  -- Half a sub-zone seen, all of it charted: swell + chord (1.1 s)
+    ["shield.deflect"] = { files = { "sfx/shield.deflect.wav" },
+        gain = 0.40, pitch_var = 0.10, max_voices = 3, priority = 4, min_interval = 0.08 },  -- A rock turned away by a POI shield (0.3 s)
+
+    -- HUD · bounty hunters (synth placeholders) --------------------------------
+    ["hud.bounty.warning"] = { files = { "sfx/hud.bounty.warning.wav" },
+        gain = 0.55, max_voices = 1, priority = 1 },  -- A price on your head: two-tone klaxon x3 (1.5 s)
+    ["hud.bounty.arrive"] = { files = { "sfx/hud.bounty.arrive.wav" },
+        gain = 0.60, max_voices = 1, priority = 1 },  -- The hunters drop in: low whoosh + hit (1.0 s)
+    ["hud.bounty.cleared"] = { files = { "sfx/hud.bounty.cleared.wav" },
+        gain = 0.45, max_voices = 1, priority = 2 },  -- The last hunter is dead: resolving chord (1.0 s)
+
+    -- The Dreadnought (synth placeholders) ---------------------------------------
+    ["boss.horn"] = { files = { "sfx/boss.horn.wav" },
+        gain = 0.80, max_voices = 1, priority = 1, bus = "tells" },  -- War horn: two low brass blasts (2.6 s); phase 2 plays it lower
+    ["boss.wall.rise"] = { files = { "sfx/boss.wall.rise.wav" },
+        gain = 0.60, max_voices = 1, priority = 2 },  -- The arena wall comes up: rumble swell (1.6 s)
+    ["boss.proton.charge"] = { files = { "sfx/boss.proton.charge.wav" },
+        gain = 0.60, max_voices = 1, priority = 1, bus = "tells" },  -- Proton shell charging on the bow gun: rising whine (1.5 s)
+    ["boss.proton.fire"] = { files = { "sfx/boss.proton.fire.wav" },
+        gain = 0.70, max_voices = 1, priority = 1 },  -- Proton shell leaves the gun: thump + zap (0.6 s)
+    ["boss.proton.burst"] = { files = { "sfx/boss.proton.burst.wav" },
+        gain = 0.80, max_voices = 2, priority = 1 },  -- Proton shell goes off: blast + electric tail (1.3 s)
+    ["boss.bomb.mark"] = { files = { "sfx/boss.bomb.mark.wav" },
+        gain = 0.50, max_voices = 1, priority = 1, bus = "tells" },  -- Bombardment markers go down: three pips (0.5 s)
+    ["boss.bomb.impact"] = { files = { "sfx/boss.bomb.impact.wav" },
+        gain = 0.55, pitch_var = 0.12, max_voices = 4, priority = 3, min_interval = 0.04 },  -- A shell lands: crump (0.9 s)
+    ["boss.breach"] = { files = { "sfx/boss.breach.wav" },
+        gain = 0.70, max_voices = 1, priority = 1 },  -- ARMOUR BREACHED: metal crack + falling tone (1.0 s)
+    ["boss.ram.wall"] = { files = { "sfx/boss.ram.wall.wav" },
+        gain = 0.85, max_voices = 1, priority = 1 },  -- He rams the wall: huge impact (1.6 s)
+    ["boss.death.alarm"] = { files = { "sfx/boss.death.alarm.wav" },
+        gain = 0.60, max_voices = 1, priority = 1 },  -- Reactor critical: accelerating alarm (3.2 s)
+    ["boss.death.blast"] = { files = { "sfx/boss.death.blast.wav" },
+        gain = 0.90, max_voices = 1, priority = 1 },  -- The Dreadnought bursts (3.0 s)
+    ["hud.boss.defeated"] = { files = { "sfx/hud.boss.defeated.wav" },
+        gain = 0.55, max_voices = 1, priority = 1 },  -- DREADNOUGHT DESTROYED: brass chord (2.2 s)
+
     -- Voices (ElevenLabs) ------------------------------------------------------
     -- Add the files to assets/sfx and uncomment. Until then the Maniac's
     -- ignite plays without its laugh, and the console says so once.

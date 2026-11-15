@@ -189,6 +189,10 @@ namespace zonearch {
         /// is supposed to look at and wonder about.
         float alphaFar = 0.30f;
         float alphaNear = 0.55f;
+        /// `anchor = true`: the layer's props sit over a fixed world point
+        /// (ZoneState::anchor) instead of wrapping around the camera -- ONE
+        /// Citadel that stays where it is, not a pool that follows you.
+        bool  anchored = false;
 
         std::vector<uint8_t> props;   ///< Prop ids, equal weight
 
@@ -453,6 +457,7 @@ namespace zonearch {
             L.pad = t["pad"].get_or(defPad);
             L.alphaFar = std::clamp(t["alpha_far"].get_or(defAlphaFar), 0.f, 1.f);
             L.alphaNear = std::clamp(t["alpha_near"].get_or(defAlphaNear), 0.f, 1.f);
+            L.anchored = t["anchor"].get_or(false);
 
             sol::optional<sol::table> use = t["use"];
             if (use) {
@@ -595,6 +600,22 @@ namespace zonearch {
         /// (at or past it). Written by LevelSystem; the starfield thins and
         /// the dust fades with it. Always 0 without a level.
         float   voidFade = 0.f;
+        /// Where an anchored landmark layer stands (LevelSystem: the centre of
+        /// the sub-zone cell the player entered). hasAnchor false = wrap as usual.
+        bool         hasAnchor = false;
+        sf::Vector2f anchor;
+
+        /// The look of the zone(s) at the camera, blended across sub-zone
+        /// borders by position (ZoneSystem, every frame, in a level only).
+        /// `active` false = read def() as before. Consumers that tint by zone
+        /// (window clear, dust) read this first, so a border is a gradient
+        /// and never a cut.
+        struct Blend {
+            bool      active = false;
+            sf::Color voidColor{ 2, 3, 5 };
+            sf::Color dustColor{ 170, 200, 255 };
+            float     dustAlpha = 150.f;
+        } blend;
 
         /// The live zone, or nullptr when zones.lua failed to load. EVERY
         /// consumer must handle nullptr: that is the "engine behaves exactly

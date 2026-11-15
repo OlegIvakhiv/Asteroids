@@ -190,6 +190,19 @@ namespace ui {
      *        SFML has no tracking control, and tight-set caps read as a word
      *        while spaced caps read as a readout.
      */
+    /// How wide label() will draw `s` -- same spacing, for centring.
+    inline float labelWidth(const sf::Font* font, const std::string& s, unsigned size, float tracking = 2.f) {
+        if (!font) return 0.f;
+        float w = 0.f;
+        for (char ch : s) {
+            sf::Text g(*font);
+            g.setCharacterSize(size);
+            g.setString(std::string(1, static_cast<char>(std::toupper(ch))));
+            w += g.getLocalBounds().size.x + tracking + (ch == ' ' ? size * 0.25f : 1.f);
+        }
+        return w;
+    }
+
     inline void label(sf::RenderTarget& t, const sf::Font* font, float x, float y,
         const std::string& s, unsigned size, sf::Color c,
         float tracking = 2.f) {

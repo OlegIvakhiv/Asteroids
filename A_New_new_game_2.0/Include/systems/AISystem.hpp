@@ -332,6 +332,7 @@
 #include "utils/components.hpp"
 #include "utils/Afterimage.hpp"
 #include "core/EnemyArchetypes.hpp"
+#include "utils/LevelGen.hpp"
 #include <unordered_map>
 #include <cfloat>
 #include <cmath>
@@ -352,6 +353,7 @@ public:
         m_lua = ctx.lua;
         m_registry = ctx.enemyRegistry;
         m_dev = ctx.dev;
+        m_level = ctx.level;
 
         // Entity ids restart at 1 on every run (EntityManager::reset). A brain
         // cached for id 12 last run would otherwise be inherited by whatever
@@ -420,9 +422,13 @@ public:
         // ---- Squad: budget, engagement, flank slots (notes 42-46) ----
         updateSquad(dt, playerIdx, truePlayerPos);
 
+        // ---- Social: who hears about the fight (note 50) ----
+        socialPass(dt, truePlayerPos, truePlayerVel);
+
         for (size_t i = 0; i < m_em->physics.size(); ++i) {
             BodyUserData* ud = bodyUD(m_em->physics[i].bodyId);
             if (!ud || ud->type != BodyType::Enemy) continue;
+            if (m_em->enemies[i].isBoss) continue;   // BossSystem flies it
 
             auto& tf = m_em->transforms[i];
             auto& health = m_em->healths[i];
@@ -728,6 +734,19 @@ public:
                     finalDesiredVel = finalDesiredVel * (1.f - pull) + (d / dl) * (maxSpeed * 7.f) * pull;
                 }
             }
+
+            // ---- A POI guard holds its post until it has seen you ----
+            if (ec.guardLeash > 0.f && ai.currentState == EnemyState::PATROL) {
+                const sf::Vector2f d = ec.guardHome - enemyPos;
+                const float dl = std::sqrt(d.x * d.x + d.y * d.y);
+                if (dl > ec.guardLeash) {
+                    const float pull = std::clamp((dl - ec.guardLeash) / 300.f, 0.f, 1.f);
+                    finalDesiredVel = finalDesiredVel * (1.f - pull) + (d / dl) * (maxSpeed * 4.f) * pull;
+                }
+            }
+
+            // ---- Fields: route around the rock piles instead of into them ----
+            finalDesiredVel = navSteer(dt, ai, enemyPos, playerPos, finalDesiredVel);
 
             // ================================================================
             // STEERING — mass‑compensated
@@ -2084,7 +2103,8 @@ private:
     void spitWardogs(const TransformComponent& tf, EnemyComponent& ec, b2BodyId bodyId,
         sol::table& config, sf::Vector2f playerPos)
     {
-        (void)ec;
+        // The Barge and its Wardogs fight as one (social pass).
+        if (ec.linkGroup == 0) ec.linkGroup = m_em->newLinkGroup();
         const std::string key = config["summon_key"].get_or<std::string>("WARDOG");
         const uint8_t wid = m_registry->idOf(key);
         if (wid == enemyarch::INVALID_ARCHETYPE) return;
@@ -2118,6 +2138,7 @@ private:
             }
             auto& ne = m_em->enemies[idx];
             ne.summonedBy = self;
+            ne.linkGroup = ec.linkGroup;
             ne.visualState = EnemyState::COMBAT;
             AIState& na = m_aiCache[id];
             na.currentState = EnemyState::COMBAT;
@@ -3774,6 +3795,138 @@ private:
     /// gathered once a frame so the per-unit test is a short loop rather than
     /// a Lua read per pair. An escort-only source (the Barge) buffs nobody:
     /// its radius is 0, it only gives the units it `escort_takes` a leader.
+    // ========================================================================
+    // SOCIAL -- nobody fights alone, nobody ignores a fight (note 50)
+    // ========================================================================
+    //   HIT       any player damage (plasma, rift bolt, thrown rock, blast --
+    //             provoke() at every site) puts the unit in COMBAT, knowing
+    //             where you are. Being shot is not "suspicious".
+    //   LINKED    a POI's guards, a Barge and its Wardogs, a Bloodseeker and
+    //             his escort, a squad, a hunter party (linkGroup): one in
+    //             COMBAT, all in COMBAT. Linked sleepers wake.
+    //   COMBAT    a unit fighting you calls it in: PATROL units within
+    //             combat_call go ALERT on where you are -- most come looking,
+    //             the existing pack logic pulls them in once they see you.
+    //   ALERT     a unit searching makes PATROL units within alert_call
+    //             curious -- some of them (alert_join), not all: they tag
+    //             along to the same spot.
+    //   DEATH     a ship killed near you alarms everyone within death_call:
+    //             ALERT on the wreck, searching toward where you are.
+    // Each listener rolls once per `listen_cooldown`, so a crowd does not
+    // re-roll every frame. Tuning: `ai_social = { ... }` in enemy.lua.
+    void socialPass(float dt, sf::Vector2f playerPos, sf::Vector2f playerVel) {
+        const auto sc = [&](const char* k, float d) {
+            sol::optional<sol::table> t = (*m_lua)["ai_social"];
+            return t ? (*t)[k].get_or(d) : d;
+        };
+        const float combatCall = sc("combat_call", 1700.f);
+        const float alertCall  = sc("alert_call", 650.f);
+        const float alertJoin  = sc("alert_join", 0.45f);
+        const float deathCall  = sc("death_call", 1500.f);
+        const float deathNear  = sc("death_player_range", 4500.f);
+        const float listenCd   = sc("listen_cooldown", 3.0f);
+
+        m_social.clear();
+        std::unordered_map<uint32_t, char> groupCombat;
+        std::unordered_map<uint32_t, sf::Vector2f> nowPos;
+        for (size_t i = 0; i < m_em->physics.size() && i < m_em->enemies.size(); ++i) {
+            const BodyUserData* ud = bodyUD(m_em->physics[i].bodyId);
+            if (!ud || ud->type != BodyType::Enemy) continue;
+            auto& ec = m_em->enemies[i];
+            const uint32_t id = m_em->transforms[i].entityId;
+            AIState& ai = m_aiCache[id];
+            if (ai.socialCooldown > 0.f) ai.socialCooldown -= dt;
+            nowPos[id] = m_em->transforms[i].position;
+            if (ec.feralTimer > 0.f) continue;   // death-chaos: fighting someone else
+
+            // HIT: shot means fighting.
+            if (ec.attackedByPlayer) {
+                ec.attackedByPlayer = false;
+                if (!ec.dormant) forceCombat(i, ai, ec, playerPos, playerVel);
+            }
+            m_social.push_back({ i, id, m_em->transforms[i].position, ai.currentState, ec.linkGroup, ec.dormant });
+            if (ec.linkGroup && !ec.dormant && ai.currentState == EnemyState::COMBAT) groupCombat[ec.linkGroup] = 1;
+        }
+
+        // LINKED
+        for (const SocialUnit& u : m_social) {
+            if (!u.link || !groupCombat.count(u.link) || u.s == EnemyState::COMBAT) continue;
+            auto& ec = m_em->enemies[u.i];
+            if (ec.dormant) { ec.provoked = true; continue; }   // linked sleepers come up
+            forceCombat(u.i, m_aiCache[u.id], ec, playerPos, playerVel);
+        }
+
+        // COMBAT and ALERT calls
+        for (const SocialUnit& b : m_social) {
+            if (b.dormant || b.s == EnemyState::PATROL) continue;
+            const bool fighting = b.s == EnemyState::COMBAT;
+            const float R = fighting ? combatCall : alertCall;
+            const AIState& bai = m_aiCache[b.id];
+            for (const SocialUnit& l : m_social) {
+                if (l.id == b.id || l.dormant) continue;
+                AIState& lai = m_aiCache[l.id];
+                if (lai.currentState != EnemyState::PATROL || lai.socialCooldown > 0.f) continue;
+                const float dx = l.p.x - b.p.x, dy = l.p.y - b.p.y;
+                if (dx * dx + dy * dy > R * R) continue;
+                lai.socialCooldown = listenCd;
+                if (!fighting && (rand() % 1000) >= static_cast<int>(alertJoin * 1000.f)) continue;
+                // A fight is reported with where you ARE; a search with where he is looking.
+                hearOf(l.i, lai, fighting ? playerPos : bai.lastKnownPlayerPos,
+                    fighting ? playerVel : bai.lastKnownPlayerVel);
+            }
+        }
+
+        // DEATH: whoever vanished this frame close to you was killed.
+        for (const auto& kv : m_socialLastPos) {
+            if (nowPos.count(kv.first)) continue;
+            const sf::Vector2f d = kv.second;
+            if (std::hypot(d.x - playerPos.x, d.y - playerPos.y) > deathNear) continue;
+            const sf::Vector2f toward = playerPos - d;
+            const float tl = std::max(1.f, std::hypot(toward.x, toward.y));
+            for (const SocialUnit& l : m_social) {
+                if (l.dormant) continue;
+                AIState& lai = m_aiCache[l.id];
+                if (lai.currentState != EnemyState::PATROL) continue;
+                const float dx = l.p.x - d.x, dy = l.p.y - d.y;
+                if (dx * dx + dy * dy > deathCall * deathCall) continue;
+                // Search the wreck, leaning the way the shots came from.
+                hearOf(l.i, lai, d, toward / tl * 160.f);
+            }
+        }
+        m_socialLastPos.swap(nowPos);
+    }
+
+    /// Straight into the fight, knowing where you are.
+    void forceCombat(size_t i, AIState& ai, EnemyComponent& ec, sf::Vector2f playerPos, sf::Vector2f playerVel) {
+        if (ai.currentState == EnemyState::COMBAT) { ai.timeSinceSeen = 0.f; ai.lastKnownPlayerPos = playerPos; return; }
+        sol::table config = m_registry->resolve(ec.archetype).config;
+        ai.suspicion = 1.f;
+        ai.hasSeenPlayer = true;
+        ai.timeSinceSeen = 0.f;
+        ai.lastKnownPlayerPos = playerPos;
+        ai.lastKnownPlayerVel = playerVel;
+        enterState(ai, ec, EnemyState::COMBAT, AlertIcon::Spotted, config);
+        ec.visualState = ai.currentState;
+        (void)i;
+    }
+
+    /// Heard about you: come and look.
+    void hearOf(size_t i, AIState& ai, sf::Vector2f where, sf::Vector2f vel) {
+        auto& ec = m_em->enemies[i];
+        sol::table config = m_registry->resolve(ec.archetype).config;
+        const float toAlert = config["suspicion_alert"].get_or(0.18f);
+        ai.suspicion = std::max(ai.suspicion, toAlert + 0.1f);
+        ai.lastKnownPlayerPos = where;
+        ai.lastKnownPlayerVel = vel;
+        ai.hasSeenPlayer = true;
+        ai.timeSinceSeen = 0.5f;
+        enterState(ai, ec, EnemyState::ALERT, AlertIcon::Suspicion, config);
+        ai.searchTimer = config["alert_search_time"].get_or(6.0f) + 2.f;
+        ec.visualState = ai.currentState;
+    }
+
+    struct SocialUnit { size_t i; uint32_t id; sf::Vector2f p; EnemyState s; uint32_t link; bool dormant; };
+
     void collectPackSources() {
         m_packSources.clear();
         for (size_t j = 0; j < m_em->physics.size() && j < m_em->enemies.size(); ++j) {
@@ -4497,6 +4650,67 @@ private:
 
     static bool isMelee(const sol::table& config) {
         return config["maneuver_profile"].get_or<std::string>("standard") == "melee";
+    }
+
+    // ========================================================================
+    // NAVIGATION -- placed fields
+    // ========================================================================
+    /**
+     * @brief Bend a desired velocity around the level's still objects.
+     *
+     * Everything above decides WHERE a unit wants to go; this only decides
+     * HOW to get there when a rock pile is in the way. Open space costs one
+     * grid lookup: if nothing blocks the next ~700 px, the velocity passes
+     * through untouched. Blocked, the unit gets an A* route to its goal
+     * (the player while it is fighting, otherwise a point down its heading)
+     * and follows the corners, replanning at most every 0.7 s. Close to a
+     * pile it is also pushed off it, so a unit can graze a field without
+     * scraping along every rock.
+     */
+    sf::Vector2f navSteer(float dt, AIState& ai, sf::Vector2f pos, sf::Vector2f playerPos, sf::Vector2f v) {
+        if (!m_level || !m_level->active || !m_level->level.hasNav()) return v;
+        const levelgen::Level& L = m_level->level;
+        ai.navRepath = std::max(0.f, ai.navRepath - dt);
+        const float speed = std::sqrt(v.x * v.x + v.y * v.y);
+        if (speed < 1.f && ai.navPath.empty()) return v;
+
+        const bool hunting = ai.currentState == EnemyState::COMBAT || ai.currentState == EnemyState::ALERT;
+        const sf::Vector2f dir = speed > 1.f ? v / speed : sf::Vector2f(0.f, 0.f);
+        const sf::Vector2f goal = hunting ? (ai.currentState == EnemyState::COMBAT ? playerPos : ai.lastKnownPlayerPos)
+            : pos + dir * 1500.f;
+
+        // Push off anything right next to the hull.
+        sf::Vector2f push(0.f, 0.f);
+        static const sf::Vector2f probes[8] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
+            { 0.707f, 0.707f }, { 0.707f, -0.707f }, { -0.707f, 0.707f }, { -0.707f, -0.707f } };
+        for (const auto& pr : probes)
+            if (L.navBlocked(pos + pr * 130.f)) push -= pr;
+
+        const bool blockedAhead = !L.navClear(pos, pos + dir * 700.f);
+        if (!blockedAhead && ai.navPath.empty())
+            return push.x == 0.f && push.y == 0.f ? v : v + push * (std::max(speed, 60.f) * 0.6f);
+
+        // Straight shot open again: drop the route.
+        if (!ai.navPath.empty() && L.navClear(pos, goal)) ai.navPath.clear();
+
+        if (blockedAhead && ai.navPath.empty() && ai.navRepath <= 0.f) {
+            ai.navRepath = 0.7f;
+            ai.navIdx = 0;
+            if (!L.navPath(pos, goal, ai.navPath)) ai.navPath.clear();
+        }
+        if (ai.navPath.empty())
+            return v + push * (std::max(speed, 60.f) * 0.8f);
+
+        while (ai.navIdx < ai.navPath.size()) {
+            const sf::Vector2f d = ai.navPath[ai.navIdx] - pos;
+            if (d.x * d.x + d.y * d.y > 150.f * 150.f) break;
+            ++ai.navIdx;
+        }
+        if (ai.navIdx >= ai.navPath.size()) { ai.navPath.clear(); return v; }
+        const sf::Vector2f to = ai.navPath[ai.navIdx] - pos;
+        const float tl = std::max(1.f, std::sqrt(to.x * to.x + to.y * to.y));
+        const float s = std::max(speed, 60.f);
+        return (to / tl) * s * 0.85f + v * 0.15f + push * (s * 0.5f);
     }
 
     // ========================================================================
@@ -5455,6 +5669,7 @@ private:
     sol::state* m_lua = nullptr;
     const enemyarch::EnemyRegistry* m_registry = nullptr;
     DevState* m_dev = nullptr;
+    levelgen::LevelState* m_level = nullptr;
 
     float m_noiseTime = 0.f;
     sf::Vector2f m_playerVel;            ///< This frame's player velocity, px/s
@@ -5496,4 +5711,6 @@ private:
     SquadSlot    m_sqSlot;
     float        m_curDistToPlayer = 0.f;
     std::unordered_map<uint32_t, AIState> m_aiCache;
+    std::vector<SocialUnit> m_social;                     ///< social pass: this frame's units
+    std::unordered_map<uint32_t, sf::Vector2f> m_socialLastPos;   ///< social pass: last frame's positions, to spot deaths
 };

@@ -220,6 +220,22 @@ struct PlayerComponent {
     float    dodgeVerdictFlash = 0.f;  // HUD "PERFECT DODGE" readout
     bool     dodgeVerdictBash = false; // ...it was a PERFECT SHOULDER BASH
 
+    // ---- Exploration: CRUISE vs HUNT (CruiseSystem) ----
+    // 0 = HUNT (an enemy is on you), 1 = full CRUISE. Drops to 0 the instant
+    // something engages, fades back in over cruise.fade_in once it is over.
+    // InputSystem scales turbo force and drain by it, WeaponSystem shot cost.
+    float cruise = 0.f;
+    bool  cruiseBlocked = false;       // a dense sub-zone (zones.lua cruise = false)
+    int   huntedBy = 0;                // enemies engaged right now (HUD)
+
+    // ---- Repair kits (RepairSystem) ----
+    // Q spends one: the hull slowly mends by half its max. While it runs the
+    // ship crawls and cannot shoot or parry (the dodge still works); any hit
+    // stops it, and the rest of that kit is lost.
+    int   repairKits = 2;
+    bool  repairing = false;
+    float repairLeft = 0.f;            // hp still to give
+    float repairPulse = 0.f;           // drives the yellow outline
 };
 
 // ============================================================================
@@ -373,10 +389,11 @@ struct RenderComponent {
     ///   UnstableCore  the vessel breathes orange (and faster when hurt)
     /// None for everything else, including the MAGMATIC rock, which keeps
     /// its own renderer untouched.
-    enum class FieldStyle : uint8_t { None = 0, Rock, Scrap, UnstableCore };
+    enum class FieldStyle : uint8_t { None = 0, Rock, Scrap, UnstableCore, Poi };
     FieldStyle fieldStyle = FieldStyle::None;
 
-    struct FieldFx { sf::Vector2f p; float r = 1.f; float phase = 0.f; };
+    /// Poi: fieldFx are LIGHTS -- `c` their colour, `blink` steady or flashing.
+    struct FieldFx { sf::Vector2f p; float r = 1.f; float phase = 0.f; sf::Color c{ 255, 170, 60 }; bool blink = false; };
     std::vector<FieldFx>      fieldFx;       ///< ores (rock) / rivets (scrap), local px
     std::vector<sf::Vector2f> glintSpots;    ///< scrap corners, local px
     float fieldGlowR = 0.f;                  ///< core pulse radius / glint radius, px
@@ -468,6 +485,7 @@ struct ScrapPickup {
     float age = 0.f;                    // Seconds since it dropped
     float size = 4.f;                   // Cube edge, px
     int   value = 1;                    // Scrap credited on pickup
+    uint8_t kind = 0;                   // 0 scrap, 1 repair kit, 2 beacon map
     bool  pulled = false;               // Inside the magnet this frame (drawn with a streak)
 };
 
@@ -502,6 +520,18 @@ struct BeamShot {
     uint32_t ownerId = 0;               ///< Never hits this entity
     bool     byPlayer = false;          ///< A reflection: the player's now
     int      bounce = 0;
+
+    // ---- The Dreadnought's proton laser ----
+    /// Wall bounces left inside a boss arena (EntityManager::bossArena):
+    /// -1 = walls ignored (the Bloodseeker), 0 = stops at the wall,
+    /// N = reflects off it N more times.
+    int      wallBounces = -1;
+    /// A parry sends it straight home to this hull (not off the shield's
+    /// curve) for `parryDamage`, past the armour, and breaches it.
+    uint32_t parryHome = 0;
+    float    parryDamage = 0.f;
+    bool     breach = false;            ///< This one breaches a boss's armour
+    int      style = 0;                 ///< 0 bone-white (Bloodseeker), 1 proton green
 };
 
 /// The drawn beam: core + rim, fading over its life.
@@ -511,6 +541,7 @@ struct BeamFx {
     float maxTimer = 0.35f;
     float width = 14.f;
     bool  reflected = false;
+    int   style = 0;                    ///< BeamShot::style
 };
 
 struct ShockRing {
@@ -625,6 +656,25 @@ struct HealthComponent {
     /// the archetype at death, so an F5 retune applies to ships already alive.
     uint16_t scrapMin = 0;
     uint16_t scrapMax = 0;
+    /// Extra loot on destruction (POI caches, loot barges): chance of a repair
+    /// kit pickup and of a beacon map pickup.
+    float kitChance = 0.f;
+    float beaconChance = 0.f;
+    /// A POI structure: takes hits (the flash shows them) and never breaks.
+    bool  indestructible = false;
+
+    // ---- Boss (BossSystem) ----
+    /// Damage reduction 0..1, applied in ONE place: DamageSystem folds every
+    /// HP drop since `armourMark` by (1 - armour) before its death check, so
+    /// bullets, blasts, rams and the Rift burst are all armoured alike.
+    /// armourMark < 0 = armour off (every ordinary unit).
+    float armour = 0.f;
+    float armourMark = -1.f;
+    /// HP floors at 0 instead of dying: the owner (BossSystem) plays the
+    /// death out, then sets this false and HP below zero.
+    bool  holdDeath = false;
+    /// Never culled by distance (the arena wall: the camera holds it all).
+    bool  noCull = false;
 };
 
 // ============================================================================
@@ -983,7 +1033,38 @@ struct EnemyComponent {
 
     /// Call at every site where the PLAYER damages this unit. Harmless on an
     /// awake one, so call sites never need to check.
-    void provoke() { if (dormant) provoked = true; }
+    void provoke() { playerHitTimer = 5.f; attackedByPlayer = true; if (dormant) provoked = true; }
+    /// Set by provoke(): the player hurt this unit, by ANY means (plasma, a
+    /// rift bolt, a thrown rock, a blast). AISystem's social pass turns it
+    /// into COMBAT next frame -- whoever is shot knows he is in a fight.
+    bool attackedByPlayer = false;
+    /// Units that fight as ONE: a POI's guards, a Barge and its Wardogs, a
+    /// Bloodseeker and his escort, a squad, a hunter party. One of them in
+    /// COMBAT puts them all in COMBAT. 0 = on its own.
+    uint32_t linkGroup = 0;
+    /// >0 for a few seconds after the player last damaged this unit -- that
+    /// engages it for CRUISE/HUNT even before its AI turns round.
+    float playerHitTimer = 0.f;
+    /// A POI's loot carrier (the barge in a squad): more scrap, and its own
+    /// odds of a repair kit and a beacon map on top of the usual.
+    float lootScale = 1.f;
+    float lootKitChance = 0.f;
+    float lootBeaconChance = 0.f;
+    /// A POI guard stays near its post while it has not seen you.
+    sf::Vector2f guardHome;
+    float guardLeash = 0.f;            // 0 = free to roam
+    /// No overhead health bar (a boss: its bar is on the HUD).
+    bool  hideHpBar = false;
+
+    // ---- Boss (BossSystem drives it; AISystem and TurretSystem skip it) ----
+    bool  isBoss = false;
+    /// Each turret mount aims on its own: RenderSystem reads these instead of
+    /// turretAngle when perMount is set. Heat 0..1 = the barrel tell, 1 = flash.
+    bool  perMount = false;
+    float mountAngle[4] = { 0.f, 0.f, 0.f, 0.f };
+    float mountHeat[4] = { 0.f, 0.f, 0.f, 0.f };
+    /// Parried proton beams that struck this hull (BossSystem breaches on it).
+    int   protonHits = 0;
 
     /// Dormant or still rebooting: engines and guns are cold.
     bool powered() const { return !dormant && wakeTimer <= 0.f; }
@@ -1159,6 +1240,7 @@ struct AIState {
 
     // ---- Unprompted evasive jukes ----
     float chaosDodgeTimer = 0.f;        // Counts down to the next random juke
+    float socialCooldown = 0.f;         // social pass: no re-roll on hearing of a fight until this runs out
     float panicLevel = 0.f;             // 0..1, rises when nearby threats stack up
 
     // ---- Dodge burst envelope (for the animation) ----
@@ -1173,4 +1255,9 @@ struct AIState {
     // ---- Punish gating ----
     float dodgePunishCooldown = 0.f;    // Stops one bullet chaining into repeat staggers
     float threatSeenTimer = 0.f;        // >0 = a real threat is inbound, suppresses idle jukes
+
+    // ---- Navigation through placed fields (AISystem::navSteer) ----
+    std::vector<sf::Vector2f> navPath;  // corners to the goal, string-pulled
+    size_t navIdx = 0;
+    float  navRepath = 0.f;             // s until the route may be recomputed
 };
